@@ -1,0 +1,6 @@
+{
+  "host": "testpc.example.lan",
+  "user": "rig",
+  "keyPath": "C:\\Users\\you\\.ssh\\testrig_ed25519",
+  "remoteQueueRoot": "C:\\TestRig\\queue"
+}

@@ -54,8 +54,10 @@ How to switch Steam into offline mode (menu path) is unverified: see the Steam d
 
 - Run in **windowed mode**.
 - Turn **"Stop Game on Focus Lost" off**, otherwise the game pauses while unattended.
-- **[OPEN]** The exact key name in `BannerlordConfig.txt` is not yet determined. Find it by
-  toggling the option in the game and diffing the config file before and after.
+- The agent sets this itself before every run: `StopGameOnFocusLost=False`,
+  `AutoSaveInterval=-1` and `EnableTutorialHints=False` in
+  `Documents\Mount and Blade II Bannerlord\Configs\BannerlordConfig.txt` (the same keys the
+  CoherentWarAI `Run-SoakTest.ps1` patches).
 
 ## e. SSH access from the dev PC
 
@@ -80,21 +82,42 @@ ssh -i <dev-pc-key> <user>@<test-pc> whoami
 
 ## f. Install the agent
 
-`agent\Install-TestRigAgent.ps1` **does not exist yet** (planned for wave 2). Intended behavior:
+1. Check the execution policy for the session user:
 
-- Copies the agent to `C:\TestRig\agent\`.
+```powershell
+Get-ExecutionPolicy -List
+```
+
+   If every scope is `Undefined`, the effective policy is `Restricted` (measured on the test PC,
+   Windows 11 Pro, PowerShell 5.1: `Get-ExecutionPolicy` returned `Restricted`) and
+   `powershell -File` refuses the agent. The owner decides; the rig never bypasses it. A common choice for unsigned local
+   scripts is:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+2. Run the installer from the repo copy on the test PC:
+
+```powershell
+powershell -NoProfile -File agent\Install-TestRigAgent.ps1
+```
+
+What the installer does:
+
+- Copies the agent to `C:\TestRig\agent\` and creates `agent.config.json` from the example if
+  none exists. Set `gamePath` in it to the Bannerlord install folder.
 - Registers a scheduled task that starts the agent **at logon of the current user**, with
   logon type **Interactive** and run level **Limited** (no elevation), for the current user.
 - The agent polls `C:\TestRig\queue\jobs` every 10 s and holds the named mutex
   `Global\BannerlordTestRigAgent` to prevent double starts.
 
-Run it as `powershell -File agent\Install-TestRigAgent.ps1` with the machine's execution policy
-left as configured (do not bypass it; sign the script or set an appropriate policy per the
-Microsoft documentation).
-
 ## g. Capture the baseline config
 
-The rig restores this configuration before every run. Capture it once, after steps a to d:
+Planned for a later wave (TODO #7): the rig will restore this configuration before every run.
+Until then the agent only patches the keys listed in section d and keeps no backup
+(`baselineRestored` in `agent-run.json` is `null`). Capture the baseline once anyway, after
+steps a to d, so it exists when restore arrives:
 
 ```powershell
 New-Item -ItemType Directory -Force C:\TestRig\baseline | Out-Null

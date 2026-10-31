@@ -5,7 +5,21 @@ separate Windows PC, triggered on demand from the dev PC. The dev PC never launc
 
 ## Status
 
-Scaffold only. Nothing is implemented yet; the layout below is the plan.
+Slice S1 (one soak run of the existing CoherentWarAI harness) is implemented:
+
+- `runner/Invoke-TestRig.ps1` with the SSH transport `runner/Transport.Ssh.ps1`
+- `agent/TestRigAgent.ps1` with its installer `agent/Install-TestRigAgent.ps1`
+
+The job protocol between them is `docs/JOB-PROTOCOL.md`. Harness module, scenarios and the
+build step are not implemented yet; the layout below is the plan.
+
+```powershell
+copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key
+runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait
+```
+
+Tests (Pester 3.4, Windows PowerShell 5.1): `Invoke-Pester tests\runner` and
+`Invoke-Pester tests\agent`.
 
 ## Architecture
 

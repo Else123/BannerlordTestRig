@@ -1,0 +1,19 @@
+{
+  "queueRoot": "C:\\TestRig\\queue",
+  "workRoot": "C:\\TestRig\\work",
+  "gamePath": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Mount & Blade II Bannerlord",
+  "gameExecutable": "",
+  "gameArgumentsPrefix": "/singleplayer",
+  "documentsRoot": "",
+  "pollSeconds": 10,
+  "heartbeatSeconds": 10,
+  "moduleAllowlist": [
+    "CoherentWarAI",
+    "CoherentWarAI.TestHarness",
+    "AutoTraderSpeed",
+    "SmithingSuite",
+    "CompanionManagementSuite",
+    "TestRig.Harness",
+    "*.Scenarios"
+  ]
+}
