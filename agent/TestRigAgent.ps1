@@ -22,7 +22,9 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'agent.config.json'),
+    # Default (agent.config.json next to this script) is resolved at the entry point: $PSScriptRoot is
+    # empty in param defaults under powershell -File (PS 5.1).
+    [string]$ConfigPath = '',
     [switch]$Once
 )
 
@@ -936,5 +938,6 @@ function Invoke-AgentMain {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'agent.config.json' }
     exit (Invoke-AgentMain -ConfigPath $ConfigPath -Once:$Once)
 }

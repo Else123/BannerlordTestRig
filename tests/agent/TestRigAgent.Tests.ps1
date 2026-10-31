@@ -872,3 +872,18 @@ Describe 'Invoke-Job: state names (S7)' {
         Assert-MockCalled Write-JobState -Exactly -Times 2 -ParameterFilter { $State -eq 'installing' }
     }
 }
+
+Describe 'TestRigAgent.ps1 run via powershell -File without -ConfigPath (PS 5.1)' {
+    It 'finds agent.config.json next to the script ($PSScriptRoot is empty in param defaults)' {
+        # This is exactly how the scheduled task starts the agent.
+        $rig = New-Rig
+        $d = Join-Path $rig.Root 'agentdir'
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        Copy-Item -LiteralPath $agentScript -Destination $d
+        Copy-Item -LiteralPath $rig.ConfigPath -Destination (Join-Path $d 'agent.config.json')
+        $out = (& $powershellExe -NoProfile -File (Join-Path $d 'TestRigAgent.ps1') -Once 2>&1 | Out-String)
+        $LASTEXITCODE | Should Be 0
+        $out | Should Not Match 'Join-Path'
+        (Get-Content -LiteralPath (Join-Path $rig.Work 'agent.log') -Raw) | Should Match 'Agent started'
+    }
+}
