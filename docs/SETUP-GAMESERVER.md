@@ -1,7 +1,7 @@
-# Test PC setup (transport B: NAS job folder)
+# Test PC setup (SSH transport)
 
-Step-by-step setup of the test PC (`<test-pc>`). Only transport B (NAS job folder) is covered;
-SSH is dropped. Nobody should play Bannerlord on this PC: the rig owns the game configuration
+Step-by-step setup of the test PC (`<test-pc>`). Transport: SSH to the test PC's existing
+OpenSSH server. Nobody should play Bannerlord on this PC: the rig owns the game configuration
 there (open question F3, recommended answer "no").
 
 Legend: **[OPEN]** = open in the spec, **unverified** = not confirmed against a source, check the
@@ -57,24 +57,26 @@ How to switch Steam into offline mode (menu path) is unverified: see the Steam d
 - **[OPEN]** The exact key name in `BannerlordConfig.txt` is not yet determined. Find it by
   toggling the option in the game and diffing the config file before and after.
 
-## e. NAS share and credentials
+## e. SSH access from the dev PC
 
-1. On the NAS create a share `testrig` and a NAS user `testrig-agent` with read/write access to
-   that share only. The menu path depends on the NAS software: see the vendor docs.
-2. Write access to this share lets the writer run code on the test PC (DLLs are loaded). Grant it
-   only to the dev-PC user and the agent user.
-3. Store the credentials for the session user on the test PC (run in that user's session):
+The test PC runs the Windows OpenSSH server. The rig uses it only to copy jobs and results
+(`scp`) and to read state; it never starts the game over SSH.
 
-```powershell
-cmdkey /add:<nas-server> /user:testrig-agent /pass
-```
-
-`/pass` without a value prompts for the password, so it does not land in the shell history.
-Check the exact `cmdkey` syntax with `cmdkey /?`. Then verify access:
+1. Key login for the session user must work from the dev PC without a password prompt:
 
 ```powershell
-Test-Path \\<nas-server>\testrig
+ssh -i <dev-pc-key> <user>@<test-pc> whoami
 ```
+
+2. For an administrator account the server reads keys from
+   `C:\ProgramData\ssh\administrators_authorized_keys` (the `Match Group administrators` block in
+   `C:\ProgramData\ssh\sshd_config`), otherwise from `%USERPROFILE%\.ssh\authorized_keys`.
+3. The remote shell is `cmd.exe`. Send PowerShell as
+   `powershell -NoProfile -EncodedCommand <base64 UTF-16LE>`.
+4. Anyone who can write a job can run code on the test PC (DLLs are loaded), so only the dev-PC
+   key gets access.
+5. Optional hardening (**pending**, owner's decision): `PasswordAuthentication no` in
+   `sshd_config` and restricting the `OpenSSH Server (sshd)` firewall rule to the LAN subnet.
 
 ## f. Install the agent
 
@@ -83,7 +85,7 @@ Test-Path \\<nas-server>\testrig
 - Copies the agent to `C:\TestRig\agent\`.
 - Registers a scheduled task that starts the agent **at logon of the current user**, with
   logon type **Interactive** and run level **Limited** (no elevation), for the current user.
-- The agent polls the job folder every 10 s and holds the named mutex
+- The agent polls `C:\TestRig\queue\jobs` every 10 s and holds the named mutex
   `Global\BannerlordTestRigAgent` to prevent double starts.
 
 Run it as `powershell -File agent\Install-TestRigAgent.ps1` with the machine's execution policy
@@ -106,7 +108,7 @@ in slice S3).
 
 ## h. Verify: no new inbound port
 
-From the dev PC, every port must report `False`:
+From the dev PC, port 22 (SSH) must report `True` and every other port `False`:
 
 ```powershell
 22,135,139,445,3389,5900,80,443 | % { Test-NetConnection <test-pc-ip> -Port $_ -WarningAction SilentlyContinue | select RemotePort,TcpTestSucceeded }
