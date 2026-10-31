@@ -97,11 +97,17 @@ Get-ExecutionPolicy -List
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-2. Run the installer from the repo copy on the test PC:
+2. Run the installer from a copy of the `agent\` folder on the test PC. Over SSH from the dev PC
+   (no repo checkout needed on the test PC):
 
 ```powershell
-powershell -NoProfile -File agent\Install-TestRigAgent.ps1
+ssh -i <key> <user>@<test-pc> "mkdir C:\TestRig\src"
+scp -i <key> -r agent <user>@<test-pc>:C:/TestRig/src/
+ssh -i <key> <user>@<test-pc> "powershell -NoProfile -File C:\TestRig\src\agent\Install-TestRigAgent.ps1"
 ```
+
+   Use the Windows OpenSSH client (`%SystemRoot%\System32\OpenSSH\`). Locally on the test PC the
+   same installer runs as `powershell -NoProfile -File agent\Install-TestRigAgent.ps1`.
 
 What the installer does:
 

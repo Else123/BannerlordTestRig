@@ -21,6 +21,9 @@ runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -
 Tests (Pester 3.4, Windows PowerShell 5.1): `Invoke-Pester tests\runner` and
 `Invoke-Pester tests\agent`.
 
+Live smoke test against an installed agent, without Bannerlord (a fake game stands in):
+`powershell -NoProfile -File tests\live\Invoke-FakeGameSmoke.ps1 [-Scenario complete|abort]`.
+
 ## Architecture
 
 1. **Runner** (dev PC, PowerShell 5.1): builds the mods, packs them with a manifest (SHA-256 per
