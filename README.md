@@ -26,6 +26,13 @@ runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -
 
 `-Harness CoherentWarAI` (default) or `-Harness TestRig` selects the in-game harness (and its module in the load order).
 
+`-Suite L1` runs the L1 soak: harness `TestRig`, mode `WarSails`, seed 1, and the module load order Bannerlord.Harmony,
+ButterLib, UIExtenderEx, MBOptionScreen, Native, SandBoxCore, Sandbox, StoryMode, NavalDLC, CoherentWarAI, AutoTraderSpeed,
+SmithingSuite, CompanionManagementSuite, TestRig.Harness. Without an explicit `-Days` it uses 30 days. Combination rules:
+`-Days`, `-Seed` and `-Mode` keep an explicit value; the suite fixes the harness, so an explicit `-Harness` other than
+`TestRig` is a usage error (exit 1 before anything is built or published). With `-PackageFrom` the package must contain
+all suite modules. The result rows show `<Suite>-<scenario id>` (e.g. `L1-soak Passed 3/3`). Without `-Suite` nothing changes.
+
 The build (default mode) compiles the six projects with MSBuild into `out\stage\<jobId>\Modules`
 (not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
 repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder

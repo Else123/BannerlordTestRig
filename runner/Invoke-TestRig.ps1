@@ -32,6 +32,7 @@ param(
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
     [ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode = 'WarSails',
     [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+    [ValidateSet('L1')][string]$Suite,
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
     [ValidateRange(1, [int]::MaxValue)][int]$BudgetMinutes = 60,
     [ValidateRange(1, [int]::MaxValue)][int]$HardTimeoutMinutes = 20,
@@ -50,6 +51,18 @@ param(
 $script:RigHarnessModules = [ordered]@{
     CoherentWarAI = 'CoherentWarAI.TestHarness'
     TestRig       = 'TestRig.Harness'
+}
+# Suite id -> fixed settings. Harness is fixed (an explicit conflicting -Harness is a usage error); Mode, Seed
+# and Days are defaults that an explicit parameter overrides. ExtraModules load between CoherentWarAI and the
+# harness module.
+$script:RigSuites = @{
+    L1 = @{
+        Harness      = 'TestRig'
+        Mode         = 'WarSails'
+        Seed         = 1
+        Days         = 30
+        ExtraModules = @('AutoTraderSpeed', 'SmithingSuite', 'CompanionManagementSuite')
+    }
 }
 $script:DefaultMsBuildPath = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
 
@@ -91,11 +104,40 @@ function New-RigJobId {
 function Get-RigModules {
     param(
         [Parameter(Mandatory)][ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode,
-        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI'
+        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+        [ValidateScript({ -not $_ -or $script:RigSuites.ContainsKey($_) })][string]$Suite
     )
     $modules = @('Bannerlord.Harmony', 'Bannerlord.ButterLib', 'Bannerlord.UIExtenderEx', 'Bannerlord.MBOptionScreen', 'Native', 'SandBoxCore', 'Sandbox', 'StoryMode')
     if ($Mode -ne 'NoDlc') { $modules += 'NavalDLC' }
-    $modules + @('CoherentWarAI', $script:RigHarnessModules[$Harness])
+    $extra = @()
+    if ($Suite) { $extra = @($script:RigSuites[$Suite].ExtraModules) }
+    $modules + @('CoherentWarAI') + $extra + @($script:RigHarnessModules[$Harness])
+}
+
+# Applies -Suite to the parameter values. $BoundParameters = names of the parameters given explicitly
+# (keys of $PSBoundParameters). Harness is fixed by the suite: an explicit different one throws. Mode and
+# Seed keep an explicit value; Days defaults to the suite's value only when not given. Without a suite the
+# values are returned unchanged.
+function Resolve-RigSuiteSettings {
+    param(
+        [string]$Suite,
+        [string[]]$BoundParameters = @(),
+        [Parameter(Mandatory)][string]$Harness,
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][int]$Seed,
+        [Parameter(Mandatory)][int]$Days
+    )
+    if ($Suite) {
+        $s = $script:RigSuites[$Suite]
+        if ($BoundParameters -contains 'Harness' -and $Harness -ne $s.Harness) {
+            throw "-Suite $Suite fixes -Harness $($s.Harness); -Harness $Harness conflicts with it (omit -Harness)."
+        }
+        $Harness = $s.Harness
+        if ($BoundParameters -notcontains 'Mode') { $Mode = $s.Mode }
+        if ($BoundParameters -notcontains 'Seed') { $Seed = $s.Seed }
+        if ($BoundParameters -notcontains 'Days') { $Days = $s.Days }
+    }
+    [pscustomobject]@{ Harness = (Get-RigHarnessName $Harness); Mode = $Mode; Seed = $Seed; Days = $Days }
 }
 
 function Get-RigHarnessName {
@@ -148,6 +190,7 @@ function New-RigJobManifest {
         [Parameter(Mandatory)][int]$HardTimeoutMinutes,
         [object[]]$Repos = @(),   # build mode: repo states (name, sha, dirty); empty with -PackageFrom
         [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+        [string]$Suite,
         [AllowNull()][AllowEmptyString()][string]$ExpectedGameVersion   # tower game version; $null/empty = not checked
     )
     [ordered]@{
@@ -157,7 +200,7 @@ function New-RigJobManifest {
         expectedGameVersion = if ([string]::IsNullOrWhiteSpace($ExpectedGameVersion)) { $null } else { $ExpectedGameVersion }
         package             = [ordered]@{ file = 'package.zip'; sha256 = $PackageSha256 }
         repos               = @($Repos)
-        modules             = @(Get-RigModules -Mode $Mode -Harness $Harness)
+        modules             = @(Get-RigModules -Mode $Mode -Harness $Harness -Suite $Suite)
         runs                = @(
             [ordered]@{
                 runId              = 'r1'
@@ -521,6 +564,7 @@ function Publish-RigResult {
         [Parameter(Mandatory)][string]$ResultDir,
         [Parameter(Mandatory)][string]$JobId,
         [Parameter(Mandatory)][int]$Days,
+        [string]$Suite,           # when set, scenario ids are shown as <Suite>-<id> and job-result.json gets 'suite'
         [string]$TowerGamePath,   # when set, versions reported by the agent are compared with the tower (warnings only)
         [switch]$ForceTimeout
     )
@@ -573,7 +617,8 @@ function Publish-RigResult {
         # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario
         $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } else { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) }
         foreach ($sc in $lineSources) {
-            $lines += Format-RigRunLine -RunId $runId -Kind $sc.Id -Status $sc.Status -DaysReached $daysReached -Days $Days `
+            $kind = if ($Suite) { "$Suite-$($sc.Id)" } else { $sc.Id }
+            $lines += Format-RigRunLine -RunId $runId -Kind $kind -Status $sc.Status -DaysReached $daysReached -Days $Days `
                 -ExitClass ([string]$dr.exitClass) -Duration $duration -Path $runDir
         }
     }
@@ -590,6 +635,7 @@ function Publish-RigResult {
     $code = Resolve-RigExitCode -DoneStatus $doneStatus -Runs $runs -Days $Days -ForceTimeout:$ForceTimeout
     Write-RigJsonFile -Path (Join-Path $ResultDir 'job-result.json') -InputObject ([ordered]@{
             jobId    = $JobId
+            suite    = if ($Suite) { $Suite } else { $null }
             status   = if ($doneStatus) { $doneStatus } else { $null }
             exitCode = $code
             runs     = @($runs | ForEach-Object {
@@ -609,6 +655,7 @@ function Start-TestRigJob {
         [int]$Seed, [int]$Days, [string]$Mode,
         [int]$StallMinutes, [int]$BudgetMinutes, [int]$HardTimeoutMinutes,
         [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+        [string]$Suite,
         [double]$ClaimTimeoutSeconds, [double]$TimeoutMinutes,
         [string]$ConfigPath,
         [string]$OutRoot,
@@ -628,6 +675,13 @@ function Start-TestRigJob {
             $harnessModule = $script:RigHarnessModules[$Harness]
             if (-not (Test-Path -LiteralPath (Join-Path $PackageFrom "Modules\$harnessModule") -PathType Container)) {
                 throw "Package source '$PackageFrom' has no Modules\$harnessModule (needed by -Harness $Harness)."
+            }
+            if ($Suite) {
+                foreach ($suiteModule in $script:RigSuites[$Suite].ExtraModules) {
+                    if (-not (Test-Path -LiteralPath (Join-Path $PackageFrom "Modules\$suiteModule") -PathType Container)) {
+                        throw "Package source '$PackageFrom' has no Modules\$suiteModule (needed by -Suite $Suite)."
+                    }
+                }
             }
         }
         if ($buildMode) {
@@ -669,7 +723,7 @@ function Start-TestRigJob {
         $pkg = New-RigPackage -PackageFrom $PackageFrom -ZipPath (Join-Path $jobDir 'package.zip')
         $manifest = New-RigJobManifest -JobId $jobId -CreatedUtc ([datetime]::UtcNow) -PackageSha256 $pkg.Sha256 `
             -Seed $Seed -Days $Days -Mode $Mode -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes `
-            -Repos $repos -Harness $Harness -ExpectedGameVersion $expectedGameVersion
+            -Repos $repos -Harness $Harness -Suite $Suite -ExpectedGameVersion $expectedGameVersion
         Write-RigJsonFile -Path (Join-Path $jobDir 'job.json') -InputObject $manifest
 
         Publish-Job -Target $target -JobId $jobId -JobDirectory $jobDir
@@ -698,7 +752,7 @@ function Start-TestRigJob {
         $localDir = Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action {
             Receive-JobResult -Target $target -JobId $jobId -DestinationRoot (Join-Path $OutRoot 'results')
         }
-        return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -TowerGamePath $towerGamePath -ForceTimeout:$forceTimeout)
+        return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -Suite $Suite -TowerGamePath $towerGamePath -ForceTimeout:$forceTimeout)
     } catch {
         Write-RigMessage "ERROR: $($_.Exception.Message)"
         return 1
@@ -707,8 +761,15 @@ function Start-TestRigJob {
 
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'runner.config.json' }
-    $code = Start-TestRigJob -PackageFrom $PackageFrom -Seed $Seed -Days $Days -Mode $Mode `
-        -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes -Harness $Harness `
+    try {
+        $settings = Resolve-RigSuiteSettings -Suite $Suite -BoundParameters @($PSBoundParameters.Keys) `
+            -Harness $Harness -Mode $Mode -Seed $Seed -Days $Days
+    } catch {
+        Write-RigMessage "ERROR: $($_.Exception.Message)"
+        exit 1
+    }
+    $code = Start-TestRigJob -PackageFrom $PackageFrom -Seed $settings.Seed -Days $settings.Days -Mode $settings.Mode `
+        -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes -Harness $settings.Harness -Suite $Suite `
         -ClaimTimeoutSeconds $ClaimTimeoutSeconds -TimeoutMinutes $TimeoutMinutes `
         -ConfigPath $ConfigPath -OutRoot (Join-Path (Split-Path -Parent $PSScriptRoot) 'out') `
         -WorkspaceRoot (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) -Wait:$Wait

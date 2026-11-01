@@ -273,7 +273,18 @@ deletes `run-result.json`, `run-result.json.tmp`, `result.txt` and `harness.log`
 
 Runner output: with `run-result.json` one console line per scenario (scenario `id` in the kind column, scenario
 `status` in the status column; a result without scenarios prints one line with `soak` and the run status). With
-`result.txt` one line per run (`soak`, status from the file), unchanged.
+`result.txt` one line per run (`soak`, status from the file), unchanged. With `-Suite <name>` the kind column shows
+`<name>-<id>` (e.g. `L1-soak`), also for the fallback lines; the ids in the files stay raw.
+
+### Runner `-Suite`
+
+`-Suite L1` (the only suite so far) sets harness `TestRig`, mode `WarSails`, seed 1, `days` 30 and the `modules` load
+order `Bannerlord.Harmony, Bannerlord.ButterLib, Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore,
+Sandbox, StoryMode, NavalDLC, CoherentWarAI, AutoTraderSpeed, SmithingSuite, CompanionManagementSuite, TestRig.Harness`
+(`NavalDLC` is dropped with `-Mode NoDlc`). Explicit `-Days`, `-Seed`, `-Mode` win over the suite defaults; an explicit
+`-Harness` other than `TestRig` is a usage error (runner exit 1, nothing built or published). `job.json` keeps its
+schema: the suite only shapes `modules` and `runs[0]`, there is no suite key (the agent never sees it). The suite name
+appears in `job-result.json` as job-level `suite` (`"L1"`, `null` without `-Suite`); `scenarios[].id` stays `soak`.
 
 ### Version warnings (runner)
 
@@ -293,7 +304,8 @@ parsed object as written by the harness (nested, typed values as above); from le
 `key=value` lines (all values strings, e.g. `{ "status": "Completed", "daysReached": "3" }`); `{}` when there is no result
 (missing file, or invalid `run-result.json`). Per run it also holds `gameVersion` and `moduleVersions`, copied from
 `agent-run.json` (`moduleVersions` is always a JSON array when present, also with 0 or 1 entry; `null` only for an old
-agent); on job level `versionWarnings` is an array of the warning lines above.
+agent); on job level `versionWarnings` is an array of the warning lines above and `suite` is the runner's `-Suite`
+value or `null`.
 
 ### `run.cfg`
 
