@@ -22,20 +22,35 @@ Get-ChildItem "<game>\Modules" -Directory | ForEach-Object {
 }
 ```
 
-The Workshop content folder location is unverified; see the Steam documentation. Expected ids
-(to be confirmed by this step): `Bannerlord.Harmony`, `Bannerlord.ButterLib`,
-`Bannerlord.UIExtenderEx`, `Bannerlord.MBOptionScreen`.
+The Workshop mods live in `<Steam>\steamapps\workshop\content\261550\<item id>\`. Measured ids:
+`Bannerlord.Harmony`, `Bannerlord.ButterLib`, `Bannerlord.UIExtenderEx`,
+`Bannerlord.MBOptionScreen`.
 
-## b. Windows account and autologon
+Pitfalls measured on the test PC (2026-10-31), when the game folder was **copied** from another PC
+instead of downloaded by Steam:
+
+- **Visual C++ runtime missing.** The game exits at once; `starter_log.txt` in
+  `C:\ProgramData\Mount and Blade II Bannerlord\logs\` shows
+  `Unable to load DLL 'TaleWorlds.Native.dll' ... 0x8007007E`. `TaleWorlds.Native.dll` imports
+  `vcruntime140.dll` and `msvcp140.dll`. Fix: install the Microsoft Visual C++ v14 Redistributable
+  x64 (`https://aka.ms/vc14/vc_redist.x64.exe`, per Microsoft Learn).
+- **Steam deletes copied Workshop items it cannot query.** `<Steam>\logs\workshop_log.txt` shows
+  `Get details for item <id> failed : Access Denied`, then `removing unknown item <id>`. This hit
+  MCM (`2859238197`). Fix: copy the MCM folder to `<game>\Modules\Bannerlord.MBOptionScreen\`,
+  which Steam does not clean up. Symptom without it: CoherentWarAI "could not be loaded correctly
+  due to a dependency conflict".
+- A **"Mod change detected"** dialog appears on the first start after the module list changed.
+  It needs one click; it did not reappear on later starts with the same list.
+
+## b. Windows account and session
 
 - One Windows account stays logged on permanently. The agent runs in that interactive session
   and starts the game there; a service or SSH session cannot show the game window.
-- Configure autologon for that account so the session returns after a reboot. The tool and the
-  steps are unverified: see the Microsoft documentation for the autologon mechanism you choose.
-- Risk (spec R4): autologon stores the password as an LSA secret that an administrator can read.
-  Accepted because it is the account that is logged on anyway.
-- Open point (slice S1): whether a locked PC keeps computing normally is measured, not assumed.
-  If not, leave the session unlocked with the monitor off; the risk is physical access.
+- Autologon is optional. Without it the owner logs on again after every reboot; until then a job
+  ends with runner exit 3 ("agent offline"). The owner of the test PC chose no autologon, so no
+  password is stored on the PC (spec R4 does not apply).
+- Measured in slice S1 (2026-10-31/11-01): a **locked** session keeps computing, and the game
+  runs **without a monitor** attached. Both runs completed one game day.
 
 ## c. Steam mode (decision pending, open question F4)
 
