@@ -24,9 +24,10 @@ namespace TestRig.Harness
     /// </summary>
     public class HarnessSubModule : MBSubModuleBase
     {
-        // Vanilla (non-dev) ceiling of the campaign speed cheat; the setter itself is unclamped.
-        // Calibrate in dry runs (RUN-VERIFIED 1.3).
-        private const float SpeedUpMultiplier = 15f;
+        // The setter is unclamped (15 is the vanilla non-dev ceiling of the speed cheat). Measured on the
+        // test PC 2026-11-01 (L1, 10 days, all four mods): running phase 58.7 s at 15, 33.9 s at 30,
+        // 27.5 s at 60 - above 30 the CPU is the limit while each campaign step keeps growing.
+        private const float SpeedUpMultiplier = 30f;
 
         private const string NavalDlcModuleId = "NavalDLC";
 
