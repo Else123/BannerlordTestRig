@@ -1,0 +1,10 @@
+<Project>
+  <!--
+    Copy this file to `paths.props.user` (which is git-ignored) and set your
+    Bannerlord install path if the auto-detection in Directory.Build.props does
+    not find it. Example:
+  -->
+  <PropertyGroup>
+    <BannerlordPath>E:\SteamLibrary\steamapps\common\Mount &amp; Blade II Bannerlord</BannerlordPath>
+  </PropertyGroup>
+</Project>

@@ -37,6 +37,12 @@ $script:MutexName = 'Global\BannerlordTestRigAgent'
 $script:ValidModes = @('WarSails', 'NoDlc', 'FeatureOff')
 $script:LaunchFailedSeconds = 30
 $script:AbortCheckSeconds = 3
+$script:DialogCheckSeconds = 1
+$script:DialogStillOpenSeconds = 5   # a dialog still open this long after OK was sent is logged once
+$script:GameWindowsInitError = $null   # set when compiling the Win32 helper failed; rethrown instead of recompiling
+# Game dialogs the agent confirms with OK (exact, case-sensitive title). The engine shows this one on the
+# first start after the active module list changed; unattended it blocks the run until HardTimeout.
+$script:ConfirmableDialogTitles = @('Mod change detected')
 $script:StopSliceMilliseconds = 5000   # Stop-ProcessTree waits in slices of at most this, with a heartbeat between
 # Upper bounds per numeric run field (also keeps DateTime.AddMinutes from overflowing).
 $script:RunNumberLimits = [ordered]@{ days = 3650; stallMinutes = 1440; budgetMinutes = 1440; hardTimeoutMinutes = 1440 }
@@ -519,9 +525,18 @@ function Install-JobModules {
 # Run
 # ---------------------------------------------------------------------------
 
+# Harness id -> folder below the Bannerlord Documents folder and the module that drives it
+# (the one place this mapping lives).
+$script:Harnesses = [ordered]@{
+    CoherentWarAI = @{ Folder = 'CoherentWarAI\harness'; Module = 'CoherentWarAI.TestHarness' }
+    TestRig       = @{ Folder = 'TestRig\harness'; Module = 'TestRig.Harness' }
+}
+
 function Get-HarnessDir {
-    param($Config)
-    return (Join-Path $Config.documentsRoot 'Mount and Blade II Bannerlord\CoherentWarAI\harness')
+    # Returns $null for an unknown harness id.
+    param($Config, [Parameter(Mandatory)][AllowEmptyString()][string]$Harness)
+    if (-not $script:Harnesses.Contains($Harness)) { return $null }
+    return (Join-Path $Config.documentsRoot ('Mount and Blade II Bannerlord\' + $script:Harnesses[$Harness].Folder))
 }
 
 function Get-RunCfgText {
@@ -595,10 +610,232 @@ function Copy-RunArtifacts {
     return $copied
 }
 
+# ---------------------------------------------------------------------------
+# Game dialogs (Win32)
+# ---------------------------------------------------------------------------
+
+$script:GameWindowsSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace BannerlordTestRig
+{
+    public static class GameWindows
+    {
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDlgItem(IntPtr hDlg, int controlId);
+
+        [DllImport("user32.dll")]
+        private static extern int GetDlgCtrlID(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowEnabled(IntPtr hWnd);
+
+        // GetWindowLong, not GetWindowLongPtr: GWL_STYLE is a 32-bit value on x86 and x64 alike, and
+        // user32 exports GetWindowLongW on both, while GetWindowLongPtrW exists only in 64-bit user32.
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLong(IntPtr hWnd, int index);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        private const string DialogClass = "#32770";
+        private const int IDOK = 1;
+        private const uint WM_COMMAND = 0x0111;
+        private const int BN_CLICKED = 0;
+        private const int GWL_STYLE = -16;
+        private const int BS_TYPEMASK = 0xF;
+        private const int BS_PUSHBUTTON = 0;
+        private const int BS_DEFPUSHBUTTON = 1;
+
+        // Visible top-level windows of class #32770 owned by the process.
+        public static IntPtr[] FindVisibleDialogs(int processId)
+        {
+            var found = new List<IntPtr>();
+            EnumWindowsProc callback = (hWnd, lParam) =>
+            {
+                uint owner;
+                GetWindowThreadProcessId(hWnd, out owner);
+                if (owner == (uint)processId && IsWindowVisible(hWnd))
+                {
+                    var className = new StringBuilder(256);
+                    GetClassName(hWnd, className, className.Capacity);
+                    if (className.ToString() == DialogClass) { found.Add(hWnd); }
+                }
+                return true;
+            };
+            EnumWindows(callback, IntPtr.Zero);
+            GC.KeepAlive(callback);
+            return found.ToArray();
+        }
+
+        // For a window of another process this reads the stored caption without sending it a message,
+        // so a hung game cannot block the agent here.
+        public static string GetTitle(IntPtr hWnd)
+        {
+            var text = new StringBuilder(512);
+            GetWindowText(hWnd, text, text.Capacity);
+            return text.ToString();
+        }
+
+        private static bool IsPushButton(IntPtr hWnd)
+        {
+            var className = new StringBuilder(256);
+            GetClassName(hWnd, className, className.Capacity);
+            if (className.ToString() != "Button") { return false; }
+            int type = GetWindowLong(hWnd, GWL_STYLE) & BS_TYPEMASK;   // excludes check boxes, radio buttons, group boxes
+            return type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON;
+        }
+
+        // The OK button: the IDOK control, else the dialog's only push button. A MB_OK message box has a
+        // single "OK" button whose control id is IDCANCEL, not IDOK (measured on Windows 11; the engine's
+        // dialog, measured 2026-11-01 on v1.4.8, is confirmed via this single-button rule).
+        // The button must be visible and enabled, as for a user's click.
+        private static IntPtr FindOkButton(IntPtr dialog, out int controlId)
+        {
+            controlId = IDOK;
+            IntPtr okButton = GetDlgItem(dialog, IDOK);
+            if (okButton == IntPtr.Zero)
+            {
+                var pushButtons = new List<IntPtr>();
+                EnumWindowsProc callback = (hWnd, lParam) =>
+                {
+                    if (IsPushButton(hWnd)) { pushButtons.Add(hWnd); }
+                    return true;
+                };
+                EnumChildWindows(dialog, callback, IntPtr.Zero);
+                GC.KeepAlive(callback);
+                if (pushButtons.Count != 1) { return IntPtr.Zero; }
+                okButton = pushButtons[0];
+                controlId = GetDlgCtrlID(okButton);
+            }
+            if (!IsWindowVisible(okButton) || !IsWindowEnabled(okButton)) { return IntPtr.Zero; }
+            return okButton;
+        }
+
+        // Delivers what a click on OK delivers to the dialog: WM_COMMAND(<button id>, BN_CLICKED) from the button.
+        // Posted, not sent: never waits for the game and needs no focus or foreground.
+        // Locked session: expected to work (PostMessage needs no focus), not yet measured.
+        // Returns null when OK was sent, else the reason it was not.
+        public static string ClickOk(IntPtr dialog)
+        {
+            int controlId;
+            IntPtr okButton = FindOkButton(dialog, out controlId);
+            if (okButton == IntPtr.Zero) { return "no OK button"; }
+            IntPtr wParam = new IntPtr((BN_CLICKED << 16) | (controlId & 0xFFFF));
+            if (!PostMessage(dialog, WM_COMMAND, wParam, okButton))
+            {
+                return "PostMessage failed (error " + Marshal.GetLastWin32Error() + ")";
+            }
+            return null;
+        }
+    }
+}
+'@
+
+function Initialize-GameWindows {
+    # Add-Type once per session: adding the same type a second time fails. A failed compile is kept and
+    # rethrown, so it is not retried on every dialog check. Parameters exist for the tests.
+    param([string]$TypeName = 'BannerlordTestRig.GameWindows', [string]$Source = $script:GameWindowsSource)
+    if ($TypeName -as [type]) { return }
+    if ($null -ne $script:GameWindowsInitError) { throw $script:GameWindowsInitError }
+    try { Add-Type -TypeDefinition $Source }
+    catch {
+        $script:GameWindowsInitError = $_.Exception
+        throw
+    }
+}
+
+function Get-GameDialogs {
+    # Visible standard dialogs (#32770) of the process, as objects with Handle and Title.
+    param([int]$ProcessId)
+    Initialize-GameWindows
+    foreach ($handle in [BannerlordTestRig.GameWindows]::FindVisibleDialogs($ProcessId)) {
+        [pscustomobject]@{ Handle = $handle; Title = [BannerlordTestRig.GameWindows]::GetTitle($handle) }
+    }
+}
+
+function Confirm-KnownGameDialog {
+    # Sends OK to the dialog. Returns $null when OK was sent, else the reason it was not.
+    param($Dialog)
+    Initialize-GameWindows
+    return [BannerlordTestRig.GameWindows]::ClickOk($Dialog.Handle)
+}
+
+function Invoke-GameDialogCheck {
+    # One look at the game's dialogs: sends OK to the known titles (once per dialog window), logs any
+    # other title once per run, and logs once if a dialog is still open DialogStillOpenSeconds after OK.
+    # Never throws: a failing check must not end the supervision.
+    # $State is per run: @{ Handled = @{}; Seen = @{}; FailureLogged = $false }.
+    param([int]$ProcessId, [hashtable]$State, $Record)
+    try {
+        foreach ($dialog in @(Get-GameDialogs -ProcessId $ProcessId)) {
+            $handleKey = [string]$dialog.Handle
+            $handled = $State.Handled[$handleKey]
+            if ($null -ne $handled) {   # OK was sent (or could not be) already; never a second time
+                if ($null -ne $handled.OkSentUtc -and -not $handled.StillOpenLogged -and
+                    ([DateTime]::UtcNow - $handled.OkSentUtc).TotalSeconds -ge $script:DialogStillOpenSeconds) {
+                    $handled.StillOpenLogged = $true
+                    Write-AgentLog "Dialog '$($dialog.Title)' still open after confirm"
+                }
+                continue
+            }
+            if ($script:ConfirmableDialogTitles -ccontains $dialog.Title) {
+                $handled = @{ OkSentUtc = $null; StillOpenLogged = $false }
+                $State.Handled[$handleKey] = $handled
+                $failure = Confirm-KnownGameDialog -Dialog $dialog
+                if ($null -eq $failure) {
+                    $handled.OkSentUtc = [DateTime]::UtcNow
+                    Write-AgentLog "Dismissed dialog '$($dialog.Title)' (pid $ProcessId)."
+                    $Record.dismissedDialogs = @($Record.dismissedDialogs) + $dialog.Title
+                }
+                else { Write-AgentLog "Could not confirm dialog '$($dialog.Title)': $failure" }
+            }
+            elseif (-not $State.Seen.ContainsKey($dialog.Title)) {
+                $State.Seen[$dialog.Title] = $true
+                Write-AgentLog "Game dialog seen: '$($dialog.Title)'"
+            }
+        }
+    }
+    catch {
+        if (-not $State.FailureLogged) {
+            $State.FailureLogged = $true
+            Write-AgentLog "Dialog check failed (supervision continues): $($_.Exception.Message)"
+        }
+    }
+}
+
 function Invoke-Run {
     # One run: patch configs, write run.cfg, launch, supervise, classify, collect.
     # Writes results\<jobId>\<runId>\agent-run.json and returns it as a hashtable.
-    param($Config, [hashtable]$Context, $Run, [string[]]$Modules, [int]$RunIndex, [string]$ResultsDir)
+    param($Config, [hashtable]$Context, $Run, [string[]]$Modules, [string[]]$PackageModuleIds = @(), [int]$RunIndex, [string]$ResultsDir)
 
     $runId = $Run.runId
     $runDir = Join-Path $ResultsDir $runId
@@ -608,15 +845,19 @@ function Invoke-Run {
     $configsDir = Join-Path $docs 'Configs'
     $mcmPath = Join-Path $configsDir 'ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json'
     $modLogDir = Join-Path $docs 'CoherentWarAI'
-    $harnessDir = Get-HarnessDir $Config
-    $runCfgPath = Join-Path $harnessDir 'run.cfg'
-    $resultPath = Join-Path $harnessDir 'result.txt'
-    $harnessLogPath = Join-Path $harnessDir 'harness.log'
+    $harnessDir = Get-HarnessDir $Config ([string]$Run.harness)   # $null for an unknown harness (rejected below)
+    $runCfgPath = $resultPath = $harnessLogPath = $null
+    if ($harnessDir) {
+        $runCfgPath = Join-Path $harnessDir 'run.cfg'
+        $resultPath = Join-Path $harnessDir 'result.txt'
+        $harnessLogPath = Join-Path $harnessDir 'harness.log'
+    }
     $engineLogDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Mount and Blade II Bannerlord\logs'
 
     $record = [ordered]@{
         schema = 1; runId = $runId; exitClass = 'SetupError'; pid = $null
         startedUtc = (Get-UtcStamp); endedUtc = $null; artifacts = @(); baselineRestored = $null; message = $null
+        dismissedDialogs = @()
     }
     $process = $null
     $runCfgTouched = $false
@@ -628,7 +869,12 @@ function Invoke-Run {
     $deadline = $null
 
     try {
-        if ($Run.harness -ne 'CoherentWarAI') { throw [System.InvalidOperationException]("Unknown harness '$($Run.harness)'.") }
+        if (-not $harnessDir) { throw [System.InvalidOperationException]("Unknown harness '$($Run.harness)'.") }
+        # The harness module must be in this job's package and load order; otherwise the game would
+        # start without it, or with a stale copy installed by an earlier job.
+        $harnessModule = $script:Harnesses[[string]$Run.harness].Module
+        if (@($PackageModuleIds) -notcontains $harnessModule) { throw [System.InvalidOperationException]("Harness module '$harnessModule' is not in the package.") }
+        if (@($Modules) -notcontains $harnessModule) { throw [System.InvalidOperationException]("Harness module '$harnessModule' is not in job.modules.") }
         if ($script:ValidModes -notcontains $Run.mode) { throw [System.InvalidOperationException]("Unknown mode '$($Run.mode)'.") }
 
         Write-JobState -Context $Context -State 'installing' -RunId $runId -RunIndex $RunIndex
@@ -644,6 +890,9 @@ function Invoke-Run {
         $runCfgTouched = $true   # before the write: a partial file must be deleted too
         Write-Utf8Text $runCfgPath (Get-RunCfgText $Run) $false
 
+        # Compile the Win32 helper here, not inside the supervision. Not fatal: the run goes on without dialog handling.
+        try { Initialize-GameWindows }
+        catch { Write-AgentLog "Game dialog check unavailable: $($_.Exception.Message)" }
         $arguments = Get-GameArguments -Prefix $Config.gameArgumentsPrefix -Modules $Modules
         Write-AgentLog "Launching: $($Config.gameExecutable) $arguments"
         $startedAt = [DateTime]::UtcNow
@@ -651,7 +900,7 @@ function Invoke-Run {
         # Everything that can throw happens before Start-Process; after it only the supervision try below runs.
         $deadline = $startedAt.AddMinutes([double]$Run.hardTimeoutMinutes)
         $process = Start-Process -FilePath $Config.gameExecutable -ArgumentList $arguments `
-            -WorkingDirectory (Split-Path $Config.gameExecutable) -PassThru
+            -WorkingDirectory (Split-Path $Config.gameExecutable) -PassThru -NoNewWindow
     }
     catch {
         $record.message = $_.Exception.Message
@@ -662,6 +911,8 @@ function Invoke-Run {
         $abortFile = Join-Path $Context.JobDir 'abort'
         $nextAbortCheck = $startedAt
         $nextBeat = $startedAt
+        $nextDialogCheck = $startedAt
+        $dialogState = @{ Handled = @{}; Seen = @{}; FailureLogged = $false }
         try {
             $null = $process.Handle   # keep the handle so ExitCode stays readable
             $record.pid = $process.Id
@@ -670,6 +921,10 @@ function Invoke-Run {
                 if ($now -ge $nextAbortCheck) {
                     if (Test-Path -LiteralPath $abortFile) { $aborted = $true; $Context.AbortSeen = $true; break }   # kept apart from exitClass: CleanupFailed overrides it
                     $nextAbortCheck = $now.AddSeconds($script:AbortCheckSeconds)
+                }
+                if ($now -ge $nextDialogCheck) {
+                    Invoke-GameDialogCheck -ProcessId $process.Id -State $dialogState -Record $record
+                    $nextDialogCheck = $now.AddSeconds($script:DialogCheckSeconds)
                 }
                 if ($now -ge $nextBeat) {
                     Write-JobState -Context $Context -State 'running' -RunId $runId -RunIndex $RunIndex `
@@ -728,11 +983,12 @@ function Invoke-Run {
 
     # artifacts
     Write-JobState -Context $Context -State 'collecting' -RunId $runId -RunIndex $RunIndex
-    $copies = @(
-        @{ Name = 'result.txt'; Source = $resultPath },
-        @{ Name = 'harness.log'; Source = $harnessLogPath },
-        @{ Name = 'CoherentWarAI.log'; Source = (Join-Path $modLogDir 'CoherentWarAI.log') }
-    )
+    $copies = @()
+    if ($harnessDir) {
+        $copies += @{ Name = 'result.txt'; Source = $resultPath }
+        $copies += @{ Name = 'harness.log'; Source = $harnessLogPath }
+    }
+    $copies += @{ Name = 'CoherentWarAI.log'; Source = (Join-Path $modLogDir 'CoherentWarAI.log') }
     if ($null -ne $process) {
         $copies += @{ Name = "rgl_log_$($process.Id).txt"; Source = (Join-Path $engineLogDir "rgl_log_$($process.Id).txt") }
         $copies += @{ Name = "rgl_log_errors_$($process.Id).txt"; Source = (Join-Path $engineLogDir "rgl_log_errors_$($process.Id).txt") }
@@ -793,7 +1049,7 @@ function Invoke-JobSteps {
             break
         }
         $index++
-        $record = Invoke-Run -Config $Config -Context $Context -Run $run -Modules @($job.modules) `
+        $record = Invoke-Run -Config $Config -Context $Context -Run $run -Modules @($job.modules) -PackageModuleIds @($package.ModuleIds) `
             -RunIndex $index -ResultsDir $Context.ResultsDir
         $summaries += @{ runId = $record.runId; exitClass = $record.exitClass }
         # CleanupFailed: the game may still be running or run.cfg is left behind - never launch another one.
@@ -875,10 +1131,12 @@ function Resolve-OrphanedJobs {
         Write-AgentLog "Orphaned job $($dir.Name) (claimed, no done.json): finished as failed."
     }
     if ($orphans -gt 0) {
-        $runCfg = Join-Path (Get-HarnessDir $Config) 'run.cfg'
-        if (Test-Path -LiteralPath $runCfg) {
-            Remove-Item -LiteralPath $runCfg -Force
-            Write-AgentLog "Removed leftover harness run.cfg: $runCfg"
+        foreach ($harness in $script:Harnesses.Keys) {
+            $runCfg = Join-Path (Get-HarnessDir $Config $harness) 'run.cfg'
+            if (Test-Path -LiteralPath $runCfg) {
+                Remove-Item -LiteralPath $runCfg -Force
+                Write-AgentLog "Removed leftover harness run.cfg: $runCfg"
+            }
         }
     }
 }

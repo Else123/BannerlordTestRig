@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Test-rig harness module; never shipped with a mod. Directory.Build.props (one level up) is found automatically
+       via Microsoft.Common.props and handles the git-ignored paths.props.user. -->
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <ProjectGuid>{7C1E5A94-2D38-4B6F-9A0E-3F8D61B2C457}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <RootNamespace>TestRig.Harness</RootNamespace>
+    <AssemblyName>TestRig.Harness</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <LangVersion>7.3</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x64\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <OutputPath>bin\x64\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <!-- Game assemblies only (paths from Directory.Build.props). Private=False: never copied.
+         No mod, MCM or Harmony reference by design. -->
+    <Reference Include="TaleWorlds.CampaignSystem">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.CampaignSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.Core">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.Engine">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.Engine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.Library">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.Library.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.Localization">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.Localization.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.MountAndBlade">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.MountAndBlade.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.ObjectSystem">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.ObjectSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Needed by the compiler to resolve SandBoxGameManager constructor overloads (LoadResult). -->
+    <Reference Include="TaleWorlds.SaveSystem">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.SaveSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="SandBox">
+      <HintPath>$(SandBoxBinPath)\SandBox.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Logic\HarnessRun.cs" />
+    <Compile Include="Logic\ExceptionLogBudget.cs" />
+    <Compile Include="HarnessSubModule.cs" />
+    <Compile Include="SeededSandBoxGameManager.cs" />
+    <Compile Include="CharacterCreationDriver.cs" />
+    <Compile Include="HarnessCampaignBehavior.cs" />
+    <Compile Include="MapScreenProbe.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="SubModule.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <!-- Post-build: deploy into the Bannerlord Modules directory. -->
+  <Target Name="CopyToBannerlord" AfterTargets="Build">
+    <PropertyGroup>
+      <ModOutputPath>$(BannerlordModulesPath)\TestRig.Harness</ModOutputPath>
+    </PropertyGroup>
+    <MakeDir Directories="$(ModOutputPath);$(ModOutputPath)\bin\Win64_Shipping_Client" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModOutputPath)\bin\Win64_Shipping_Client" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModOutputPath)\bin\Win64_Shipping_Client" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+    <Copy SourceFiles="$(ProjectDir)SubModule.xml" DestinationFiles="$(ModOutputPath)\SubModule.xml" />
+    <Message Text="Deployed TestRig harness to $(ModOutputPath)" Importance="high" />
+  </Target>
+</Project>

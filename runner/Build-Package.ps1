@@ -1,8 +1,8 @@
-# Build step of the test rig runner: builds the five mod projects into a staging folder, guards the
+# Build step of the test rig runner: builds the six mod projects into a staging folder, guards the
 # tower (the game's own Modules folder) against changes and writes manifest.json.
 # Functions only; dot-sourced by Invoke-TestRig.ps1 (and by tests\runner\Build-Package.Tests.ps1).
 
-# The five projects, relative to the workspace root (the folder that contains the repo folders).
+# The six projects, relative to the workspace root (the folder that contains the repo folders).
 function Get-RigBuildProjects {
     param([Parameter(Mandatory)][string]$WorkspaceRoot)
     $table = @(
@@ -10,7 +10,8 @@ function Get-RigBuildProjects {
         @('BannerlordCoherentWarAI', 'tools\TestHarness\CoherentWarAI.TestHarness.csproj', 'CoherentWarAI.TestHarness'),
         @('BannerlordAutoTrader', 'AutoTrader\src\AutoTrader.csproj', 'AutoTraderSpeed'),
         @('BannerlordSmithingSuite', 'src\SmithingSuite.csproj', 'SmithingSuite'),
-        @('CompanionManagementSuite', 'src\CompanionSuite.csproj', 'CompanionManagementSuite')
+        @('CompanionManagementSuite', 'src\CompanionSuite.csproj', 'CompanionManagementSuite'),
+        @('BannerlordTestRig', 'src\TestRig.Harness\TestRig.Harness.csproj', 'TestRig.Harness')
     )
     foreach ($row in $table) {
         [pscustomobject]@{
@@ -29,7 +30,7 @@ function ConvertTo-RigMsBuildValue {
 
 # Builds one project with the build landing in $ModulesPath (BannerlordModulesPath overrides the
 # game-folder default of the projects' Directory.Build.props; BannerlordPath pins the game install the
-# projects resolve their references against). None of the five projects uses PackageReference or
+# projects resolve their references against). None of the six projects uses PackageReference or
 # packages.config, so no /restore is needed. The output is appended to $LogPath when given and is
 # otherwise not printed; on failure the exception message carries the output tail.
 function Invoke-RigMsBuild {
@@ -176,7 +177,7 @@ function New-RigBuildManifest {
     $path
 }
 
-# Builds all five projects into <StageDir>\Modules against the game install at $TowerGamePath, verifies
+# Builds all six projects into <StageDir>\Modules against the game install at $TowerGamePath, verifies
 # that <TowerGamePath>\Modules is untouched and that every module landed in the stage, then writes the
 # manifest. Throws on a missing prerequisite, a failed build, an incomplete stage or a tower change (no
 # manifest is written then). The MSBuild output goes to <StageDir>\build.log.

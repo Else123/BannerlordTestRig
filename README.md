@@ -15,11 +15,13 @@ not implemented yet; the layout below is the plan.
 
 ```powershell
 copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key, towerGamePath
-runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the five mods, packs them, publishes the job
+runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the six projects, packs them, publishes the job
 runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait   # diagnosis: skip the build
 ```
 
-The build (default mode) compiles the five projects with MSBuild into `out\stage\<jobId>\Modules`
+`-Harness CoherentWarAI` (default) or `-Harness TestRig` selects the in-game harness (and its module in the load order).
+
+The build (default mode) compiles the six projects with MSBuild into `out\stage\<jobId>\Modules`
 (not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
 repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder
 (`towerGamePath`) changed during the build. `msbuildPath` is optional (default: VS 2026 Build Tools).
@@ -29,6 +31,24 @@ Tests (Pester 3.4, Windows PowerShell 5.1): `Invoke-Pester tests\runner` and
 
 Live smoke test against an installed agent, without Bannerlord (a fake game stands in):
 `powershell -NoProfile -File tests\live\Invoke-FakeGameSmoke.ps1 [-Scenario complete|abort]`.
+
+## Harness module (`src/TestRig.Harness`)
+
+The in-game driver, shipped as Bannerlord module `TestRig.Harness` (old-style net48 csproj, game DLLs
+referenced from the install, no mod references). It is inert unless the agent has written a `run.cfg` in
+`Documents\Mount and Blade II Bannerlord\TestRig\harness`; it then drives a seeded campaign, logs to
+`harness.log` and writes `result.txt`. The engine-free state machine lives in `src/TestRig.Harness/Logic`.
+
+Build: the game install is auto-detected by `src/Directory.Build.props`, or set `BannerlordPath` in a
+git-ignored `src/paths.props.user` (copy `src/paths.props.user.template`). A plain build deploys into the
+game's `Modules` folder; to build elsewhere, override `/p:BannerlordModulesPath=<folder>`:
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe" src\TestRig.Harness\TestRig.Harness.csproj /p:Configuration=Debug /p:Platform=x64 /p:BannerlordModulesPath=<folder>\Modules
+```
+
+Unit tests (xUnit on the host .NET SDK, no game needed):
+`dotnet test tests\TestRig.Harness.Tests\TestRig.Harness.Tests.csproj`
 
 ## Architecture
 
@@ -40,7 +60,8 @@ Live smoke test against an installed agent, without Bannerlord (a fake game stan
    the game; the agent does, in the logged-on session. The rig opens no additional port.
 3. **Agent** (`<test-pc>`, PowerShell 5.1): a poller started by a scheduled task in the logged-on
    session. It claims a job, runs preflight checks, installs only allow-listed modules, restores
-   a baseline game config, launches Bannerlord, supervises it and publishes the artifacts.
+   a baseline game config, launches Bannerlord, supervises it (sending OK to the engine's
+   "Mod change detected" dialog) and publishes the artifacts.
 4. **Harness module** (`TestRig.Harness`): the in-game driver that runs scenarios tick by tick
    and writes `run-result.json`. Inert without a `run.cfg`.
 5. **Scenario modules** (one per mod, living in each mod repo, plus `scenarios/CrossMod` here):

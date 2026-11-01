@@ -40,7 +40,14 @@ instead of downloaded by Steam:
   which Steam does not clean up. Symptom without it: CoherentWarAI "could not be loaded correctly
   due to a dependency conflict".
 - A **"Mod change detected"** dialog appears on the first start after the module list changed.
-  It needs one click; it did not reappear on later starts with the same list.
+  It did not reappear on later starts with the same list. Measured 2026-11-01 on v1.4.8: a
+  standard dialog (`#32770`) with one push button. The agent sends OK to it automatically (via the
+  single-button rule) and logs `Dismissed dialog 'Mod change detected' (pid N).`; other game
+  dialogs are only logged (`Game dialog seen: '<title>'`), never answered. If the dialog is still
+  open 5 s after OK was sent, the agent logs `Dialog 'Mod change detected' still open after confirm`.
+  Locked session: expected to work (PostMessage needs no focus), not yet measured.
+- **The game language must be English.** The agent matches the exact English title; a translated
+  dialog shows up only as `Game dialog seen: '<title>'` and blocks the run until its hard timeout.
 
 ## b. Windows account and session
 

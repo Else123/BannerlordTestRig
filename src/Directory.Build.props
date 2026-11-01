@@ -1,0 +1,31 @@
+<Project>
+  <!--
+    Centralized build configuration. User-specific paths go in paths.props.user
+    (git-ignored). Copy paths.props.user.template to paths.props.user if the
+    auto-detection below does not find your Bannerlord install.
+  -->
+  <Import Project="paths.props.user" Condition="Exists('paths.props.user')" />
+
+  <!-- Fallback: auto-detect a Steam Bannerlord install. -->
+  <PropertyGroup Condition="'$(BannerlordPath)' == ''">
+    <BannerlordPath Condition="Exists('C:\Program Files (x86)\Steam\steamapps\common\Mount &amp; Blade II Bannerlord')">C:\Program Files (x86)\Steam\steamapps\common\Mount &amp; Blade II Bannerlord</BannerlordPath>
+    <BannerlordPath Condition="Exists('D:\SteamLibrary\steamapps\common\Mount &amp; Blade II Bannerlord')">D:\SteamLibrary\steamapps\common\Mount &amp; Blade II Bannerlord</BannerlordPath>
+    <BannerlordPath Condition="Exists('E:\SteamLibrary\steamapps\common\Mount &amp; Blade II Bannerlord')">E:\SteamLibrary\steamapps\common\Mount &amp; Blade II Bannerlord</BannerlordPath>
+    <BannerlordPath Condition="Exists('F:\SteamLibrary\steamapps\common\Mount &amp; Blade II Bannerlord')">F:\SteamLibrary\steamapps\common\Mount &amp; Blade II Bannerlord</BannerlordPath>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <BannerlordBinPath>$(BannerlordPath)\bin\Win64_Shipping_Client</BannerlordBinPath>
+    <BannerlordModulesPath>$(BannerlordPath)\Modules</BannerlordModulesPath>
+    <!-- SandBox ships its own view assemblies; the campaign map UI lives here, not in bin. -->
+    <SandBoxBinPath>$(BannerlordPath)\Modules\SandBox\bin\Win64_Shipping_Client</SandBoxBinPath>
+    <BannerlordExePath>$(BannerlordPath)\bin\Win64_Shipping_Client\Bannerlord.exe</BannerlordExePath>
+  </PropertyGroup>
+
+  <Target Name="ValidateBannerlordPath" BeforeTargets="BeforeBuild">
+    <Error Condition="'$(BannerlordPath)' == ''"
+           Text="Bannerlord installation path not found. Copy paths.props.user.template to paths.props.user and set BannerlordPath." />
+    <Error Condition="!Exists('$(BannerlordBinPath)')"
+           Text="Bannerlord bin directory not found at: $(BannerlordBinPath). Check BannerlordPath in paths.props.user." />
+  </Target>
+</Project>

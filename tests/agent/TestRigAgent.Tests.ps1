@@ -60,7 +60,7 @@ function New-TestJob {
     param(
         [hashtable]$Rig,
         [string]$JobId = '20261031-120000-aaaa',
-        [string[]]$Entries = @('Modules/CoherentWarAI/SubModule.xml', 'Modules/CoherentWarAI/bin/Win64_Shipping_Client/CoherentWarAI.dll'),
+        [string[]]$Entries = @('Modules/CoherentWarAI/SubModule.xml', 'Modules/CoherentWarAI/bin/Win64_Shipping_Client/CoherentWarAI.dll', 'Modules/CoherentWarAI.TestHarness/SubModule.xml'),
         [scriptblock]$Mutate = $null,
         [switch]$NoJobJson
     )
@@ -86,6 +86,18 @@ function New-TestJob {
         [System.IO.File]::WriteAllText((Join-Path $jobDir 'job.json'), ($job | ConvertTo-Json -Depth 10), $utf8NoBom)
     }
     return $jobDir
+}
+
+function New-TestRigHarnessJob {
+    # A job for harness TestRig; its package and module list carry TestRig.Harness unless told otherwise.
+    param([hashtable]$Rig, [string[]]$Entries = @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml'),
+        [string[]]$Modules = @('Native', 'CoherentWarAI', 'TestRig.Harness'))
+    $mutate = {
+        param($j)
+        $j['runs'][0]['harness'] = 'TestRig'
+        $j['modules'] = $Modules
+    }.GetNewClosure()
+    return New-TestJob $Rig -Entries $Entries -Mutate $mutate
 }
 
 function Read-Done {
@@ -352,6 +364,8 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
     AfterEach {
         Stop-FakeGameLeftovers
         Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_HARNESS -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_NOMODLOG -ErrorAction SilentlyContinue
     }
 
     It 'completes: installs, patches, runs, collects and writes done.json last' {
@@ -458,6 +472,55 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
+    It 'accepts harness TestRig: run.cfg, result.txt and harness.log live in the TestRig folder' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestRigHarnessJob $rig
+        $docs = Join-Path $rig.Docs 'Mount and Blade II Bannerlord'
+
+        (Invoke-AgentCycle -Config (Get-ConfigFor $rig)) | Should Be $true
+
+        $done = Read-Done $rig
+        $done.status | Should Be 'completed'
+        $done.runs[0].exitClass | Should Be 'Completed'
+        # the fake game read run.cfg from the TestRig folder; nothing was written to the other one
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) | Should Match 'seed=7'
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-other-runcfg.txt')).Trim() | Should Be 'False'
+        $runDir = Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1'
+        (Get-Content -Raw (Join-Path $runDir 'result.txt')) | Should Match 'status=Completed'
+        (Get-Content -Raw (Join-Path $runDir 'harness.log')) | Should Match 'harness started'
+        $run = Get-Content -Raw (Join-Path $runDir 'agent-run.json') | ConvertFrom-Json
+        $run.artifacts -contains 'result.txt' | Should Be $true
+        $run.artifacts -contains 'harness.log' | Should Be $true
+        # run.cfg removed after the run, in both folders
+        Test-Path (Join-Path $docs 'TestRig\harness\run.cfg') | Should Be $false
+        Test-Path (Join-Path $docs 'CoherentWarAI\harness\run.cfg') | Should Be $false
+    }
+
+    It 'does not take a stale TestRig result.txt as this run result' {
+        $env:FAKEGAME_BEHAVIOR = 'noresult'
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestRigHarnessJob $rig
+        $trDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness'
+        New-Item -ItemType Directory -Path $trDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $trDir 'result.txt'), 'status=Completed', $utf8NoBom)
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'NotCompleted'
+    }
+
+    It 'keeps CoherentWarAI behavior: run.cfg goes to the CoherentWarAI folder, nothing is created in TestRig' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $null = New-TestJob $rig
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-other-runcfg.txt')).Trim() | Should Be 'False'
+        Test-Path (Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig') | Should Be $false
+    }
+
     It 'classifies an unknown harness as SetupError without launching' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
@@ -465,6 +528,43 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'SetupError'
         Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
+    }
+
+    It 'classifies a TestRig run as SetupError without launching when TestRig.Harness is not in the package' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestRigHarnessJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml')
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'SetupError'
+        $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
+        $run.message | Should Match 'TestRig\.Harness'
+        Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
+    }
+
+    It 'classifies a TestRig run as SetupError without launching when TestRig.Harness is not in job.modules' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestRigHarnessJob $rig -Modules @('Native', 'CoherentWarAI')
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'SetupError'
+        $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
+        $run.message | Should Match 'TestRig\.Harness'
+        Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
+    }
+
+    It 'completes a TestRig run without CoherentWarAI.log (the mod log is not a harness artifact)' {
+        $env:FAKEGAME_NOMODLOG = '1'
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestRigHarnessJob $rig
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
+        $run.artifacts -contains 'CoherentWarAI.log' | Should Be $false
+        $run.artifacts -contains 'result.txt' | Should Be $true
     }
 
     It 'processes one job with Invoke-AgentMain -Once' {
@@ -636,7 +736,7 @@ Describe 'Write-JsonAtomic (W1)' {
 Describe 'Stop-ProcessTree heartbeat (W2)' {
     It 'calls the heartbeat between wait slices while the game does not exit' {
         Mock Invoke-TaskKillTree { return 0 }   # taskkill does nothing: the wait must slice
-        $p = Start-Process -FilePath $powershellExe -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 60' -PassThru
+        $p = Start-Process -FilePath $powershellExe -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 60' -PassThru -NoNewWindow
         try {
             $counter = @{ n = 0 }
             $result = Stop-ProcessTree $p -WaitMilliseconds 7000 -Heartbeat { $counter.n++ }.GetNewClosure()
@@ -674,6 +774,36 @@ Describe 'Resolve-OrphanedJobs at startup (W3)' {
         $log | Should Match '20261031-110000-bbbb'
         $log | Should Match 'run\.cfg'
     }
+
+    It 'removes a leftover run.cfg from the TestRig folder too' {
+        $rig = New-Rig
+        $dirA = New-TestJob $rig '20261031-110000-bbbb'
+        Rename-Item (Join-Path $dirA 'job.json') 'job.claimed.json'
+        $trDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness'
+        New-Item -ItemType Directory -Path $trDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $trDir 'run.cfg'), 'seed=1', $utf8NoBom)
+
+        Invoke-AgentMain -ConfigPath $rig.ConfigPath -Once | Should Be 0
+
+        Test-Path (Join-Path $trDir 'run.cfg') | Should Be $false
+        (Get-Content -Raw (Join-Path $rig.Work 'agent.log')) | Should Match 'Removed leftover harness run\.cfg'
+    }
+
+    It 'removes leftover run.cfg files from both folders in one startup' {
+        $rig = New-Rig
+        $dirA = New-TestJob $rig '20261031-110000-bbbb'
+        Rename-Item (Join-Path $dirA 'job.json') 'job.claimed.json'
+        $docs = Join-Path $rig.Docs 'Mount and Blade II Bannerlord'
+        $dirs = @((Join-Path $docs 'CoherentWarAI\harness'), (Join-Path $docs 'TestRig\harness'))
+        foreach ($d in $dirs) {
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $d 'run.cfg'), 'seed=1', $utf8NoBom)
+        }
+
+        Invoke-AgentMain -ConfigPath $rig.ConfigPath -Once | Should Be 0
+
+        foreach ($d in $dirs) { Test-Path (Join-Path $d 'run.cfg') | Should Be $false }
+    }
 }
 
 Describe 'Invoke-Job: hardening end-to-end' {
@@ -699,7 +829,7 @@ Describe 'Invoke-Job: hardening end-to-end' {
             stallMinutes = 5; budgetMinutes = 60; hardTimeoutMinutes = 10000000000 }
         $resultsDir = Join-Path $rig.Root 'res'
         $ctx = @{ JobId = '20261031-120000-aaaa'; JobDir = $rig.Root; ResultsDir = $resultsDir; Beat = 0; RunCount = 1 }
-        $rec = Invoke-Run -Config (Get-ConfigFor $rig) -Context $ctx -Run $run -Modules @('Native') -RunIndex 1 -ResultsDir $resultsDir
+        $rec = Invoke-Run -Config (Get-ConfigFor $rig) -Context $ctx -Run $run -Modules @('Native', 'CoherentWarAI.TestHarness') -PackageModuleIds @('CoherentWarAI.TestHarness') -RunIndex 1 -ResultsDir $resultsDir
         $rec.exitClass | Should Be 'SetupError'
         Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
         Test-Path (Join-Path (Get-RigHarnessDir $rig) 'run.cfg') | Should Be $false
@@ -885,5 +1015,170 @@ Describe 'TestRigAgent.ps1 run via powershell -File without -ConfigPath (PS 5.1)
         $LASTEXITCODE | Should Be 0
         $out | Should Not Match 'Join-Path'
         (Get-Content -LiteralPath (Join-Path $rig.Work 'agent.log') -Raw) | Should Match 'Agent started'
+    }
+}
+
+Describe 'Invoke-Run: game dialogs during supervision' {
+    Mock Get-BannerlordProcess { return $null }
+
+    BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
+    AfterEach {
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+    }
+
+    function Read-AgentRun { param($Rig) return (Get-Content -Raw (Join-Path $Rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json) }
+
+    # Separate Contexts: in Pester 3.4 a Mock made in an It stays active until its block ends.
+    Context 'with a mocked dialog search' {
+        It 'confirms a "Mod change detected" dialog once and never another title (mocked)' {
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            Mock Write-AgentLog { }
+            Mock Get-GameDialogs {
+                return @([pscustomobject]@{ Handle = [IntPtr]101; Title = 'Mod change detected' },
+                    [pscustomobject]@{ Handle = [IntPtr]102; Title = 'Some other dialog' })
+            }
+            Mock Confirm-KnownGameDialog { }   # no failure reason: OK was sent
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+            Assert-MockCalled Confirm-KnownGameDialog -Scope It -Exactly -Times 1 -ParameterFilter { $Dialog.Title -ceq 'Mod change detected' }
+            Assert-MockCalled Confirm-KnownGameDialog -Scope It -Exactly -Times 0 -ParameterFilter { $Dialog.Title -ne 'Mod change detected' }
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -match "^Dismissed dialog 'Mod change detected' \(pid \d+\)\.$" }
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -eq "Game dialog seen: 'Some other dialog'" }
+            @((Read-AgentRun $rig).dismissedDialogs) | Should Be @('Mod change detected')
+        }
+
+        It 'does not confirm a title that differs only in case (mocked)' {
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            Mock Get-GameDialogs { return @([pscustomobject]@{ Handle = [IntPtr]103; Title = 'mod change detected' }) }
+            Mock Confirm-KnownGameDialog { }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            Assert-MockCalled Get-GameDialogs -Scope It -Times 1   # the dialog was looked at
+            Assert-MockCalled Confirm-KnownGameDialog -Scope It -Exactly -Times 0
+        }
+
+        It 'logs the reason once when OK cannot be sent and records no dismissal (mocked)' {
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            Mock Write-AgentLog { }
+            Mock Get-GameDialogs { return @([pscustomobject]@{ Handle = [IntPtr]104; Title = 'Mod change detected' }) }
+            Mock Confirm-KnownGameDialog { return 'PostMessage failed (error 5)' }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            Assert-MockCalled Confirm-KnownGameDialog -Scope It -Exactly -Times 1
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -eq "Could not confirm dialog 'Mod change detected': PostMessage failed (error 5)" }
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 0 -ParameterFilter { $Message -like 'Dismissed dialog*' }
+            @((Read-AgentRun $rig).dismissedDialogs).Count | Should Be 0
+        }
+
+        It 'logs once when a dialog is still open 5 s after OK was sent (mocked)' {
+            $env:FAKEGAME_BEHAVIOR = 'slow'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            Mock Write-AgentLog { }
+            Mock Get-GameDialogs { return @([pscustomobject]@{ Handle = [IntPtr]105; Title = 'Mod change detected' }) }
+            Mock Confirm-KnownGameDialog { }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            Assert-MockCalled Confirm-KnownGameDialog -Scope It -Exactly -Times 1
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -eq "Dialog 'Mod change detected' still open after confirm" }
+        }
+
+        It 'keeps supervising when the dialog check throws, and logs the failure once' {
+            $env:FAKEGAME_BEHAVIOR = 'slow'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            Mock Write-AgentLog { }
+            Mock Get-GameDialogs { throw 'enum failed' }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+            Assert-MockCalled Get-GameDialogs -Scope It -Times 2   # checked again after the failure
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -like '*Dialog check failed*enum failed*' }
+        }
+    }
+
+    # These tests show a real message box on the desktop for a moment (the fake game's); the agent or
+    # the kill tree closes it. Without an interactive desktop there is no window to find, so they are skipped.
+    $noDesktop = -not [Environment]::UserInteractive
+    if ($noDesktop) { Write-Warning 'Skipping the real message box tests: the session is not interactive.' }
+
+    Context 'end-to-end with a real message box' {
+        foreach ($case in @(
+                @{ Behavior = 'modchange'; Buttons = 'OK (single-button rule)' },
+                @{ Behavior = 'modchangeokcancel'; Buttons = 'OK/Cancel (IDOK)' })) {
+            It "sends OK to a real 'Mod change detected' message box with $($case.Buttons) and completes (end-to-end)" -Skip:$noDesktop {
+                $env:FAKEGAME_BEHAVIOR = $case.Behavior
+                $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+                $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['hardTimeoutMinutes'] = 0.5 }
+                Mock Write-AgentLog { }
+                $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+                (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+                Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -match "^Dismissed dialog 'Mod change detected' \(pid \d+\)\.$" }
+                $raw = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json')
+                $raw | Should Match '"dismissedDialogs":\s*\[\s*"Mod change detected"\s*\]'
+            }
+        }
+
+        It 'does not press a button of a Yes/No box with the known title: HardTimeout, one failure line (end-to-end)' -Skip:$noDesktop {
+            $env:FAKEGAME_BEHAVIOR = 'modchangeyesno'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['hardTimeoutMinutes'] = 0.1 }
+            Mock Write-AgentLog { }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -like "Could not confirm dialog 'Mod change detected'*" }
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 0 -ParameterFilter { $Message -like 'Dismissed dialog*' }
+            $run = Read-AgentRun $rig
+            @($run.dismissedDialogs).Count | Should Be 0
+            @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
+        }
+
+        It 'leaves a real dialog with another title alone: HardTimeout, title logged once (end-to-end)' -Skip:$noDesktop {
+            $env:FAKEGAME_BEHAVIOR = 'otherdialog'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['hardTimeoutMinutes'] = 0.1 }
+            Mock Write-AgentLog { }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -eq "Game dialog seen: 'Some other dialog'" }
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 0 -ParameterFilter { $Message -like 'Dismissed dialog*' }
+            $run = Read-AgentRun $rig
+            @($run.dismissedDialogs).Count | Should Be 0
+            @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
+        }
+    }
+}
+
+Describe 'Initialize-GameWindows: failed compile is cached (W3)' {
+    Mock Get-BannerlordProcess { return $null }
+
+    # Own Context: the Add-Type mock would otherwise stay active for the next It (Pester 3.4) and break the package check.
+    Context 'with a failing Add-Type' {
+        It 'attempts Add-Type only once and rethrows the cached error on later calls' {
+            Mock Add-Type { throw 'compile failed' }
+            try {
+                foreach ($attempt in 1..3) {
+                    { Initialize-GameWindows -TypeName 'BannerlordTestRig.NotLoaded' -Source 'broken' } | Should Throw 'compile failed'
+                }
+                Assert-MockCalled Add-Type -Scope It -Exactly -Times 1
+            }
+            finally { $script:GameWindowsInitError = $null }   # the real type must still load in later tests
+        }
+    }
+
+    It 'is called once before launch, so a failed compile is logged and the run still completes' {
+        $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs; $env:FAKEGAME_BEHAVIOR = 'complete'
+        try {
+            $null = New-TestJob $rig
+            Mock Write-AgentLog { }
+            Mock Initialize-GameWindows { throw 'compile failed' }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -eq 'Game dialog check unavailable: compile failed' }
+        }
+        finally {
+            Stop-FakeGameLeftovers
+            Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+        }
     }
 }

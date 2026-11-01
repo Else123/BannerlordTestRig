@@ -31,6 +31,7 @@ param(
     [int]$Seed = 1,
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
     [ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode = 'WarSails',
+    [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
     [ValidateRange(1, [int]::MaxValue)][int]$BudgetMinutes = 60,
     [ValidateRange(1, [int]::MaxValue)][int]$HardTimeoutMinutes = 20,
@@ -45,6 +46,11 @@ param(
 . (Join-Path $PSScriptRoot 'Transport.Ssh.ps1')
 . (Join-Path $PSScriptRoot 'Build-Package.ps1')
 
+# Harness id -> module id of its in-game driver: the single mapping (lookups are case-insensitive).
+$script:RigHarnessModules = [ordered]@{
+    CoherentWarAI = 'CoherentWarAI.TestHarness'
+    TestRig       = 'TestRig.Harness'
+}
 $script:DefaultMsBuildPath = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
 
 function Write-RigMessage {
@@ -83,10 +89,19 @@ function New-RigJobId {
 
 # Module load order as in Run-SoakTest.ps1 (BannerlordCoherentWarAI).
 function Get-RigModules {
-    param([Parameter(Mandatory)][ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode)
+    param(
+        [Parameter(Mandatory)][ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode,
+        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI'
+    )
     $modules = @('Bannerlord.Harmony', 'Bannerlord.ButterLib', 'Bannerlord.UIExtenderEx', 'Bannerlord.MBOptionScreen', 'Native', 'SandBoxCore', 'Sandbox', 'StoryMode')
     if ($Mode -ne 'NoDlc') { $modules += 'NavalDLC' }
-    $modules + @('CoherentWarAI', 'CoherentWarAI.TestHarness')
+    $modules + @('CoherentWarAI', $script:RigHarnessModules[$Harness])
+}
+
+function Get-RigHarnessName {
+    # The canonical spelling of a harness id (the key in $script:RigHarnessModules).
+    param([Parameter(Mandatory)][string]$Harness)
+    $script:RigHarnessModules.Keys | Where-Object { $_ -eq $Harness } | Select-Object -First 1
 }
 
 # Zips <PackageFrom>\Modules\** with entry names "Modules/<id>/..." (forward slashes).
@@ -131,7 +146,8 @@ function New-RigJobManifest {
         [Parameter(Mandatory)][int]$StallMinutes,
         [Parameter(Mandatory)][int]$BudgetMinutes,
         [Parameter(Mandatory)][int]$HardTimeoutMinutes,
-        [object[]]$Repos = @()   # build mode: repo states (name, sha, dirty); empty with -PackageFrom
+        [object[]]$Repos = @(),   # build mode: repo states (name, sha, dirty); empty with -PackageFrom
+        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI'
     )
     [ordered]@{
         schema              = 1
@@ -140,12 +156,12 @@ function New-RigJobManifest {
         expectedGameVersion = $null
         package             = [ordered]@{ file = 'package.zip'; sha256 = $PackageSha256 }
         repos               = @($Repos)
-        modules             = @(Get-RigModules -Mode $Mode)
+        modules             = @(Get-RigModules -Mode $Mode -Harness $Harness)
         runs                = @(
             [ordered]@{
                 runId              = 'r1'
                 kind               = 'soak'
-                harness            = 'CoherentWarAI'
+                harness            = $Harness
                 seed               = $Seed
                 days               = $Days
                 mode               = $Mode
@@ -380,6 +396,7 @@ function Start-TestRigJob {
         [string]$PackageFrom,
         [int]$Seed, [int]$Days, [string]$Mode,
         [int]$StallMinutes, [int]$BudgetMinutes, [int]$HardTimeoutMinutes,
+        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
         [double]$ClaimTimeoutSeconds, [double]$TimeoutMinutes,
         [string]$ConfigPath,
         [string]$OutRoot,
@@ -392,8 +409,15 @@ function Start-TestRigJob {
         [int]$MaxWithdrawAttempts = 5
     )
     try {
+        $Harness = Get-RigHarnessName $Harness   # canonical casing for job.json
         $target = Get-RigConfig -Path $ConfigPath
         $buildMode = -not $PackageFrom
+        if (-not $buildMode) {
+            $harnessModule = $script:RigHarnessModules[$Harness]
+            if (-not (Test-Path -LiteralPath (Join-Path $PackageFrom "Modules\$harnessModule") -PathType Container)) {
+                throw "Package source '$PackageFrom' has no Modules\$harnessModule (needed by -Harness $Harness)."
+            }
+        }
         if ($buildMode) {
             if ([string]::IsNullOrWhiteSpace([string]$target.towerGamePath)) {
                 throw "Config '$ConfigPath' is missing 'towerGamePath' (needed to build; that game folder is only read, never written)."
@@ -424,7 +448,7 @@ function Start-TestRigJob {
         $pkg = New-RigPackage -PackageFrom $PackageFrom -ZipPath (Join-Path $jobDir 'package.zip')
         $manifest = New-RigJobManifest -JobId $jobId -CreatedUtc ([datetime]::UtcNow) -PackageSha256 $pkg.Sha256 `
             -Seed $Seed -Days $Days -Mode $Mode -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes `
-            -Repos $repos
+            -Repos $repos -Harness $Harness
         Write-RigJsonFile -Path (Join-Path $jobDir 'job.json') -InputObject $manifest
 
         Publish-Job -Target $target -JobId $jobId -JobDirectory $jobDir
@@ -463,7 +487,7 @@ function Start-TestRigJob {
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'runner.config.json' }
     $code = Start-TestRigJob -PackageFrom $PackageFrom -Seed $Seed -Days $Days -Mode $Mode `
-        -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes `
+        -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes -Harness $Harness `
         -ClaimTimeoutSeconds $ClaimTimeoutSeconds -TimeoutMinutes $TimeoutMinutes `
         -ConfigPath $ConfigPath -OutRoot (Join-Path (Split-Path -Parent $PSScriptRoot) 'out') `
         -WorkspaceRoot (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) -Wait:$Wait

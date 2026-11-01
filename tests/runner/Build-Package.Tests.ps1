@@ -42,13 +42,14 @@ function New-GitRepo([string]$Path, [string[]]$Files) {
     Invoke-Git $Path @('commit', '-q', '-m', 'init')
 }
 
-# Five project paths relative to the workspace root, in the order of the contract table.
+# Six project paths relative to the workspace root, in the order of the contract table.
 $script:projects = @(
     @{ Repo = 'BannerlordCoherentWarAI'; Rel = 'src\CoherentWarAI\CoherentWarAI.csproj'; Id = 'CoherentWarAI' },
     @{ Repo = 'BannerlordCoherentWarAI'; Rel = 'tools\TestHarness\CoherentWarAI.TestHarness.csproj'; Id = 'CoherentWarAI.TestHarness' },
     @{ Repo = 'BannerlordAutoTrader'; Rel = 'AutoTrader\src\AutoTrader.csproj'; Id = 'AutoTraderSpeed' },
     @{ Repo = 'BannerlordSmithingSuite'; Rel = 'src\SmithingSuite.csproj'; Id = 'SmithingSuite' },
-    @{ Repo = 'CompanionManagementSuite'; Rel = 'src\CompanionSuite.csproj'; Id = 'CompanionManagementSuite' }
+    @{ Repo = 'CompanionManagementSuite'; Rel = 'src\CompanionSuite.csproj'; Id = 'CompanionManagementSuite' },
+    @{ Repo = 'BannerlordTestRig'; Rel = 'src\TestRig.Harness\TestRig.Harness.csproj'; Id = 'TestRig.Harness' }
 )
 
 function New-FakeWorkspace([string]$Root) {
@@ -72,7 +73,7 @@ foreach ($a in $args) { if ($a -like '/p:BannerlordModulesPath=*') { $modules = 
 $name = [IO.Path]::GetFileName($proj)
 if ($env:RIG_FAKE_FAIL -and $name -eq $env:RIG_FAKE_FAIL) { Write-Output "error MSB9999: fake failure in $name"; exit 1 }
 $ids = @{
-    'CoherentWarAI.csproj' = 'CoherentWarAI'; 'CoherentWarAI.TestHarness.csproj' = 'CoherentWarAI.TestHarness'
+    'CoherentWarAI.csproj' = 'CoherentWarAI'; 'CoherentWarAI.TestHarness.csproj' = 'CoherentWarAI.TestHarness'; 'TestRig.Harness.csproj' = 'TestRig.Harness'
     'AutoTrader.csproj' = 'AutoTraderSpeed'; 'SmithingSuite.csproj' = 'SmithingSuite'; 'CompanionSuite.csproj' = 'CompanionManagementSuite'
 }
 $id = $ids[$name]
@@ -99,9 +100,9 @@ exit 0
 function ConvertTo-Slash($Paths) { @($Paths | ForEach-Object { ([string]$_) -replace '\\', '/' }) }
 
 Describe 'Get-RigBuildProjects' {
-    It 'returns the five projects with repo, absolute path and module id' {
+    It 'returns the six projects with repo, absolute path and module id' {
         $r = Get-RigBuildProjects -WorkspaceRoot 'C:\ws'
-        @($r).Count | Should Be 5
+        @($r).Count | Should Be 6
         foreach ($p in $script:projects) {
             $hit = @($r | Where-Object { $_.ModuleId -eq $p.Id })
             $hit.Count | Should Be 1
@@ -359,33 +360,33 @@ Describe 'Invoke-RigBuildPackage' {
         Invoke-RigBuildPackage @p
     }
 
-    It 'builds all five projects into <StageDir>\Modules, writes the manifest and returns StageDir, ManifestPath, 4 repos' {
+    It 'builds all six projects into <StageDir>\Modules, writes the manifest and returns StageDir, ManifestPath, 5 repos' {
         $r = Build @{}
         $r.StageDir | Should Be $script:stage
         $r.ManifestPath | Should Be (Join-Path $script:stage 'manifest.json')
         Test-Path -LiteralPath $r.ManifestPath | Should Be $true
-        @($r.Repos).Count | Should Be 4
-        @($r.Repos | ForEach-Object { $_.name } | Select-Object -Unique).Count | Should Be 4
-        ((@($r.Repos | ForEach-Object { $_.name }) | Sort-Object) -join ',') | Should Be 'BannerlordAutoTrader,BannerlordCoherentWarAI,BannerlordSmithingSuite,CompanionManagementSuite'
+        @($r.Repos).Count | Should Be 5
+        @($r.Repos | ForEach-Object { $_.name } | Select-Object -Unique).Count | Should Be 5
+        ((@($r.Repos | ForEach-Object { $_.name }) | Sort-Object) -join ',') | Should Be 'BannerlordAutoTrader,BannerlordCoherentWarAI,BannerlordSmithingSuite,BannerlordTestRig,CompanionManagementSuite'
         foreach ($s in $r.Repos) { $s.dirty | Should Be $false; $s.sha | Should Match '^[0-9a-f]{40}$' }
         foreach ($p in $script:projects) {
             Test-Path -LiteralPath (Join-Path $script:stage "Modules\$($p.Id)\SubModule.xml") | Should Be $true
         }
         $lines = @(Get-Content -LiteralPath $script:log)
-        $lines.Count | Should Be 5
+        $lines.Count | Should Be 6
         foreach ($l in $lines) {
             $l.Contains('/p:BannerlordModulesPath=' + (Join-Path $script:stage 'Modules')) | Should Be $true
             $l.Contains('/p:BannerlordPath=' + $script:game) | Should Be $true
         }
         $m = [IO.File]::ReadAllText($r.ManifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
         ((@($m.modules | ForEach-Object { $_.id }) | Sort-Object) -join ',') | Should Be ((@($script:projects | ForEach-Object { $_.Id }) | Sort-Object) -join ',')
-        @($m.repos).Count | Should Be 4
+        @($m.repos).Count | Should Be 5
     }
 
     It 'keeps the MSBuild output of every project in <StageDir>\build.log' {
         Build @{} | Out-Null
         $text = [IO.File]::ReadAllText((Join-Path $script:stage 'build.log'))
-        foreach ($n in 'CoherentWarAI.csproj', 'CoherentWarAI.TestHarness.csproj', 'AutoTrader.csproj', 'SmithingSuite.csproj', 'CompanionSuite.csproj') {
+        foreach ($n in 'CoherentWarAI.csproj', 'CoherentWarAI.TestHarness.csproj', 'AutoTrader.csproj', 'SmithingSuite.csproj', 'CompanionSuite.csproj', 'TestRig.Harness.csproj') {
             $text.Contains("fake msbuild ok: $n") | Should Be $true
         }
     }

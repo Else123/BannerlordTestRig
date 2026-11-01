@@ -80,9 +80,13 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
 
 - `modules` is the full `_MODULES_` load order; the agent passes it unchanged.
 - `expectedGameVersion`: `null` in S1 = not checked.
-- `harness`: S1 knows only `CoherentWarAI` (the existing harness, run.cfg in
-  `<MyDocuments>\Mount and Blade II Bannerlord\CoherentWarAI\harness\run.cfg`). Anything else ->
-  run classified `SetupError`.
+- `harness`: selects the in-game harness; `run.cfg`, `result.txt` and `harness.log` live in its folder
+  below `<MyDocuments>\Mount and Blade II Bannerlord\`. Anything else -> run classified `SetupError`.
+
+  | `harness` | Folder | Harness module id in `modules` |
+  |-----------|--------|--------------------------------|
+  | `CoherentWarAI` | `CoherentWarAI\harness` | `CoherentWarAI.TestHarness` |
+  | `TestRig` | `TestRig\harness` | `TestRig.Harness` |
 - `mode`: `WarSails` | `NoDlc` | `FeatureOff` (as in the CoherentWarAI harness).
 - Unknown `schema` or a missing required field -> job finishes with `done.json` status `rejected`.
 
@@ -106,8 +110,13 @@ before anything is installed. Native, NavalDLC and Workshop modules are never to
 ```json
 { "schema": 1, "runId": "r1", "exitClass": "Completed", "pid": 1234,
   "startedUtc": "...", "endedUtc": "...", "artifacts": [ "result.txt", "harness.log" ],
-  "baselineRestored": null, "message": null }
+  "baselineRestored": null, "message": null, "dismissedDialogs": [ "Mod change detected" ] }
 ```
+
+`dismissedDialogs`: titles of game dialogs the agent sent OK to during the run, empty if none.
+While the game runs, the agent checks its visible standard dialogs (`#32770`) every second. Only the
+exact title `Mod change detected` (shown by the engine on the first start after the module list
+changed) gets OK; any other dialog title is logged once per run and left alone.
 
 `exitClass` (names for the exit codes of `Run-SoakTest.ps1` in BannerlordCoherentWarAI):
 

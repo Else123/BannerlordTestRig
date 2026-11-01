@@ -10,7 +10,7 @@ function New-TempDir {
 }
 
 function New-PackageFixture([string]$Root) {
-    foreach ($m in 'CoherentWarAI', 'CoherentWarAI.TestHarness') {
+    foreach ($m in 'CoherentWarAI', 'CoherentWarAI.TestHarness', 'TestRig.Harness') {
         $bin = Join-Path $Root "Modules\$m\bin\Win64_Shipping_Client"
         New-Item -ItemType Directory -Path $bin -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $bin "$m.dll") -Value "dll $m"
@@ -75,6 +75,24 @@ Describe 'Get-RigModules' {
     It 'NoDlc omits NavalDLC' {
         (Get-RigModules -Mode NoDlc) -join ',' | Should Be (($base + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
     }
+    It 'Harness CoherentWarAI keeps the load order (ends with CoherentWarAI, CoherentWarAI.TestHarness)' {
+        (Get-RigModules -Mode WarSails -Harness CoherentWarAI) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
+    }
+    It 'Harness TestRig ends with CoherentWarAI, TestRig.Harness and omits CoherentWarAI.TestHarness' {
+        $m = @(Get-RigModules -Mode WarSails -Harness TestRig)
+        $m -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
+        ($m -contains 'CoherentWarAI.TestHarness') | Should Be $false
+    }
+    It 'NoDlc drops NavalDLC for both harnesses' {
+        (Get-RigModules -Mode NoDlc -Harness CoherentWarAI) -join ',' | Should Be (($base + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
+        (Get-RigModules -Mode NoDlc -Harness TestRig) -join ',' | Should Be (($base + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
+    }
+    It 'rejects an unknown harness' {
+        $err = $null
+        try { Get-RigModules -Mode WarSails -Harness Other } catch { $err = $_ }
+        $err | Should Not BeNullOrEmpty
+        $err.FullyQualifiedErrorId | Should Match '^ParameterArgumentValidationError'
+    }
 }
 
 Describe 'New-RigPackage' {
@@ -128,6 +146,14 @@ Describe 'New-RigJobManifest' {
         $r.budgetMinutes | Should Be 60
         $r.hardTimeoutMinutes | Should Be 20
         $text | Should Match '"repos":\s*\[\s*\]'
+    }
+    It 'sets runs[0].harness and the matching modules for -Harness TestRig' {
+        $j = New-RigJobManifest -JobId '20261031-153000-a1b2' -CreatedUtc ([datetime]'2026-10-31T15:30:00Z').ToUniversalTime() `
+            -PackageSha256 'ABC123' -Seed 7 -Days 3 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig
+        $o = (ConvertTo-RigJson $j) | ConvertFrom-Json
+        $o.runs[0].harness | Should Be 'TestRig'
+        ($o.modules -join ',') | Should Be ((Get-RigModules -Mode WarSails -Harness TestRig) -join ',')
+        ($o.modules -contains 'CoherentWarAI.TestHarness') | Should Be $false
     }
     It 'writes UTF-8 without BOM' {
         $f = Join-Path ([IO.Path]::GetTempPath()) ('bom-' + [guid]::NewGuid().ToString('N') + '.json')
@@ -283,6 +309,33 @@ Describe 'Start-TestRigJob' {
         $r.seed | Should Be 9
         $r.days | Should Be 4
         $r.mode | Should Be 'NoDlc'
+    }
+
+    It 'defaults to harness CoherentWarAI in job.json' {
+        Start-Rig @{} | Out-Null
+        $script:published.Job.runs[0].harness | Should Be 'CoherentWarAI'
+    }
+
+    It 'passes -Harness TestRig into job.json (harness and modules)' {
+        Start-Rig @{ Harness = 'TestRig' } | Out-Null
+        $script:published.Job.runs[0].harness | Should Be 'TestRig'
+        ($script:published.Job.modules -contains 'TestRig.Harness') | Should Be $true
+        ($script:published.Job.modules -contains 'CoherentWarAI.TestHarness') | Should Be $false
+    }
+
+    It 'writes the canonical harness casing into job.json for -Harness testrig' {
+        Start-Rig @{ Harness = 'testrig' } | Out-Null
+        $script:published.Job.runs[0].harness | Should BeExactly 'TestRig'
+        ($script:published.Job.modules -contains 'TestRig.Harness') | Should Be $true
+    }
+
+    It 'exits 1 before publishing when -PackageFrom lacks the harness module' {
+        Remove-Item -LiteralPath (Join-Path $script:pkg 'Modules\TestRig.Harness') -Recurse -Force
+        $script:msgs = @()
+        Mock Write-Host { $script:msgs += "$Object" }
+        (Start-Rig @{ Harness = 'TestRig' }) | Should Be 1
+        $script:calls.Publish | Should Be 0
+        ($script:msgs -join "`n") | Should Match 'TestRig\.Harness'
     }
 
     It 'returns 1 on a transport error while checking for open jobs' {
@@ -666,6 +719,30 @@ Describe 'Invoke-TestRig.ps1 parameter validation (powershell -File)' {
             $out | Should Match ($case[0].TrimStart('-'))
             $out | Should Not Match 'Config not found'
         }
+    }
+}
+
+Describe 'Invoke-TestRig.ps1 -Harness parameter' {
+    $scriptPath = Join-Path $here '..\..\runner\Invoke-TestRig.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
+    $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Harness' }
+
+    It 'exists with default CoherentWarAI' {
+        $param | Should Not BeNullOrEmpty
+        $param.DefaultValue.Value | Should Be 'CoherentWarAI'
+    }
+    It 'has ValidateSet CoherentWarAI, TestRig' {
+        $vs = @($param.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' })
+        $vs.Count | Should Be 1
+        (@($vs[0].PositionalArguments | ForEach-Object { $_.Value }) -join ',') | Should Be 'CoherentWarAI,TestRig'
+    }
+    It 'rejects an unknown value (powershell -File)' {
+        $out = (& powershell -NoProfile -File $scriptPath -PackageFrom C:\nowhere -Harness Other 2>&1 | Out-String)
+        $LASTEXITCODE | Should Not Be 0
+        $out | Should Match 'ParameterArgumentValidationError'
+        $out | Should Match 'Harness'
+        $out | Should Match 'Other'
+        $out | Should Not Match 'Config not found'
     }
 }
 
