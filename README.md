@@ -10,13 +10,19 @@ Slice S1 (one soak run of the existing CoherentWarAI harness) is implemented:
 - `runner/Invoke-TestRig.ps1` with the SSH transport `runner/Transport.Ssh.ps1`
 - `agent/TestRigAgent.ps1` with its installer `agent/Install-TestRigAgent.ps1`
 
-The job protocol between them is `docs/JOB-PROTOCOL.md`. Harness module, scenarios and the
-build step are not implemented yet; the layout below is the plan.
+The job protocol between them is `docs/JOB-PROTOCOL.md`. Harness module and scenarios are
+not implemented yet; the layout below is the plan.
 
 ```powershell
-copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key
-runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait
+copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key, towerGamePath
+runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the five mods, packs them, publishes the job
+runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait   # diagnosis: skip the build
 ```
+
+The build (default mode) compiles the five projects with MSBuild into `out\stage\<jobId>\Modules`
+(not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
+repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder
+(`towerGamePath`) changed during the build. `msbuildPath` is optional (default: VS 2026 Build Tools).
 
 Tests (Pester 3.4, Windows PowerShell 5.1): `Invoke-Pester tests\runner` and
 `Invoke-Pester tests\agent`.

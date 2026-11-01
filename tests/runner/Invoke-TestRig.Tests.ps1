@@ -484,7 +484,7 @@ Describe 'Invoke-TestRig.ps1 run via powershell -File (PS 5.1)' {
         # Copy to a temp folder without runner.config.json so the default path is guaranteed missing.
         $d = New-TempDir
         try {
-            foreach ($f in 'Invoke-TestRig.ps1', 'Transport.Ssh.ps1') {
+            foreach ($f in 'Invoke-TestRig.ps1', 'Transport.Ssh.ps1', 'Build-Package.ps1') {
                 Copy-Item -LiteralPath (Join-Path $here "..\..\runner\$f") -Destination $d
             }
             $pkg = New-TempDir
@@ -666,5 +666,165 @@ Describe 'Invoke-TestRig.ps1 parameter validation (powershell -File)' {
             $out | Should Match ($case[0].TrimStart('-'))
             $out | Should Not Match 'Config not found'
         }
+    }
+}
+
+Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
+    BeforeEach {
+        $script:t = New-TempDir
+        $script:out = Join-Path $script:t 'out'
+        $script:cfg = Join-Path $script:t 'build.config.json'
+        $script:buildCalls = @()
+        $script:buildFailure = $null
+        $script:published = $null
+        $script:calls = @{ Publish = 0 }
+        $script:lines = @()
+        $script:fakeRepos = @(
+            [pscustomobject]@{ name = 'RepoOne'; sha = ('a' * 40); dirty = $false },
+            [pscustomobject]@{ name = 'RepoTwo'; sha = ('b' * 40); dirty = $true })
+        Mock Get-JobState { @() } -ParameterFilter { $OpenJobs }
+        Mock Publish-Job {
+            $script:calls.Publish++
+            $script:published = @{ JobId = $JobId; Dir = $JobDirectory; Job = (Get-Content -LiteralPath (Join-Path $JobDirectory 'job.json') -Raw | ConvertFrom-Json) }
+        }
+        Mock Write-Host { $script:lines += "$Object" }
+        Mock Invoke-RigBuildPackage {
+            $script:buildCalls += , @{ WorkspaceRoot = $WorkspaceRoot; StageDir = $StageDir; TowerGamePath = $TowerGamePath; MsBuildPath = $MsBuildPath }
+            if ($script:buildFailure) { throw $script:buildFailure }
+            $m = Join-Path $StageDir 'Modules\CoherentWarAI\bin\Win64_Shipping_Client'
+            New-Item -ItemType Directory -Path $m -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $m 'CoherentWarAI.dll') -Value 'dll'
+            Set-Content -LiteralPath (Join-Path $StageDir 'Modules\CoherentWarAI\SubModule.xml') -Value '<Module/>'
+            Set-Content -LiteralPath (Join-Path $StageDir 'manifest.json') -Value '{"schema":1,"marker":"from-build"}'
+            [pscustomobject]@{ StageDir = $StageDir; ManifestPath = (Join-Path $StageDir 'manifest.json'); Repos = $script:fakeRepos }
+        }
+    }
+    AfterEach { Remove-Item -LiteralPath $script:t -Recurse -Force -ErrorAction SilentlyContinue }
+
+    function Write-BuildConfig([hashtable]$Extra) {
+        $c = @{ host = 'testpc'; user = 'rig'; keyPath = 'C:\keys\k'; remoteQueueRoot = 'C:\TestRig\queue' }
+        foreach ($k in $Extra.Keys) { $c[$k] = $Extra[$k] }
+        [IO.File]::WriteAllText($script:cfg, ($c | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+    }
+    function Start-BuildRig([hashtable]$o) {
+        $p = @{
+            PackageFrom = ''; Seed = 1; Days = 1; Mode = 'WarSails'
+            StallMinutes = 5; BudgetMinutes = 60; HardTimeoutMinutes = 20
+            ClaimTimeoutSeconds = 0.3; TimeoutMinutes = 0.5
+            ConfigPath = $script:cfg; OutRoot = $script:out
+            PollSeconds = 0.02; StaleSeconds = 0.3; AbortWaitSeconds = 0.3; RetryDelaySeconds = 0
+        }
+        foreach ($k in $o.Keys) { $p[$k] = $o[$k] }
+        Start-TestRigJob @p
+    }
+
+    It 'builds into <OutRoot>\stage\<jobId> using towerGamePath\Modules and the default msbuildPath, then publishes' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        (Start-BuildRig @{}) | Should Be 0
+        Assert-MockCalled Invoke-RigBuildPackage -Exactly 1 -Scope It
+        $script:calls.Publish | Should Be 1
+        $b = $script:buildCalls[0]
+        $b.StageDir | Should Be (Join-Path (Join-Path $script:out 'stage') $script:published.JobId)
+        $b.TowerGamePath | Should Be 'C:\Games\Bannerlord'
+        $b.MsBuildPath | Should Be 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
+        $b.WorkspaceRoot | Should Be (Split-Path -Parent (Resolve-Path (Join-Path $here '..\..')).ProviderPath)
+    }
+
+    It 'uses msbuildPath from the config when given' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord'; msbuildPath = 'D:\tools\MSBuild.exe' }
+        (Start-BuildRig @{}) | Should Be 0
+        $script:buildCalls[0].MsBuildPath | Should Be 'D:\tools\MSBuild.exe'
+    }
+
+    It 'packs the staged folder, writes the repo states into job.json and copies manifest.json next to it' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        (Start-BuildRig @{}) | Should Be 0
+        $dir = $script:published.Dir
+        $dir | Should Be (Join-Path (Join-Path $script:out 'jobs') $script:published.JobId)
+        $script:published.Job.package.sha256 | Should Be (Get-FileHash -LiteralPath (Join-Path $dir 'package.zip') -Algorithm SHA256).Hash
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $z = [IO.Compression.ZipFile]::OpenRead((Join-Path $dir 'package.zip'))
+        try { $names = @($z.Entries | ForEach-Object { $_.FullName }) } finally { $z.Dispose() }
+        ($names -contains 'Modules/CoherentWarAI/SubModule.xml') | Should Be $true
+        ($names -contains 'Modules/CoherentWarAI/bin/Win64_Shipping_Client/CoherentWarAI.dll') | Should Be $true
+        @($script:published.Job.repos).Count | Should Be 2
+        $script:published.Job.repos[0].name | Should Be 'RepoOne'
+        $script:published.Job.repos[0].sha | Should Be ('a' * 40)
+        $script:published.Job.repos[0].dirty | Should Be $false
+        $script:published.Job.repos[1].name | Should Be 'RepoTwo'
+        $script:published.Job.repos[1].dirty | Should Be $true
+        Test-Path -LiteralPath (Join-Path $dir 'manifest.json') | Should Be $true
+        (Get-Content -LiteralPath (Join-Path $dir 'manifest.json') -Raw) | Should Match 'from-build'
+    }
+
+    It 'keeps the module load order of job.json' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Start-BuildRig @{ Mode = 'NoDlc' } | Out-Null
+        ($script:published.Job.modules -join ',') | Should Be ((Get-RigModules -Mode NoDlc) -join ',')
+    }
+
+    It 'prints a line containing "tower Modules unchanged"' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        (Start-BuildRig @{}) | Should Be 0
+        ($script:lines -join "`n") | Should Match 'tower Modules unchanged'
+    }
+
+    It 'missing towerGamePath: exit 1, message names the key, no build, nothing published' {
+        Write-BuildConfig @{}
+        (Start-BuildRig @{}) | Should Be 1
+        ($script:lines -join "`n") | Should Match 'towerGamePath'
+        Assert-MockCalled Invoke-RigBuildPackage -Exactly 0 -Scope It
+        $script:calls.Publish | Should Be 0
+    }
+
+    It 'a build failure: exit 1, message shown, nothing published' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        $script:buildFailure = 'MSBuild failed for SmithingSuite.csproj (exit 1)'
+        (Start-BuildRig @{}) | Should Be 1
+        ($script:lines -join "`n") | Should Match 'SmithingSuite\.csproj'
+        $script:calls.Publish | Should Be 0
+    }
+
+    It 'a tower change: exit 1, message shown, nothing published, no "unchanged" line' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        $script:buildFailure = 'tower Modules changed during the build: Native\x.dll'
+        (Start-BuildRig @{}) | Should Be 1
+        ($script:lines -join "`n") | Should Match 'tower Modules changed'
+        ($script:lines -join "`n") | Should Not Match 'tower Modules unchanged'
+        $script:calls.Publish | Should Be 0
+    }
+
+    It 'an open job refuses before anything is built' {
+        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Mock Get-JobState { @('20261031-120000-dead') } -ParameterFilter { $OpenJobs }
+        (Start-BuildRig @{}) | Should Be 1
+        Assert-MockCalled Invoke-RigBuildPackage -Exactly 0 -Scope It
+        $script:calls.Publish | Should Be 0
+    }
+
+    It 'with -PackageFrom: no build, repos stays an empty array, no manifest.json, towerGamePath not required' {
+        Write-BuildConfig @{}
+        $pkg = Join-Path $script:t 'pkg'; New-PackageFixture $pkg
+        (Start-BuildRig @{ PackageFrom = $pkg }) | Should Be 0
+        Assert-MockCalled Invoke-RigBuildPackage -Exactly 0 -Scope It
+        $script:calls.Publish | Should Be 1
+        @($script:published.Job.repos).Count | Should Be 0
+        (Get-Content -LiteralPath (Join-Path $script:published.Dir 'job.json') -Raw) | Should Match '"repos":\s*\[\s*\]'
+        Test-Path -LiteralPath (Join-Path $script:published.Dir 'manifest.json') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $script:out 'stage') | Should Be $false
+    }
+}
+
+Describe 'New-RigPackage fails closed on unreadable files' {
+    BeforeEach { $script:t = New-TempDir }
+    AfterEach { try { [IO.Directory]::Delete('\\?\' + $script:t, $true) } catch { } }
+
+    It 'throws instead of silently leaving out files below a path longer than MAX_PATH' {
+        $dir = Join-Path $script:t 'pkg\Modules\Deep'
+        while ($dir.Length -lt 330) { $dir = Join-Path $dir ('d' * 40) }
+        $null = [IO.Directory]::CreateDirectory('\\?\' + $dir)
+        [IO.File]::WriteAllText('\\?\' + (Join-Path $dir 'deep.dll'), 'x')
+        Set-Content -LiteralPath (Join-Path $script:t 'pkg\Modules\Deep\SubModule.xml') -Value '<Module/>'
+        { New-RigPackage -PackageFrom (Join-Path $script:t 'pkg') -ZipPath (Join-Path $script:t 'x.zip') } | Should Throw
     }
 }

@@ -4,7 +4,12 @@
     optionally waits for the result and maps it to an exit code. Contract: docs/JOB-PROTOCOL.md.
 
 .DESCRIPTION
-    -PackageFrom is a folder that contains Modules\<ModuleId>\... (there is no build step in S1).
+    Default (build mode): builds the five mod projects with MSBuild into out\stage\<jobId>\Modules
+    (never into the game folder; config key towerGamePath is only read and checked for changes),
+    writes manifest.json (SHA-256 per file, git SHA and dirty flag per repo) next to package.zip and
+    puts the repo states into job.json. Config: towerGamePath (required), msbuildPath (optional,
+    default VS 2026 Build Tools). A build failure or a changed tower Modules folder exits with 1.
+    -PackageFrom (diagnosis) skips the build: it is a folder that contains Modules\<ModuleId>\...
     Without -Wait the job is published, the jobId is printed and the script exits 0.
     With -Wait it polls until done.json exists and fetches the result to out\results\<jobId>\.
     Fetched files are data: they are only parsed, never executed.
@@ -13,6 +18,9 @@
     failed, SetupError, LaunchFailed, CleanupFailed, transport error, open job); 2 test failure
     (NotCompleted, Crashed, too few days); 3 time limit or agent not responding (HardTimeout,
     Aborted, claim timeout, stale heartbeat, overall deadline). Precedence: 1 > 3 > 2 > 0.
+
+.EXAMPLE
+    .\runner\Invoke-TestRig.ps1 -Days 3 -Wait
 
 .EXAMPLE
     .\runner\Invoke-TestRig.ps1 -PackageFrom C:\stage\pkg -Days 3 -Wait
@@ -35,6 +43,9 @@ param(
 )
 
 . (Join-Path $PSScriptRoot 'Transport.Ssh.ps1')
+. (Join-Path $PSScriptRoot 'Build-Package.ps1')
+
+$script:DefaultMsBuildPath = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
 
 function Write-RigMessage {
     param([string]$Text)
@@ -90,7 +101,7 @@ function New-RigPackage {
     if (-not (Test-Path -LiteralPath $modulesDir -PathType Container)) {
         throw "No 'Modules' folder in package source: $root"
     }
-    $files = @(Get-ChildItem -LiteralPath $modulesDir -Recurse -File -Force)   # -Force: hidden files belong in the package
+    $files = @(Get-ChildItem -LiteralPath $modulesDir -Recurse -File -Force -ErrorAction Stop)   # -Force: hidden files belong in the package
     if ($files.Count -eq 0) { throw "Package source has no files under $modulesDir" }
 
     Add-Type -AssemblyName System.IO.Compression
@@ -119,7 +130,8 @@ function New-RigJobManifest {
         [Parameter(Mandatory)][string]$Mode,
         [Parameter(Mandatory)][int]$StallMinutes,
         [Parameter(Mandatory)][int]$BudgetMinutes,
-        [Parameter(Mandatory)][int]$HardTimeoutMinutes
+        [Parameter(Mandatory)][int]$HardTimeoutMinutes,
+        [object[]]$Repos = @()   # build mode: repo states (name, sha, dirty); empty with -PackageFrom
     )
     [ordered]@{
         schema              = 1
@@ -127,7 +139,7 @@ function New-RigJobManifest {
         createdUtc          = $CreatedUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
         expectedGameVersion = $null
         package             = [ordered]@{ file = 'package.zip'; sha256 = $PackageSha256 }
-        repos               = @()   # S1: the package comes from copied module folders, not from a repo
+        repos               = @($Repos)
         modules             = @(Get-RigModules -Mode $Mode)
         runs                = @(
             [ordered]@{
@@ -371,6 +383,7 @@ function Start-TestRigJob {
         [double]$ClaimTimeoutSeconds, [double]$TimeoutMinutes,
         [string]$ConfigPath,
         [string]$OutRoot,
+        [string]$WorkspaceRoot,   # folder that contains the mod repos; default: parent folder of this repo
         [switch]$Wait,
         [double]$PollSeconds = 5,
         [double]$StaleSeconds = 120,
@@ -379,8 +392,15 @@ function Start-TestRigJob {
         [int]$MaxWithdrawAttempts = 5
     )
     try {
-        if (-not $PackageFrom) { throw '-PackageFrom is required.' }
         $target = Get-RigConfig -Path $ConfigPath
+        $buildMode = -not $PackageFrom
+        if ($buildMode) {
+            if ([string]::IsNullOrWhiteSpace([string]$target.towerGamePath)) {
+                throw "Config '$ConfigPath' is missing 'towerGamePath' (needed to build; that game folder is only read, never written)."
+            }
+            $msbuildPath = if ([string]::IsNullOrWhiteSpace([string]$target.msbuildPath)) { $script:DefaultMsBuildPath } else { [string]$target.msbuildPath }
+            if (-not $WorkspaceRoot) { $WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+        }
 
         $open = @(Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action { Get-JobState -Target $target -OpenJobs })
         if ($open.Count -gt 0) {
@@ -391,9 +411,20 @@ function Start-TestRigJob {
         $jobId = New-RigJobId
         $jobDir = Join-Path (Join-Path $OutRoot 'jobs') $jobId
         $null = New-Item -ItemType Directory -Path $jobDir -Force
+        $repos = @()
+        if ($buildMode) {
+            $stageDir = Join-Path (Join-Path $OutRoot 'stage') $jobId
+            $build = Invoke-RigBuildPackage -WorkspaceRoot $WorkspaceRoot -StageDir $stageDir `
+                -TowerGamePath ([string]$target.towerGamePath) -MsBuildPath $msbuildPath
+            Write-RigMessage "build: staged in $stageDir; tower Modules unchanged"
+            Copy-Item -LiteralPath $build.ManifestPath -Destination (Join-Path $jobDir 'manifest.json') -ErrorAction Stop
+            $repos = @($build.Repos)
+            $PackageFrom = $stageDir
+        }
         $pkg = New-RigPackage -PackageFrom $PackageFrom -ZipPath (Join-Path $jobDir 'package.zip')
         $manifest = New-RigJobManifest -JobId $jobId -CreatedUtc ([datetime]::UtcNow) -PackageSha256 $pkg.Sha256 `
-            -Seed $Seed -Days $Days -Mode $Mode -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes
+            -Seed $Seed -Days $Days -Mode $Mode -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes `
+            -Repos $repos
         Write-RigJsonFile -Path (Join-Path $jobDir 'job.json') -InputObject $manifest
 
         Publish-Job -Target $target -JobId $jobId -JobDirectory $jobDir
@@ -434,6 +465,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $code = Start-TestRigJob -PackageFrom $PackageFrom -Seed $Seed -Days $Days -Mode $Mode `
         -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes `
         -ClaimTimeoutSeconds $ClaimTimeoutSeconds -TimeoutMinutes $TimeoutMinutes `
-        -ConfigPath $ConfigPath -OutRoot (Join-Path (Split-Path -Parent $PSScriptRoot) 'out') -Wait:$Wait
+        -ConfigPath $ConfigPath -OutRoot (Join-Path (Split-Path -Parent $PSScriptRoot) 'out') `
+        -WorkspaceRoot (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) -Wait:$Wait
     exit $code
 }

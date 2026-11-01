@@ -1,0 +1,234 @@
+# Build step of the test rig runner: builds the five mod projects into a staging folder, guards the
+# tower (the game's own Modules folder) against changes and writes manifest.json.
+# Functions only; dot-sourced by Invoke-TestRig.ps1 (and by tests\runner\Build-Package.Tests.ps1).
+
+# The five projects, relative to the workspace root (the folder that contains the repo folders).
+function Get-RigBuildProjects {
+    param([Parameter(Mandatory)][string]$WorkspaceRoot)
+    $table = @(
+        @('BannerlordCoherentWarAI', 'src\CoherentWarAI\CoherentWarAI.csproj', 'CoherentWarAI'),
+        @('BannerlordCoherentWarAI', 'tools\TestHarness\CoherentWarAI.TestHarness.csproj', 'CoherentWarAI.TestHarness'),
+        @('BannerlordAutoTrader', 'AutoTrader\src\AutoTrader.csproj', 'AutoTraderSpeed'),
+        @('BannerlordSmithingSuite', 'src\SmithingSuite.csproj', 'SmithingSuite'),
+        @('CompanionManagementSuite', 'src\CompanionSuite.csproj', 'CompanionManagementSuite')
+    )
+    foreach ($row in $table) {
+        [pscustomobject]@{
+            Repo        = $row[0]
+            ProjectPath = Join-Path (Join-Path $WorkspaceRoot $row[0]) $row[1]
+            ModuleId    = $row[2]
+        }
+    }
+}
+
+# MSBuild decodes %XX and splits property values on ';' and ',' - escape them (the '%' first).
+function ConvertTo-RigMsBuildValue {
+    param([Parameter(Mandatory)][string]$Value)
+    $Value.Replace('%', '%25').Replace(';', '%3B').Replace(',', '%2C')
+}
+
+# Builds one project with the build landing in $ModulesPath (BannerlordModulesPath overrides the
+# game-folder default of the projects' Directory.Build.props; BannerlordPath pins the game install the
+# projects resolve their references against). None of the five projects uses PackageReference or
+# packages.config, so no /restore is needed. The output is appended to $LogPath when given and is
+# otherwise not printed; on failure the exception message carries the output tail.
+function Invoke-RigMsBuild {
+    param(
+        [Parameter(Mandatory)][string]$MsBuildPath,
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [Parameter(Mandatory)][string]$ModulesPath,
+        [string]$BannerlordPath,
+        [string]$Configuration = 'Debug',
+        [string]$LogPath
+    )
+    # Separate array elements: Windows PowerShell 5.1 would drop embedded quotes of a hand-built string.
+    $msbuildArgs = @(
+        '/nologo', '/v:minimal',
+        "/p:Configuration=$Configuration", '/p:Platform=x64',
+        ('/p:BannerlordModulesPath=' + (ConvertTo-RigMsBuildValue $ModulesPath))
+    )
+    if ($BannerlordPath) { $msbuildArgs += '/p:BannerlordPath=' + (ConvertTo-RigMsBuildValue $BannerlordPath) }
+    $msbuildArgs += $ProjectPath
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # native stderr must not turn into a terminating error
+    try {
+        $output = @(& $MsBuildPath @msbuildArgs 2>&1 | ForEach-Object { "$_" })
+        $exit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $old }
+    if ($LogPath) {
+        $header = "=== $(Split-Path -Leaf $ProjectPath) (exit $exit) ==="
+        Add-Content -LiteralPath $LogPath -Value (@($header) + $output) -Encoding UTF8 -ErrorAction Stop
+    }
+    if ($exit -ne 0) {
+        $tail = ($output | Select-Object -Last 30) -join "`n"
+        throw "MSBuild failed for $(Split-Path -Leaf $ProjectPath) (exit $exit):`n$tail"
+    }
+}
+
+# Runs git and returns its stdout lines; stderr (traces, warnings) is kept apart and only used in the error.
+function Invoke-RigGit {
+    param(
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string[]]$GitArgs
+    )
+    $errFile = [IO.Path]::GetTempFileName()
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $stdout = @(& git -C $RepoPath @GitArgs 2>$errFile)
+        $exit = $LASTEXITCODE
+        $stderr = [IO.File]::ReadAllText($errFile)
+    } finally {
+        $ErrorActionPreference = $old
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($exit -ne 0) { throw "git $($GitArgs -join ' ') failed in ${RepoPath} (exit $exit): $($stderr.Trim())" }
+    $stdout
+}
+
+# Folder name, full HEAD sha and dirty flag (any uncommitted or untracked change) of a git repo.
+function Get-RigRepoState {
+    param([Parameter(Mandatory)][string]$RepoPath)
+    $sha = ([string](Invoke-RigGit -RepoPath $RepoPath -GitArgs @('rev-parse', 'HEAD') | Select-Object -First 1)).Trim()
+    if ($sha -cnotmatch '^[0-9a-f]{40}$') { throw "git rev-parse HEAD in $RepoPath did not return a sha: '$sha'" }
+    $status = @(Invoke-RigGit -RepoPath $RepoPath -GitArgs @('status', '--porcelain') | Where-Object { "$_".Trim() })
+    [pscustomobject]@{
+        name  = Split-Path -Leaf $RepoPath.TrimEnd('\', '/')
+        sha   = $sha
+        dirty = [bool]($status.Count -gt 0)
+    }
+}
+
+# Relative path ('/' separated) -> "d" for folders or "f|<length>|<LastWriteTimeUtc ticks>" for files.
+# Fails closed: an unreadable subtree or a reparse point (junction/symlink, whose target would go
+# unwatched) throws instead of being skipped.
+function Get-RigModulesSnapshot {
+    param([Parameter(Mandatory)][string]$Path)
+    $root = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
+    $snapshot = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($item in (Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Reparse point (junction or symlink) in snapshot tree: $($item.FullName)" }
+        $rel = $item.FullName.Substring($root.Length + 1) -replace '\\', '/'
+        $snapshot[$rel] = if ($item.PSIsContainer) { 'd' } else { 'f|{0}|{1}' -f $item.Length, $item.LastWriteTimeUtc.Ticks }
+    }
+    $snapshot
+}
+
+# Paths that were added, removed or changed between two snapshots (ordinal sorted; empty if equal).
+function Compare-RigModulesSnapshot {
+    param(
+        [Parameter(Mandatory)]$Before,
+        [Parameter(Mandatory)]$After
+    )
+    $changed = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($key in $Before.Keys) {
+        if (-not $After.ContainsKey($key) -or $After[$key] -cne $Before[$key]) { $changed.Add($key) }
+    }
+    foreach ($key in $After.Keys) {
+        if (-not $Before.ContainsKey($key)) { $changed.Add($key) }
+    }
+    $changed.Sort([StringComparer]::Ordinal)
+    $changed.ToArray()
+}
+
+# Writes <StageDir>\manifest.json (UTF-8 without BOM): repo states plus, per Modules\<id> folder,
+# the SubModule.xml version and every file with its SHA-256. Returns the manifest path.
+function New-RigBuildManifest {
+    param(
+        [Parameter(Mandatory)][string]$StageDir,
+        [Parameter(Mandatory)][object[]]$Repos
+    )
+    $root = (Resolve-Path -LiteralPath $StageDir).ProviderPath.TrimEnd('\')
+    $modulesDir = Join-Path $root 'Modules'
+
+    $modules = New-Object 'System.Collections.Generic.List[object]'
+    $moduleDirs = New-Object 'System.Collections.Generic.List[IO.DirectoryInfo]'
+    $moduleDirs.AddRange([IO.DirectoryInfo[]]@(Get-ChildItem -LiteralPath $modulesDir -Directory -Force -ErrorAction Stop))
+    $moduleDirs.Sort([Comparison[IO.DirectoryInfo]] { param($a, $b) [string]::CompareOrdinal($a.Name, $b.Name) })
+    foreach ($dir in $moduleDirs) {
+        $version = $null
+        $subModule = Join-Path $dir.FullName 'SubModule.xml'
+        if (Test-Path -LiteralPath $subModule -PathType Leaf) {
+            $xml = New-Object Xml.XmlDocument
+            $xml.Load($subModule)
+            $node = $xml.SelectSingleNode('/Module/Version')
+            if ($node -and $node.HasAttribute('value')) { $version = $node.GetAttribute('value') }
+        }
+        $files = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($f in (Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -Force -ErrorAction Stop)) {
+            $files.Add([ordered]@{
+                    path   = ($f.FullName.Substring($root.Length + 1) -replace '\\', '/')
+                    sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                })
+        }
+        $files.Sort([Comparison[object]] { param($a, $b) [string]::CompareOrdinal($a['path'], $b['path']) })
+        $modules.Add([ordered]@{ id = $dir.Name; version = $version; files = $files.ToArray() })
+    }
+
+    $manifest = [ordered]@{
+        schema  = 1
+        repos   = @($Repos | ForEach-Object { [ordered]@{ name = $_.name; sha = $_.sha; dirty = $_.dirty } })
+        modules = $modules.ToArray()
+    }
+    $path = Join-Path $StageDir 'manifest.json'
+    $json = ConvertTo-Json -InputObject $manifest -Depth 10
+    [IO.File]::WriteAllText($path, $json, (New-Object Text.UTF8Encoding($false)))
+    $path
+}
+
+# Builds all five projects into <StageDir>\Modules against the game install at $TowerGamePath, verifies
+# that <TowerGamePath>\Modules is untouched and that every module landed in the stage, then writes the
+# manifest. Throws on a missing prerequisite, a failed build, an incomplete stage or a tower change (no
+# manifest is written then). The MSBuild output goes to <StageDir>\build.log.
+# Returns StageDir, ManifestPath and the per-repo states.
+function Invoke-RigBuildPackage {
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceRoot,
+        [Parameter(Mandatory)][string]$StageDir,
+        [Parameter(Mandatory)][string]$TowerGamePath,
+        [Parameter(Mandatory)][string]$MsBuildPath,
+        [string]$Configuration = 'Debug'
+    )
+    $towerGame = $TowerGamePath.TrimEnd('\', '/')   # a trailing '\' would escape the closing quote in the MSBuild argument
+    $towerModules = Join-Path $towerGame 'Modules'
+    if (-not (Test-Path -LiteralPath $towerModules -PathType Container)) {
+        throw "Tower Modules folder not found: $towerModules"
+    }
+    if (-not (Test-Path -LiteralPath $MsBuildPath -PathType Leaf)) {
+        throw "MSBuild not found: $MsBuildPath"
+    }
+
+    $projects = @(Get-RigBuildProjects -WorkspaceRoot $WorkspaceRoot)
+    # State of the sources as built (taken before the build, so build output cannot show up as dirty).
+    $repos = @($projects | ForEach-Object { $_.Repo } | Select-Object -Unique | ForEach-Object {
+            Get-RigRepoState -RepoPath (Join-Path $WorkspaceRoot $_)
+        })
+
+    $towerBefore = Get-RigModulesSnapshot -Path $towerModules
+    $modulesDir = Join-Path $StageDir 'Modules'
+    $null = New-Item -ItemType Directory -Path $modulesDir -Force -ErrorAction Stop
+    $logPath = Join-Path $StageDir 'build.log'
+    foreach ($p in $projects) {
+        Invoke-RigMsBuild -MsBuildPath $MsBuildPath -ProjectPath $p.ProjectPath -ModulesPath $modulesDir `
+            -BannerlordPath $towerGame -Configuration $Configuration -LogPath $logPath
+    }
+
+    $changes = @(Compare-RigModulesSnapshot -Before $towerBefore -After (Get-RigModulesSnapshot -Path $towerModules))
+    if ($changes.Count -gt 0) {
+        $shown = ($changes | Select-Object -First 20) -join ', '
+        $more = if ($changes.Count -gt 20) { " (and $($changes.Count - 20) more)" } else { '' }
+        throw "tower Modules changed during the build: $shown$more"
+    }
+
+    # An MSBuild exit code of 0 does not prove the module was staged (e.g. a project that ignores the output path).
+    foreach ($p in $projects) {
+        $moduleDir = Join-Path $modulesDir $p.ModuleId
+        $dlls = @(Get-ChildItem -LiteralPath (Join-Path $moduleDir 'bin\Win64_Shipping_Client') -Filter '*.dll' -File -ErrorAction SilentlyContinue)
+        if (-not (Test-Path -LiteralPath (Join-Path $moduleDir 'SubModule.xml') -PathType Leaf) -or $dlls.Count -eq 0) {
+            throw "Module '$($p.ModuleId)' is incomplete in the stage (needs SubModule.xml and a dll in bin\Win64_Shipping_Client): $moduleDir"
+        }
+    }
+
+    $manifestPath = New-RigBuildManifest -StageDir $StageDir -Repos $repos
+    [pscustomobject]@{ StageDir = $StageDir; ManifestPath = $manifestPath; Repos = $repos }
+}
