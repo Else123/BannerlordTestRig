@@ -213,6 +213,25 @@ Describe 'Resolve-RigExitCode' {
         Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(Run SetupError $null) -ForceTimeout | Should Be 1
         Resolve-RigExitCode -DoneStatus aborted -Days 1 -Runs @() -ForceTimeout | Should Be 3
     }
+    It 'scenario statuses: Failed -> 2, Error -> 1, Passed/Timeout/Skipped change nothing' {
+        function ScRun($cls, $reached, $st) { [pscustomobject]@{ exitClass = $cls; daysReached = $reached; scenarioStatuses = @($st) } }
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun Completed 1 'Failed') | Should Be 2
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun Completed 1 'Error') | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun Completed 1 @('Passed', 'Failed')) | Should Be 2
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun Completed 1 @('Passed', 'Timeout', 'Skipped')) | Should Be 0
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun Completed 1 @('Failed', 'Error')) | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun HardTimeout $null 'Failed') | Should Be 3
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun HardTimeout $null 'Error') | Should Be 1
+    }
+    It 'scenario statuses: unknown, empty, null and non-string statuses map to 1' {
+        function ScRun2($st) { [pscustomobject]@{ exitClass = 'Completed'; daysReached = 1; scenarioStatuses = $st } }
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @('Weird')) | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @('')) | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @($null)) | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @(5)) | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @('Passed', 'Weird', 'Failed')) | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @('Passed', 'Skipped', 'Timeout')) | Should Be 0
+    }
     It 'completed with zero runs is an infrastructure error' {
         Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @() | Should Be 1
     }
@@ -691,6 +710,91 @@ Describe 'Publish-RigResult with hostile or broken done.json' {
         New-Item -ItemType Directory -Path (Join-Path $script:rd 'r1') | Out-Null
         [IO.File]::WriteAllText((Join-Path $script:rd 'r1\result.txt'), "status=Completed`ndaysReached=1`n")
         Publish | Should Be 0
+    }
+}
+
+Describe 'Publish-RigResult with run-result.json' {
+    BeforeEach {
+        $script:t = New-TempDir
+        $script:id = '20261031-153000-a1b2'
+        $script:rd = Join-Path $script:t $script:id
+        New-Item -ItemType Directory -Path (Join-Path $script:rd 'r1') | Out-Null
+        $script:lines = @()
+        Mock Write-Host { $script:lines += "$Object" }
+        [IO.File]::WriteAllText((Join-Path $script:rd 'done.json'), '{"schema":1,"jobId":"20261031-153000-a1b2","status":"completed","runs":[{"runId":"r1","exitClass":"Completed"}]}')
+    }
+    AfterEach { Remove-Item -LiteralPath $script:t -Recurse -Force -ErrorAction SilentlyContinue }
+
+    function Write-RunFile([string]$Name, [string]$Text) { [IO.File]::WriteAllText((Join-Path $script:rd "r1\$Name"), $Text) }
+    function Publish { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 }
+    function Get-JobResult { Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json }
+    function New-RunResultJson([string]$Status, $Days, [string]$Scenarios) {
+        '{"schema":1,"status":"' + $Status + '","daysReached":' + $Days + ',"scenarios":[' + $Scenarios + ']}'
+    }
+    $passed = '{"id":"soak","status":"Passed","seconds":25}'
+
+    It 'reads status and daysReached from run-result.json and prints one line per scenario' {
+        Write-RunFile 'run-result.json' (New-RunResultJson 'Completed' 1 ($passed + ',{"id":"trade","status":"Passed","seconds":3}'))
+        Publish | Should Be 0
+        $scenarioLines = @($script:lines | Where-Object { $_ -match '^r1 ' })
+        $scenarioLines.Count | Should Be 2
+        $scenarioLines[0] | Should Match 'soak\s+Passed\s+1/1\s+Completed'
+        $scenarioLines[1] | Should Match 'trade\s+Passed\s+1/1\s+Completed'
+        (Get-JobResult).runs[0].result.status | Should Be 'Completed'
+    }
+    It 'prefers run-result.json over result.txt' {
+        Write-RunFile 'run-result.json' (New-RunResultJson 'Completed' 1 $passed)
+        Write-RunFile 'result.txt' "status=Aborted`ndaysReached=0`n"
+        Publish | Should Be 0
+    }
+    It 'falls back to result.txt with the old line (kind soak, result status)' {
+        Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
+        Publish | Should Be 0
+        $l = @($script:lines | Where-Object { $_ -match '^r1 ' })
+        $l.Count | Should Be 1
+        $l[0] | Should Match 'soak\s+Completed\s+1/1\s+Completed'
+    }
+    It 'a Failed scenario gives exit 2 even when the run completed all days' {
+        Write-RunFile 'run-result.json' (New-RunResultJson 'Completed' 1 ($passed + ',{"id":"x","status":"Failed","seconds":1}'))
+        Publish | Should Be 2
+        (Get-JobResult).exitCode | Should Be 2
+    }
+    It 'an Error scenario gives exit 1 (config error: Aborted, scenarios soak/Error)' {
+        Write-RunFile 'run-result.json' '{"schema":1,"status":"Aborted","reason":"config:bad","daysReached":null,"scenarios":[{"id":"soak","status":"Error","seconds":null}]}'
+        Publish | Should Be 1
+        ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match 'soak\s+Error\s+\?/1'
+    }
+    It 'without scenarios prints one line with the run status' {
+        Write-RunFile 'run-result.json' '{"schema":1,"status":"Completed","daysReached":1,"scenarios":[]}'
+        Publish | Should Be 0
+        @($script:lines | Where-Object { $_ -match '^r1 ' }).Count | Should Be 1
+    }
+    foreach ($json in @('[{"status":"Completed","daysReached":1}]', '[]', '5', '"Completed"', 'null')) {
+        It "treats run-result.json with a non-object top level ($json) like a missing result (no fallback)" {
+            Write-RunFile 'run-result.json' $json
+            Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
+            Publish | Should Be 2
+            ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match '\?\s+\?/1'
+        }
+    }
+    foreach ($json in @('{"schema":1,"status":5,"daysReached":1}', '{"schema":1,"status":null,"daysReached":1}', '{"schema":1,"daysReached":1}')) {
+        It "treats run-result.json without a status string ($json) as no result (no fallback)" {
+            Write-RunFile 'run-result.json' $json
+            Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
+            (Read-RigRunResult -RunDir (Join-Path $script:rd 'r1')).Status | Should Be $null
+            Publish | Should Be 0
+            ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match '\?\s+1/1'
+        }
+    }
+    It 'an unknown scenario status in run-result.json gives exit 1' {
+        Write-RunFile 'run-result.json' (New-RunResultJson 'Completed' 1 ($passed + ',{"id":"x","status":"Weird","seconds":1}'))
+        Publish | Should Be 1
+    }
+    It 'treats invalid JSON like a missing result (no fallback), exit 2 for a Completed run' {
+        Write-RunFile 'run-result.json' '{ not json'
+        Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
+        Publish | Should Be 2
+        ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match '\?\s+\?/1'
     }
 }
 

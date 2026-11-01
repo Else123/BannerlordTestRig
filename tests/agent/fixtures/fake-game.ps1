@@ -2,13 +2,15 @@
 #   powershell.exe -NoProfile -File fake-game.ps1 /singleplayer _MODULES_*...*_MODULES_
 # Inputs (environment, inherited from the test):
 #   FAKEGAME_DOCS      the documentsRoot the agent uses
-#   FAKEGAME_HARNESS   CoherentWarAI (default) | TestRig: Documents subfolder whose harness\ holds run.cfg/result.txt/harness.log
+#   FAKEGAME_HARNESS   CoherentWarAI (default) | TestRig: Documents subfolder whose harness\ holds run.cfg/harness.log and
+#                      the result (CoherentWarAI: result.txt; TestRig: run-result.json, via .tmp + Move)
 #   FAKEGAME_NOMODLOG  set (any value): do not create the CoherentWarAI mod log folder or file
 #   FAKEGAME_BEHAVIOR  complete (default) | sleep | noresult | child (sleeps, owns a sleeping
 #                      child process, PID in child-pid.txt) | slow (completes after 6 s) |
 #                      modchange (blocking message box 'Mod change detected' with OK, completes after
 #                      it is closed) | modchangeokcancel (same, OK/Cancel) | modchangeyesno (same, Yes/No)
 #                      | otherdialog (OK box titled 'Some other dialog')
+#                      | txtonly (TestRig only: writes result.txt like the old harness) | badjson (TestRig only: invalid run-result.json)
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GameArguments)
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +27,9 @@ $otherName = if ($harnessName -eq 'TestRig') { 'CoherentWarAI' } else { 'TestRig
 $otherRunCfg = Join-Path (Join-Path (Join-Path $docs $otherName) 'harness') 'run.cfg'
 [System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_DOCS 'fake-other-runcfg.txt'), [string](Test-Path -LiteralPath $otherRunCfg), $utf8)
 [System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_DOCS 'fake-runcfg.txt'), [System.IO.File]::ReadAllText((Join-Path $harnessDir 'run.cfg')), $utf8)
+# The ownAssemblies line of run.cfg ('' if absent), for the tests.
+$ownLine = @([System.IO.File]::ReadAllLines((Join-Path $harnessDir 'run.cfg')) | Where-Object { $_ -like 'ownAssemblies=*' }) -join ''
+[System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_DOCS 'fake-ownassemblies.txt'), $ownLine, $utf8)
 if (-not $env:FAKEGAME_NOMODLOG) {
     New-Item -ItemType Directory -Path $modDir -Force | Out-Null   # the mod log folder exists independently of the harness folder
     [System.IO.File]::WriteAllText((Join-Path $modDir 'CoherentWarAI.log'), "fake mod log`r`n", $utf8)
@@ -61,7 +66,20 @@ if ($behavior -and $dialogs.ContainsKey($behavior)) {
 if ($behavior -eq 'slow') {
     Start-Sleep -Seconds 6   # then completes normally
 }
-if ($behavior -ne 'noresult') {
-    [System.IO.File]::WriteAllText((Join-Path $harnessDir 'result.txt'), "status=Completed`r`ndaysReached=1`r`n", $utf8)
+if ($behavior -eq 'badjson' -and $harnessName -eq 'TestRig') {
+    [System.IO.File]::WriteAllText((Join-Path $harnessDir 'run-result.json'), '{ "schema": 1, "status": ', $utf8)
+}
+elseif ($behavior -ne 'noresult') {
+    if ($harnessName -eq 'TestRig' -and $behavior -ne 'txtonly') {
+        $json = '{"schema":1,"status":"Completed","reason":"","seed":7,"mode":"WarSails","daysRequested":1,"daysReached":1,"realSeconds":25,"gameDaysPerRealMinute":2.41,"playerMapEvents":0,' +
+            '"modules":[{"id":"Native","version":"v1.4.8"}],"exceptions":{"total":0,"own":0,"unhandled":0,"top":[]},' +
+            '"scenarios":[{"id":"soak","status":"Passed","seconds":25}],"checks":[{"name":"daysReached","expected":">= 1","actual":"1","passed":true}]}'
+        $tmp = Join-Path $harnessDir 'run-result.json.tmp'
+        [System.IO.File]::WriteAllText($tmp, $json, $utf8)
+        Move-Item -LiteralPath $tmp -Destination (Join-Path $harnessDir 'run-result.json') -Force
+    }
+    else {
+        [System.IO.File]::WriteAllText((Join-Path $harnessDir 'result.txt'), "status=Completed`r`ndaysReached=1`r`n", $utf8)
+    }
 }
 exit 0

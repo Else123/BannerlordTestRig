@@ -37,7 +37,7 @@ Live smoke test against an installed agent, without Bannerlord (a fake game stan
 The in-game driver, shipped as Bannerlord module `TestRig.Harness` (old-style net48 csproj, game DLLs
 referenced from the install, no mod references). It is inert unless the agent has written a `run.cfg` in
 `Documents\Mount and Blade II Bannerlord\TestRig\harness`; it then drives a seeded campaign, logs to
-`harness.log` and writes `result.txt`. The engine-free state machine lives in `src/TestRig.Harness/Logic`.
+`harness.log` and writes `run-result.json` (the older CoherentWarAI harness writes `result.txt`; agent and runner read either). The engine-free state machine lives in `src/TestRig.Harness/Logic`.
 
 Build: the game install is auto-detected by `src/Directory.Build.props`, or set `BannerlordPath` in a
 git-ignored `src/paths.props.user` (copy `src/paths.props.user.template`). A plain build deploys into the

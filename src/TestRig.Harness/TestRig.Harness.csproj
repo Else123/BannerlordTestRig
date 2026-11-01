@@ -61,6 +61,10 @@
       <HintPath>$(BannerlordBinPath)\TaleWorlds.MountAndBlade.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="TaleWorlds.ModuleManager">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.ModuleManager.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="TaleWorlds.ObjectSystem">
       <HintPath>$(BannerlordBinPath)\TaleWorlds.ObjectSystem.dll</HintPath>
       <Private>False</Private>
@@ -77,7 +81,13 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Logic\HarnessRun.cs" />
+    <Compile Include="Logic\ExceptionKey.cs" />
     <Compile Include="Logic\ExceptionLogBudget.cs" />
+    <Compile Include="Logic\ExceptionStats.cs" />
+    <Compile Include="Logic\IoRetry.cs" />
+    <Compile Include="Logic\OwnClassificationCache.cs" />
+    <Compile Include="Logic\RunResult.cs" />
+    <Compile Include="Logic\RunResultWriter.cs" />
     <Compile Include="HarnessSubModule.cs" />
     <Compile Include="SeededSandBoxGameManager.cs" />
     <Compile Include="CharacterCreationDriver.cs" />

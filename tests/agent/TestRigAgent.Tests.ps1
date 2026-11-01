@@ -88,6 +88,33 @@ function New-TestJob {
     return $jobDir
 }
 
+function Set-JobPackageWithValidXml {
+    # Rewrites the job's package.zip with valid SubModule.xml files (CoherentWarAI with two DLLs, plus the
+    # harness module) and updates the sha256 in job.json.
+    param([string]$JobDir, [string]$HarnessModuleId = 'TestRig.Harness')
+    $xml = {
+        param($id, $dlls)
+        '<Module><Name value="' + $id + '"/><SubModules>' + (($dlls | ForEach-Object { '<SubModule><Name>n</Name><DLLName value="' + $_ + '"/></SubModule>' }) -join '') + '</SubModules></Module>'
+    }
+    $zipPath = Join-Path $JobDir 'package.zip'
+    Remove-Item -LiteralPath $zipPath -Force
+    $z = [System.IO.Compression.ZipFile]::Open($zipPath, 'Create')
+    try {
+        foreach ($e in @(
+                @{ n = 'Modules/CoherentWarAI/SubModule.xml'; t = (& $xml 'CoherentWarAI' @('CoherentWarAI.dll', 'Extra.dll')) },
+                @{ n = "Modules/$HarnessModuleId/SubModule.xml"; t = (& $xml $HarnessModuleId @("$HarnessModuleId.dll")) })) {
+            $entry = $z.CreateEntry($e.n)
+            $w = New-Object System.IO.StreamWriter($entry.Open(), $utf8NoBom)
+            $w.Write($e.t); $w.Dispose()
+        }
+    }
+    finally { $z.Dispose() }
+    $jobFile = Join-Path $JobDir 'job.json'
+    $j = [System.IO.File]::ReadAllText($jobFile) | ConvertFrom-Json
+    $j.package.sha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+    [System.IO.File]::WriteAllText($jobFile, ($j | ConvertTo-Json -Depth 10), $utf8NoBom)
+}
+
 function New-TestRigHarnessJob {
     # A job for harness TestRig; its package and module list carry TestRig.Harness unless told otherwise.
     param([hashtable]$Rig, [string[]]$Entries = @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml'),
@@ -472,7 +499,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
-    It 'accepts harness TestRig: run.cfg, result.txt and harness.log live in the TestRig folder' {
+    It 'accepts harness TestRig: run.cfg, run-result.json and harness.log live in the TestRig folder' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
         $env:FAKEGAME_HARNESS = 'TestRig'
@@ -488,10 +515,10 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) | Should Match 'seed=7'
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-other-runcfg.txt')).Trim() | Should Be 'False'
         $runDir = Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1'
-        (Get-Content -Raw (Join-Path $runDir 'result.txt')) | Should Match 'status=Completed'
+        (Get-Content -Raw (Join-Path $runDir 'run-result.json')) | Should Match '"status":"Completed"'
         (Get-Content -Raw (Join-Path $runDir 'harness.log')) | Should Match 'harness started'
         $run = Get-Content -Raw (Join-Path $runDir 'agent-run.json') | ConvertFrom-Json
-        $run.artifacts -contains 'result.txt' | Should Be $true
+        $run.artifacts -contains 'run-result.json' | Should Be $true
         $run.artifacts -contains 'harness.log' | Should Be $true
         # run.cfg removed after the run, in both folders
         Test-Path (Join-Path $docs 'TestRig\harness\run.cfg') | Should Be $false
@@ -564,7 +591,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
         $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
         $run.artifacts -contains 'CoherentWarAI.log' | Should Be $false
-        $run.artifacts -contains 'result.txt' | Should Be $true
+        $run.artifacts -contains 'run-result.json' | Should Be $true
     }
 
     It 'processes one job with Invoke-AgentMain -Once' {
@@ -574,6 +601,214 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         Invoke-AgentMain -ConfigPath $rig.ConfigPath -Once
         (Read-Done $rig).status | Should Be 'completed'
         Test-Path (Join-Path $rig.Work 'agent.log') | Should Be $true
+    }
+}
+
+Describe 'Get-ResultStatus: run-result.json with result.txt fallback' {
+    BeforeEach {
+        $script:hd = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:hd -Force | Out-Null
+        $script:logged = @()
+        Mock Write-AgentLog { $script:logged += $Message }
+    }
+    function Set-HarnessFile([string]$Name, [string]$Text) { [System.IO.File]::WriteAllText((Join-Path $script:hd $Name), $Text, $utf8NoBom) }
+
+    It 'reads status from run-result.json' {
+        Set-HarnessFile 'run-result.json' '{"schema":1,"status":"Completed","daysReached":1}'
+        Get-ResultStatus $script:hd | Should Be 'Completed'
+    }
+    It 'prefers run-result.json over result.txt' {
+        Set-HarnessFile 'run-result.json' '{"schema":1,"status":"Aborted"}'
+        Set-HarnessFile 'result.txt' 'status=Completed'
+        Get-ResultStatus $script:hd | Should Be 'Aborted'
+    }
+    It 'falls back to result.txt when there is no run-result.json' {
+        Set-HarnessFile 'result.txt' "status=Completed`r`ndaysReached=1`r`n"
+        Get-ResultStatus $script:hd | Should Be 'Completed'
+    }
+    It 'falls back to result.txt with CRLF line endings' {
+        Set-HarnessFile 'result.txt' "daysReached=1`r`nstatus=Aborted`r`n"
+        Get-ResultStatus $script:hd | Should Be 'Aborted'
+    }
+    It 'falls back to result.txt with LF-only line endings (no CR)' {
+        Set-HarnessFile 'result.txt' "daysReached=1`nstatus=Aborted`ndetail=x`n"
+        Get-ResultStatus $script:hd | Should Be 'Aborted'
+    }
+    foreach ($case in @(
+            @{ Name = 'an array'; Json = '[{"status":"Completed"}]' },
+            @{ Name = 'an empty array'; Json = '[]' },
+            @{ Name = 'a number'; Json = '5' },
+            @{ Name = 'a string'; Json = '"Completed"' },
+            @{ Name = 'null'; Json = 'null' })) {
+        It ('treats a run-result.json whose top level is ' + $case.Name + ' as no result (no fallback) and logs once') {
+            Set-HarnessFile 'run-result.json' $case.Json
+            Set-HarnessFile 'result.txt' 'status=Completed'
+            Get-ResultStatus $script:hd | Should Be $null
+            @($script:logged | Where-Object { $_ -match 'run-result\.json' }).Count | Should Be 1
+        }
+    }
+    It 'returns null when neither file exists' {
+        Get-ResultStatus $script:hd | Should Be $null
+    }
+    It 'treats invalid JSON as no result (no fallback to result.txt) and logs once' {
+        Set-HarnessFile 'run-result.json' '{ not json'
+        Set-HarnessFile 'result.txt' 'status=Completed'
+        Get-ResultStatus $script:hd | Should Be $null
+        @($script:logged | Where-Object { $_ -match 'run-result\.json' }).Count | Should Be 1
+    }
+    It 'treats JSON without a status string as no result (no fallback to result.txt)' {
+        Set-HarnessFile 'run-result.json' '{"schema":1,"status":null}'
+        Set-HarnessFile 'result.txt' 'status=Completed'
+        Get-ResultStatus $script:hd | Should Be $null
+    }
+    foreach ($json in @('{"schema":1,"status":5}', '{"schema":1,"status":true}', '{"schema":1,"status":""}', '{"schema":1}')) {
+        It "treats run-result.json $json as no result (no fallback to result.txt)" {
+            Set-HarnessFile 'run-result.json' $json
+            Set-HarnessFile 'result.txt' 'status=Completed'
+            Get-ResultStatus $script:hd | Should Be $null
+        }
+    }
+}
+
+Describe 'ownAssemblies for run.cfg' {
+    function New-ModuleXml([string]$Root, [string]$Id, [string[]]$Dlls, [string]$Raw = $null) {
+        $d = Join-Path $Root $Id
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        if (-not $Raw) {
+            $subs = ($Dlls | ForEach-Object { '<SubModule><Name>x</Name><DLLName value="' + $_ + '"/></SubModule>' }) -join ''
+            $Raw = '<Module><Name value="' + $Id + '"/><SubModules>' + $subs + '</SubModules></Module>'
+        }
+        [System.IO.File]::WriteAllText((Join-Path $d 'SubModule.xml'), $Raw, $utf8NoBom)
+    }
+    BeforeEach {
+        $script:mods = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:mods -Force | Out-Null
+        $script:logged = @()
+        Mock Write-AgentLog { $script:logged += $Message }
+    }
+    $run = [pscustomobject]@{ runId = 'r1'; seed = 7; days = 3; mode = 'NoDlc'; stallMinutes = 5; budgetMinutes = 60; hardTimeoutMinutes = 20 }
+
+    It 'strips .dll, keeps order, de-duplicates case-insensitively across modules' {
+        New-ModuleXml $script:mods 'A' @('Alpha.dll', 'Beta.DLL')
+        New-ModuleXml $script:mods 'B' @('alpha.dll', 'Gamma')
+        (Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A', 'B') -HarnessModuleIds @('TestRig.Harness')) -join ',' | Should Be 'Alpha,Beta,Gamma'
+    }
+    It 'excludes harness modules' {
+        New-ModuleXml $script:mods 'A' @('Alpha.dll')
+        New-ModuleXml $script:mods 'TestRig.Harness' @('TestRig.Harness.dll')
+        New-ModuleXml $script:mods 'CoherentWarAI.TestHarness' @('CoherentWarAI.TestHarness.dll')
+        (Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A', 'TestRig.Harness', 'CoherentWarAI.TestHarness') -HarnessModuleIds @('CoherentWarAI.TestHarness', 'TestRig.Harness')) -join ',' | Should Be 'Alpha'
+    }
+    It 'skips a module with missing or unparseable SubModule.xml and logs it' {
+        New-ModuleXml $script:mods 'Bad' @() '<Module><unclosed>'
+        New-ModuleXml $script:mods 'Good' @('Good.dll')
+        $r = @(Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('Missing', 'Bad', 'Good') -HarnessModuleIds @())
+        ($r -join ',') | Should Be 'Good'
+        @($script:logged | Where-Object { $_ -match 'Missing' }).Count | Should Be 1
+        @($script:logged | Where-Object { $_ -match 'Bad' }).Count | Should Be 1
+    }
+    It 'returns an empty list for a module without DLLName' {
+        New-ModuleXml $script:mods 'DataOnly' @()
+        @(Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('DataOnly') -HarnessModuleIds @()).Count | Should Be 0
+    }
+    It 'skips DLL names that would corrupt run.cfg, logs one line each, and keeps valid names' {
+        New-ModuleXml $script:mods 'A' @('Bad,Name.dll', 'x=y.dll', 'Good.dll', 'Sp ace.dll', 'Uml&#228;ut.dll')
+        $r = @(Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A') -HarnessModuleIds @())
+        ($r -join ',') | Should Be 'Good'
+        @($script:logged | Where-Object { $_ -match 'Bad,Name' }).Count | Should Be 1
+        @($script:logged | Where-Object { $_ -match 'x=y' }).Count | Should Be 1
+        @($script:logged | Where-Object { $_ -match 'ownAssemblies' }).Count | Should Be 4
+    }
+    It 'skips a DLL name containing a line break' {
+        New-ModuleXml $script:mods 'A' @('Evil&#10;injected=1.dll', 'Good.dll')
+        $r = @(Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A') -HarnessModuleIds @())
+        ($r -join ',') | Should Be 'Good'
+        @($script:logged).Count | Should Be 1
+    }
+    It 'adds the ownAssemblies line to run.cfg only when names are given' {
+        Get-RunCfgText $run -OwnAssemblies @('A', 'B') | Should Be "seed=7`ndays=3`nmode=NoDlc`nstallMinutes=5`nbudgetMinutes=60`nownAssemblies=A,B`n"
+        Get-RunCfgText $run -OwnAssemblies @() | Should Be "seed=7`ndays=3`nmode=NoDlc`nstallMinutes=5`nbudgetMinutes=60`n"
+        Get-RunCfgText $run | Should Be "seed=7`ndays=3`nmode=NoDlc`nstallMinutes=5`nbudgetMinutes=60`n"
+    }
+}
+
+Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
+    Mock Get-BannerlordProcess { return $null }
+    BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
+    AfterEach {
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_HARNESS -ErrorAction SilentlyContinue
+    }
+    function Get-TrDir($rig) { Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness' }
+    function Get-RunDir($rig) { Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1' }
+    function Start-TrRig([string]$Behavior = 'complete') {
+        $env:FAKEGAME_BEHAVIOR = $Behavior
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestRigHarnessJob $rig
+        return $rig
+    }
+
+    It 'completes a TestRig run from run-result.json and collects it' {
+        $rig = Start-TrRig
+        (Invoke-AgentCycle -Config (Get-ConfigFor $rig)) | Should Be $true
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $json = Get-Content -Raw (Join-Path (Get-RunDir $rig) 'run-result.json') | ConvertFrom-Json
+        $json.status | Should Be 'Completed'
+        $json.scenarios[0].id | Should Be 'soak'
+        $run = Get-Content -Raw (Join-Path (Get-RunDir $rig) 'agent-run.json') | ConvertFrom-Json
+        $run.artifacts -contains 'run-result.json' | Should Be $true
+        $run.artifacts -contains 'result.txt' | Should Be $false
+        Test-Path (Join-Path (Get-TrDir $rig) 'run-result.json.tmp') | Should Be $false
+    }
+    It 'falls back to result.txt for a TestRig run without run-result.json' {
+        $rig = Start-TrRig 'txtonly'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $run = Get-Content -Raw (Join-Path (Get-RunDir $rig) 'agent-run.json') | ConvertFrom-Json
+        $run.artifacts -contains 'result.txt' | Should Be $true
+        $run.artifacts -contains 'run-result.json' | Should Be $false
+    }
+    It 'classifies invalid run-result.json as NotCompleted' {
+        $rig = Start-TrRig 'badjson'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'NotCompleted'
+    }
+    It 'clears a stale run-result.json, run-result.json.tmp and result.txt before the launch' {
+        $rig = Start-TrRig 'noresult'
+        $trDir = Get-TrDir $rig
+        New-Item -ItemType Directory -Path $trDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $trDir 'run-result.json'), '{"schema":1,"status":"Completed"}', $utf8NoBom)
+        [System.IO.File]::WriteAllText((Join-Path $trDir 'run-result.json.tmp'), '{', $utf8NoBom)
+        [System.IO.File]::WriteAllText((Join-Path $trDir 'result.txt'), 'status=Completed', $utf8NoBom)
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'NotCompleted'
+        Test-Path (Join-Path $trDir 'run-result.json') | Should Be $false
+        Test-Path (Join-Path $trDir 'run-result.json.tmp') | Should Be $false
+    }
+    It 'writes ownAssemblies from the installed SubModule.xml of non-harness modules (TestRig only)' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $jobDir = New-TestRigHarnessJob $rig
+        Set-JobPackageWithValidXml $jobDir
+
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-ownassemblies.txt')).Trim() | Should Be 'ownAssemblies=CoherentWarAI,Extra'
+    }
+    It 'does not give the CoherentWarAI harness an ownAssemblies line' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        # Valid SubModule.xml with DLLs: without the harness choice, ownAssemblies=CoherentWarAI,Extra would be written.
+        $jobDir = New-TestJob $rig
+        Set-JobPackageWithValidXml $jobDir -HarnessModuleId 'CoherentWarAI.TestHarness'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) | Should Not Match 'ownAssemblies'
+        [System.IO.File]::ReadAllText((Join-Path $rig.Docs 'fake-ownassemblies.txt')) | Should Be ''
     }
 }
 

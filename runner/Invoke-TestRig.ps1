@@ -197,6 +197,46 @@ function ConvertFrom-RigResultText {
     $h
 }
 
+# Reads the harness result of one run folder: run-result.json (TestRig harness) if present, else
+# result.txt (CoherentWarAI harness). Invalid or unreadable run-result.json = no result (no fallback),
+# so a half-written file is never mixed with an older result.txt.
+# Returns Status, DaysReached, Scenarios (@{ Id; Status } per scenario, JSON only) and Result (for job-result.json).
+function Read-RigRunResult {
+    param([Parameter(Mandatory)][string]$RunDir)
+    $info = [ordered]@{ Status = $null; DaysReached = $null; Scenarios = @(); Result = [ordered]@{} }
+    $jsonFile = Join-Path $RunDir 'run-result.json'
+    $txtFile = Join-Path $RunDir 'result.txt'
+    if (Test-Path -LiteralPath $jsonFile) {
+        try {
+            $json = [IO.File]::ReadAllText($jsonFile, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
+            if ($null -eq $json -or $json -isnot [System.Management.Automation.PSCustomObject]) { throw 'not a JSON object' }
+        } catch {
+            Write-RigMessage "WARNING: $jsonFile is unreadable or invalid JSON; treating the run as having no result. $($_.Exception.Message)"
+            return $info
+        }
+        $info.Result = $json
+        if ($json.status -is [string] -and $json.status -ne '') { $info.Status = $json.status }
+        $parsed = 0
+        if ($null -ne $json.daysReached -and [int]::TryParse([string]$json.daysReached, [ref]$parsed)) { $info.DaysReached = $parsed }
+        $info.Scenarios = @($json.scenarios | Where-Object { $null -ne $_ } | ForEach-Object {
+                [pscustomobject]@{ Id = [string]$_.id; Status = [string]$_.status }
+            })
+        return $info
+    }
+    if (Test-Path -LiteralPath $txtFile) {
+        $result = ConvertFrom-RigResultText ([IO.File]::ReadAllText($txtFile))
+        $info.Result = $result
+        if ($result.Contains('status')) { $info.Status = $result['status'] }
+        $parsed = 0
+        if ($result.Contains('daysReached') -and [int]::TryParse($result['daysReached'], [ref]$parsed)) { $info.DaysReached = $parsed }
+    }
+    $info
+}
+
+# Exit code of one finished job. Per run: the exitClass maps to 0/1/2/3 (see below); additionally a scenario
+# (run-result.json) with status Failed counts as 2; Passed/Timeout/Skipped add nothing; Error and any
+# unknown or non-string status count as 1.
+# Across everything: 1 > 3 > 2 > 0, so an Error scenario wins over any other code, and Failed (2) is the weakest.
 function Resolve-RigExitCode {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$DoneStatus,
@@ -219,6 +259,14 @@ function Resolve-RigExitCode {
             { $_ -in 'NotCompleted', 'Crashed' } { $codes.Add(2) }
             { $_ -in 'HardTimeout', 'Aborted' } { $codes.Add(3) }
             default { $codes.Add(1) }   # SetupError, LaunchFailed, CleanupFailed, unknown
+        }
+        # No scenarioStatuses property (or $null) = no scenarios; a $null element inside the array is an unknown status.
+        $scenarioStatuses = @(if ($null -ne $r.scenarioStatuses) { $r.scenarioStatuses })
+        foreach ($scenarioStatus in $scenarioStatuses) {
+            if ($scenarioStatus -isnot [string]) { $codes.Add(1) }
+            elseif ($scenarioStatus -in 'Passed', 'Timeout', 'Skipped') { }
+            elseif ($scenarioStatus -eq 'Failed') { $codes.Add(2) }
+            else { $codes.Add(1) }   # Error and anything unknown
         }
     }
     if ($ForceTimeout) { $codes.Add(3) }
@@ -354,14 +402,8 @@ function Publish-RigResult {
         if ($runId -cnotmatch '^[A-Za-z0-9_-]+\z') { throw "Invalid runId in done.json: '$runId'" }
         $runDir = Join-Path $ResultDir $runId
 
-        $result = [ordered]@{}
-        $resultFile = Join-Path $runDir 'result.txt'
-        if (Test-Path -LiteralPath $resultFile) {
-            $result = ConvertFrom-RigResultText ([IO.File]::ReadAllText($resultFile))
-        }
-        $daysReached = $null
-        $parsed = 0
-        if ($result.Contains('daysReached') -and [int]::TryParse($result['daysReached'], [ref]$parsed)) { $daysReached = $parsed }
+        $rr = Read-RigRunResult -RunDir $runDir
+        $daysReached = $rr.DaysReached
 
         $duration = $null
         $agentRun = Join-Path $runDir 'agent-run.json'
@@ -372,10 +414,16 @@ function Publish-RigResult {
             } catch { $duration = $null }
         }
 
-        $status = if ($result.Contains('status')) { $result['status'] } else { $null }
-        $runs += [pscustomobject]@{ runId = $runId; kind = 'soak'; exitClass = [string]$dr.exitClass; daysReached = $daysReached; result = $result }
-        $lines += Format-RigRunLine -RunId $runId -Kind 'soak' -Status $status -DaysReached $daysReached -Days $Days `
-            -ExitClass ([string]$dr.exitClass) -Duration $duration -Path $runDir
+        $runs += [pscustomobject]@{
+            runId = $runId; kind = 'soak'; exitClass = [string]$dr.exitClass; daysReached = $daysReached; result = $rr.Result
+            scenarioStatuses = @($rr.Scenarios | ForEach-Object { $_.Status })
+        }
+        # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario
+        $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } else { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) }
+        foreach ($sc in $lineSources) {
+            $lines += Format-RigRunLine -RunId $runId -Kind $sc.Id -Status $sc.Status -DaysReached $daysReached -Days $Days `
+                -ExitClass ([string]$dr.exitClass) -Duration $duration -Path $runDir
+        }
     }
     $lines | ForEach-Object { Write-RigMessage $_ }
 

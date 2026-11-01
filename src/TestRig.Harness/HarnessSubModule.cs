@@ -20,7 +20,7 @@ namespace TestRig.Harness
     /// Entry point of the debug-only soak harness. Inert unless the runner left a run.cfg in
     /// Documents\Mount and Blade II Bannerlord\TestRig\harness. When armed it samples the game
     /// once per application tick, asks <see cref="HarnessRun"/> what to do and executes that action;
-    /// it makes no decisions of its own. Progress goes to harness.log, the outcome to result.txt.
+    /// it makes no decisions of its own. Progress goes to harness.log, the outcome to run-result.json.
     /// </summary>
     public class HarnessSubModule : MBSubModuleBase
     {
@@ -29,6 +29,14 @@ namespace TestRig.Harness
         private const float SpeedUpMultiplier = 15f;
 
         private const string NavalDlcModuleId = "NavalDLC";
+
+        private const string ResultFileName = "run-result.json";
+
+        // Writing the temp file or replacing the target fails with an IOException (or, for a target
+        // pending delete or held by a scanner, UnauthorizedAccessException) while a reader (the
+        // agent, a scanner) has it open; that is transient, so retry briefly (see IoRetry).
+        private const int ResultReplaceAttempts = 4;
+        private const int ResultReplaceDelayMilliseconds = 75;
 
         // Crash localization (2026-10-31: the first live run died within ~1 s of reaching the map
         // with no managed trace anywhere). Per-tick lines for the first map ticks, then quiet.
@@ -42,6 +50,8 @@ namespace TestRig.Harness
         [ThreadStatic]
         private static bool _inExceptionHandler;
 
+        // Distinct LogError messages already logged; guarded by _logLock (LogError also runs from
+        // the unhandled-exception handler on any thread).
         private readonly HashSet<string> _loggedErrors = new HashSet<string>();
         private readonly System.Diagnostics.Stopwatch _clock = new System.Diagnostics.Stopwatch();
 
@@ -49,6 +59,24 @@ namespace TestRig.Harness
         private readonly object _logLock = new object();
         private readonly ExceptionLogBudget _exceptionBudget = new ExceptionLogBudget(
             maxDistinctFull: 100, repeatsPerKey: 3, maxLines: 400);
+
+        // Run-wide counters for run-result.json; guarded by _logLock like the budget.
+        private readonly ExceptionStats _exceptionStats = new ExceptionStats();
+
+        // Bounds the own-exception stack walks (see OwnClassificationCache), keyed by exception type
+        // and throw site without the message (ExceptionKey.Own); guarded by _logLock.
+        private readonly OwnClassificationCache _ownCache = new OwnClassificationCache();
+
+        // Simple-name cache for the own-exception stack walk; guarded by _logLock.
+        private readonly Dictionary<Assembly, string> _assemblyNames = new Dictionary<Assembly, string>();
+        private bool _ownCheckFailureLogged;
+
+        // Serializes run-result.json writes: the unhandled-exception handler can write on any thread.
+        private readonly object _resultLock = new object();
+
+        // Null until a valid config is loaded; immutable afterwards, so the handler reads it unlocked.
+        private OwnAssemblyClassifier _ownAssemblies;
+        private IReadOnlyList<ModuleEntry> _modules = new ModuleEntry[0];
 
         private int _mapTicksTraced;
         private HarnessAction _lastMapAction = HarnessAction.None;
@@ -208,14 +236,17 @@ namespace TestRig.Harness
                 _configError = result.Error;
             }
 
+            _modules = ReadLoadedModules();
+
             if (_configError != null)
             {
                 Log("Invalid run.cfg (config:" + OneLine(_configError) + "); quitting on the first tick");
-                WriteResult(HarnessRun.FormatConfigError(_configError));
+                WriteResult(RunResult.ForConfigError(_configError, _modules));
                 return;
             }
 
             _config = result.Config;
+            _ownAssemblies = new OwnAssemblyClassifier(_config.OwnAssemblies);
             Log(string.Format(
                 CultureInfo.InvariantCulture,
                 "Start: seed={0} days={1} mode={2} stallMinutes={3} budgetMinutes={4} navalDlcLoaded={5}",
@@ -225,6 +256,61 @@ namespace TestRig.Harness
                 _config.StallMinutes,
                 _config.BudgetMinutes,
                 IsNavalDlcLoaded()));
+            Log("Own assemblies: " + (_config.OwnAssemblies.Count == 0 ? "none" : string.Join(",", _config.OwnAssemblies)));
+        }
+
+        // Ids in load order with the version as SubModule.xml states it ("v1.4.8"). Never fails the run.
+        private IReadOnlyList<ModuleEntry> ReadLoadedModules()
+        {
+            try
+            {
+                var modules = new List<ModuleEntry>();
+                foreach (string id in TaleWorlds.Engine.Utilities.GetModulesNames())
+                {
+                    if (string.IsNullOrEmpty(id))
+                    {
+                        continue;
+                    }
+
+                    // One broken module must not drop the whole list: keep its id, version unknown.
+                    string version;
+                    try
+                    {
+                        TaleWorlds.ModuleManager.ModuleInfo info = TaleWorlds.ModuleManager.ModuleHelper.GetModuleInfo(id);
+                        version = info == null ? null : FormatVersion(info.Version);
+                    }
+                    catch (Exception e)
+                    {
+                        version = null;
+                        Log("Modules: reading module " + id + " failed, version unknown: " + OneLine(e.Message));
+                    }
+
+                    modules.Add(new ModuleEntry(id, version));
+                }
+
+                Log("Modules: " + modules.Count + " loaded");
+                return modules;
+            }
+            catch (Exception e)
+            {
+                Log("Modules: reading the loaded modules failed, run-result.json lists none: " + OneLine(e.Message));
+                return new ModuleEntry[0];
+            }
+        }
+
+        // ApplicationVersion.ToString() appends the change set ("v1.4.8.0"); SubModule.xml states
+        // prefix + major.minor.revision only.
+        private static string FormatVersion(ApplicationVersion version)
+        {
+            if (version.ApplicationVersionType == ApplicationVersionType.Invalid)
+            {
+                return null;
+            }
+
+            return ApplicationVersion.GetPrefix(version.ApplicationVersionType)
+                + version.Major.ToString(CultureInfo.InvariantCulture) + "."
+                + version.Minor.ToString(CultureInfo.InvariantCulture) + "."
+                + version.Revision.ToString(CultureInfo.InvariantCulture);
         }
 
         private void TickRun()
@@ -318,12 +404,12 @@ namespace TestRig.Harness
 
                 case HarnessAction.RequestEndGame:
                     // Record first, so a crash inside EndGame still leaves a result behind.
-                    WriteResult(_run.FormatResult(now));
+                    WriteResult(BuildResult(now));
                     RequestEndGame();
                     break;
 
                 case HarnessAction.QuitProcess:
-                    WriteResult(_run.FormatResult(now));
+                    WriteResult(BuildResult(now));
                     Quit();
                     break;
             }
@@ -457,12 +543,42 @@ namespace TestRig.Harness
             try
             {
                 Exception e = args.Exception;
-                string key = ExceptionKey(e);
+                string site = ThrowSite(e);
+                string typeName = e.GetType().FullName;
+                string key = ExceptionKey.Full(typeName, e.Message, site);
+
+                // Read once: the handler runs on any thread and must see one consistent classifier.
+                OwnAssemblyClassifier classifier = _ownAssemblies;
+                bool classify = classifier != null && !classifier.IsEmpty;
+
                 int occurrence;
                 ExceptionLogDecision decision;
+                OwnLookup lookup = OwnLookup.Unknown;
+                bool own = false;
+                string ownKey = classify ? ExceptionKey.Own(typeName, site) : null;
                 lock (_logLock)
                 {
                     decision = _exceptionBudget.Next(key, out occurrence);
+                    if (classify)
+                    {
+                        lookup = _ownCache.Lookup(ownKey, out own);
+                    }
+                }
+
+                // At most one stack capture per exception, shared by the own check and the full log
+                // line; repeats of an already classified key and dropped exceptions capture nothing.
+                System.Diagnostics.StackTrace callers = lookup == OwnLookup.Walk || decision == ExceptionLogDecision.Full
+                    ? new System.Diagnostics.StackTrace(1, false)
+                    : null;
+
+                lock (_logLock)
+                {
+                    if (lookup == OwnLookup.Walk && TryClassifyOwn(classifier, callers, out own))
+                    {
+                        _ownCache.Store(ownKey, own);
+                    }
+
+                    _exceptionStats.RecordFirstChance(key, own);
                 }
 
                 if (decision == ExceptionLogDecision.Drop)
@@ -477,7 +593,7 @@ namespace TestRig.Harness
                     // e.ToString() holds only the throwing frame at this point; the live stack
                     // below it shows who called into the throwing code.
                     Log("FirstChance #" + occurrence + " [" + thread + "]: " + OneLine(e.ToString())
-                        + " || caller stack: " + OneLine(new System.Diagnostics.StackTrace(1, false).ToString()));
+                        + " || caller stack: " + OneLine(callers.ToString()));
                 }
                 else
                 {
@@ -494,12 +610,29 @@ namespace TestRig.Harness
             }
         }
 
+        // The process terminates right after this handler, before any tick could write the result,
+        // so the record is written here (best effort): a run still Running becomes Aborted with reason
+        // "unhandled:<phase>" (scenario Failed), a run that already has a final status is rewritten
+        // with the updated exception counts and its timing as of the final transition. Nothing is written before the run is armed (no HarnessRun yet).
         private void OnUnhandledException(object sender, UnhandledExceptionEventArgs args)
         {
             try
             {
+                ExceptionSummary exceptions;
+                lock (_logLock)
+                {
+                    _exceptionStats.RecordUnhandled();
+                    exceptions = _exceptionStats.Summary();
+                }
+
                 Log("UnhandledException (terminating=" + args.IsTerminating + "): "
                     + OneLine(Convert.ToString(args.ExceptionObject, CultureInfo.InvariantCulture)));
+
+                HarnessRun run = _run;
+                if (args.IsTerminating && run != null)
+                {
+                    WriteResult(run.ToUnhandledResult(RealSeconds, _modules, exceptions));
+                }
             }
             catch (Exception)
             {
@@ -507,19 +640,78 @@ namespace TestRig.Harness
             }
         }
 
-        private static string ExceptionKey(Exception e)
+        // Classifies the captured live stack of the throwing thread (at first-chance time e.StackTrace
+        // holds only the throw frame; the live stack holds the whole chain). Only the declaring types'
+        // assemblies are read (no file/line info); harness frames (this handler) are skipped. Returns
+        // false with own = false when the check throws: it must never take the handler down.
+        // Caller holds _logLock.
+        private bool TryClassifyOwn(OwnAssemblyClassifier classifier, System.Diagnostics.StackTrace callers, out bool own)
         {
-            string message = e.Message ?? string.Empty;
-            if (message.Length > 200)
+            try
             {
-                message = message.Substring(0, 200);
+                Assembly harness = typeof(HarnessSubModule).Assembly;
+                var names = new List<string>();
+                System.Diagnostics.StackFrame[] frames = callers.GetFrames();
+                if (frames != null)
+                {
+                    foreach (System.Diagnostics.StackFrame frame in frames)
+                    {
+                        MethodBase method = frame.GetMethod();
+                        Type type = method == null ? null : method.DeclaringType;
+                        Assembly assembly = type == null ? null : type.Assembly;
+                        if (assembly != null && assembly != harness)
+                        {
+                            names.Add(SimpleName(assembly));
+                        }
+                    }
+                }
+
+                own = classifier.IsOwn(names);
+                return true;
+            }
+            catch (Exception e)
+            {
+                own = false;
+                if (!_ownCheckFailureLogged)
+                {
+                    _ownCheckFailureLogged = true;
+                    Log("Own-assembly check failed, counted as not own (logged once): " + OneLine(e.Message));
+                }
+
+                return false;
+            }
+        }
+
+        // Caller holds _logLock.
+        private string SimpleName(Assembly assembly)
+        {
+            string name;
+            if (!_assemblyNames.TryGetValue(assembly, out name))
+            {
+                name = assembly.GetName().Name;
+                _assemblyNames[assembly] = name;
             }
 
+            return name;
+        }
+
+        private RunResult BuildResult(double now)
+        {
+            ExceptionSummary exceptions;
+            lock (_logLock)
+            {
+                exceptions = _exceptionStats.Summary();
+            }
+
+            return _run.ToResult(now, _modules, exceptions);
+        }
+
+        private static string ThrowSite(Exception e)
+        {
             MethodBase site = e.TargetSite;
-            string where = site == null
-                ? "?"
-                : (site.DeclaringType == null ? "?" : site.DeclaringType.FullName) + "." + site.Name;
-            return e.GetType().FullName + ": " + OneLine(message) + " @ " + where;
+            return site == null
+                ? ExceptionKey.Site(null, null)
+                : ExceptionKey.Site(site.DeclaringType == null ? null : site.DeclaringType.FullName, site.Name);
         }
 
         private void RequestEndGame()
@@ -590,7 +782,9 @@ namespace TestRig.Harness
             }
         }
 
-        private void WriteResult(string record)
+        // Atomic for readers: the record goes to a temp file in the same folder, which then replaces
+        // (or, on the first write, becomes) the target in one rename - never a half-written file.
+        private void WriteResult(RunResult result)
         {
             if (_harnessDirectory == null)
             {
@@ -599,8 +793,31 @@ namespace TestRig.Harness
 
             try
             {
-                Directory.CreateDirectory(_harnessDirectory);
-                File.WriteAllText(Path.Combine(_harnessDirectory, "result.txt"), record, Utf8NoBom);
+                lock (_resultLock)
+                {
+                    Directory.CreateDirectory(_harnessDirectory);
+                    string target = Path.Combine(_harnessDirectory, ResultFileName);
+                    string temp = target + ".tmp";
+                    string json = RunResultWriter.Write(result);
+
+                    // The temp file is rewritten on every attempt: a failed Replace may leave it gone.
+                    IoRetry.Run(
+                        () =>
+                        {
+                            File.WriteAllText(temp, json, Utf8NoBom);
+                            if (File.Exists(target))
+                            {
+                                File.Replace(temp, target, null);
+                            }
+                            else
+                            {
+                                File.Move(temp, target);
+                            }
+                        },
+                        ResultReplaceAttempts,
+                        ResultReplaceDelayMilliseconds,
+                        Thread.Sleep);
+                }
             }
             catch (Exception e)
             {
@@ -634,12 +851,20 @@ namespace TestRig.Harness
         }
 
         // Logs each distinct failure once, so an exception repeating every frame does not flood the log.
+        // Callers must not hold _resultLock (lock order is _resultLock -> _logLock only); the set is
+        // updated under _logLock, the output happens after it is released.
         private void LogError(string where, Exception e)
         {
             try
             {
                 string message = where + " failed: " + OneLine(e.ToString());
-                if (_loggedErrors.Add(message))
+                bool first;
+                lock (_logLock)
+                {
+                    first = _loggedErrors.Add(message);
+                }
+
+                if (first)
                 {
                     TaleWorlds.Library.Debug.Print("[TestRig.Harness] " + message);
                     Log(message);

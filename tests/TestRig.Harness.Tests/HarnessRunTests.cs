@@ -1079,152 +1079,118 @@ namespace TestRig.Harness.Tests
         }
 
         [Fact]
-        public void FormatResult_PlayerMapEventsIsTheNinthAndLastLine()
+        public void ToResult_PlayerMapEventsAreReported()
         {
             HarnessRun run = NewRun();
             run.Tick(Obs(1, playerInMapEvent: true));
             run.Tick(Obs(2, playerInMapEvent: false));
             run.Tick(Obs(3, playerInMapEvent: true));
 
-            string[] lines = run.FormatResult(60).Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-            Assert.Equal(9, lines.Length);
-            Assert.Equal("playerMapEvents=2", lines[8]);
-        }
-
-        // ------------------------------------------------- C10: config error record
-
-        [Fact]
-        public void FormatConfigError_HasExactNineLinesWithEmptyValues()
-        {
-            string text = HarnessRun.FormatConfigError("missing required key 'seed'");
-
-            Assert.Equal(
-                "status=Aborted\n" +
-                "reason=config:missing required key 'seed'\n" +
-                "seed=\n" +
-                "mode=\n" +
-                "daysRequested=\n" +
-                "daysReached=\n" +
-                "realSeconds=\n" +
-                "gameDaysPerRealMinute=\n" +
-                "playerMapEvents=\n",
-                text);
-        }
-
-        [Fact]
-        public void FormatConfigError_ReplacesEachCrAndLfWithOneSpace()
-        {
-            string text = HarnessRun.FormatConfigError("a\r\nb\nc\rd");
-
-            Assert.Equal(
-                "status=Aborted\n" +
-                "reason=config:a  b c d\n" +
-                "seed=\n" +
-                "mode=\n" +
-                "daysRequested=\n" +
-                "daysReached=\n" +
-                "realSeconds=\n" +
-                "gameDaysPerRealMinute=\n" +
-                "playerMapEvents=\n",
-                text);
-        }
-
-        [Fact]
-        public void FormatConfigError_RealParseError_ProducesAbortedConfigRecord()
-        {
-            RunConfigResult result = RunConfig.Parse("seed=x\ndays=1\nmode=NoDlc");
-
-            string text = HarnessRun.FormatConfigError(result.Error);
-
-            Assert.StartsWith("status=Aborted\nreason=config:" + result.Error + "\n", text);
-            Assert.Equal(9, text.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries).Length);
+            Assert.Equal(2, ToResult(run, 60).PlayerMapEvents);
         }
 
         // ------------------------------------------------- AC-U4: result record
 
+        private static readonly ModuleEntry[] SomeModules = { new ModuleEntry("Native", "v1.4.8") };
+
+        private static RunResult ToResult(HarnessRun run, double realSeconds)
+        {
+            return run.ToResult(realSeconds, SomeModules, new ExceptionStats().Summary());
+        }
+
         [Fact]
-        public void FormatResult_Completed_HasExactLinesInOrder()
+        public void ToResult_Completed_HasRunValuesPassedScenarioAndPassedCheck()
         {
             HarnessRun run = NewRun(days: 3, seed: 7, mode: "NoDlc", start: 100);
             DriveToRunning(run, 100);
             run.Tick(Obs(150, map: true, inGame: true, days: 3));
+            ExceptionSummary exceptions = new ExceptionSummary(4, 1, 0, new[] { new ExceptionKeyCount("k", 4) });
 
-            string text = run.FormatResult(220);   // elapsed 120 s = 2 min, 3 days -> 1.50
+            RunResult result = run.ToResult(220, SomeModules, exceptions);   // elapsed 120 s = 2 min, 3 days -> 1.50
 
-            Assert.Equal(
-                "status=Completed\n" +
-                "reason=\n" +
-                "seed=7\n" +
-                "mode=NoDlc\n" +
-                "daysRequested=3\n" +
-                "daysReached=3\n" +
-                "realSeconds=120\n" +
-                "gameDaysPerRealMinute=1.50\n" +
-                "playerMapEvents=0\n",
-                text);
+            Assert.Equal(RunStatus.Completed, result.Status);
+            Assert.Equal(string.Empty, result.Reason);
+            Assert.Equal(7, result.Seed);
+            Assert.Equal("NoDlc", result.Mode);
+            Assert.Equal(3, result.DaysRequested);
+            Assert.Equal(3, result.DaysReached);
+            Assert.Equal(120, result.RealSeconds);
+            Assert.Equal(1.50, result.GameDaysPerRealMinute);
+            Assert.Equal(0, result.PlayerMapEvents);
+            Assert.Same(SomeModules, result.Modules);
+            Assert.Same(exceptions, result.Exceptions);
+
+            ScenarioResult soak = Assert.Single(result.Scenarios);
+            Assert.Equal("soak", soak.Id);
+            Assert.Equal(ScenarioStatus.Passed, soak.Status);
+            Assert.Equal(120, soak.Seconds);
+
+            CheckResult check = Assert.Single(result.Checks);
+            Assert.Equal("daysReached", check.Name);
+            Assert.Equal(">= 3", check.Expected);
+            Assert.Equal("3", check.Actual);
+            Assert.True(check.Passed);
         }
 
         [Fact]
-        public void FormatResult_Aborted_ShowsReasonAndPartialProgress()
+        public void ToResult_StallAbort_IsTimeoutWithFailedCheckAndPartialProgress()
         {
             HarnessRun run = NewRun(days: 10, seed: 3, mode: "FeatureOff", stallMinutes: 5);
             DriveToRunning(run, 0);
             run.Tick(Obs(10, map: true, inGame: true, days: 1));
             run.Tick(Obs(10 + 300, map: true, inGame: true, days: 1));   // stall:Running
 
-            string text = run.FormatResult(90);   // 1 day in 1.5 minutes -> 0.67
+            RunResult result = ToResult(run, 90);   // 1 day in 1.5 minutes -> 0.67
 
-            Assert.Equal(
-                "status=Aborted\n" +
-                "reason=stall:Running\n" +
-                "seed=3\n" +
-                "mode=FeatureOff\n" +
-                "daysRequested=10\n" +
-                "daysReached=1\n" +
-                "realSeconds=90\n" +
-                "gameDaysPerRealMinute=0.67\n" +
-                "playerMapEvents=0\n",
-                text);
+            Assert.Equal(RunStatus.Aborted, result.Status);
+            Assert.Equal("stall:Running", result.Reason);
+            Assert.Equal(1, result.DaysReached);
+            Assert.Equal(90, result.RealSeconds);
+            Assert.Equal(0.67, result.GameDaysPerRealMinute);
+            Assert.Equal(ScenarioStatus.Timeout, result.Scenarios[0].Status);
+            Assert.Equal(">= 10", result.Checks[0].Expected);
+            Assert.Equal("1", result.Checks[0].Actual);
+            Assert.False(result.Checks[0].Passed);
         }
 
         [Fact]
-        public void FormatResult_ZeroElapsedTime_ReportsZeroRate()
+        public void ToResult_ZeroElapsedTime_ReportsZeroSecondsAndRate()
         {
             HarnessRun run = NewRun(start: 500);
 
-            string text = run.FormatResult(500);
+            RunResult result = ToResult(run, 500);
 
-            Assert.Contains("\nrealSeconds=0\n", text);
-            Assert.EndsWith("gameDaysPerRealMinute=0.00\nplayerMapEvents=0\n", text);
+            Assert.Equal(0, result.RealSeconds);
+            Assert.Equal(0, result.GameDaysPerRealMinute);
         }
 
         [Fact]
-        public void FormatResult_FreshRun_IsRunningWithEmptyReason()
+        public void ToResult_ClockBeforeStart_IsClampedToZero()
         {
-            HarnessRun run = NewRun(start: 0);
-
-            string text = run.FormatResult(60);
-
-            Assert.StartsWith("status=Running\nreason=\n", text);
-            Assert.Contains("\ndaysReached=0\n", text);
-            Assert.EndsWith("gameDaysPerRealMinute=0.00\nplayerMapEvents=0\n", text);
+            Assert.Equal(0, ToResult(NewRun(start: 500), 400).RealSeconds);
         }
 
         [Fact]
-        public void FormatResult_UsesLineFeedOnlyAndEndsWithTrailingLineFeed()
+        public void ToResult_RealSeconds_RoundsHalfAwayFromZero()
         {
-            HarnessRun run = NewRun();
-
-            string text = run.FormatResult(60);
-
-            Assert.DoesNotContain("\r", text);
-            Assert.EndsWith("\n", text);
-            Assert.Equal(9, text.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries).Length);
+            Assert.Equal(3, ToResult(NewRun(start: 0), 2.5).RealSeconds);
+            Assert.Equal(2, ToResult(NewRun(start: 0), 2.49).RealSeconds);
         }
 
         [Fact]
-        public void FormatResult_UnderGermanCulture_StillUsesInvariantDecimalPoint()
+        public void ToResult_FreshRun_IsRunningWithEmptyReason()
+        {
+            RunResult result = ToResult(NewRun(start: 0), 60);
+
+            Assert.Equal(RunStatus.Running, result.Status);
+            Assert.Equal(string.Empty, result.Reason);
+            Assert.Equal(0, result.DaysReached);
+            Assert.Equal(0, result.GameDaysPerRealMinute);
+            Assert.Equal(ScenarioStatus.Error, result.Scenarios[0].Status);
+        }
+
+        [Fact]
+        public void ToResult_UnderGermanCulture_WritesInvariantJson()
         {
             HarnessRun run = NewRun(days: 3, start: 100);
             DriveToRunning(run, 100);
@@ -1232,10 +1198,229 @@ namespace TestRig.Harness.Tests
 
             WithCulture("de-DE", () =>
             {
-                string text = run.FormatResult(220);
+                string json = RunResultWriter.Write(ToResult(run, 220));
 
-                Assert.EndsWith("realSeconds=120\ngameDaysPerRealMinute=1.50\nplayerMapEvents=0\n", text);
+                Assert.Contains("\"realSeconds\": 120,\n  \"gameDaysPerRealMinute\": 1.50,\n  \"playerMapEvents\": 0,", json);
             });
+        }
+
+        [Theory]
+        [InlineData(RunStatus.Completed, null, true, ScenarioStatus.Passed)]
+        [InlineData(RunStatus.Completed, "", true, ScenarioStatus.Passed)]
+        [InlineData(RunStatus.Completed, null, false, ScenarioStatus.Failed)]
+        [InlineData(RunStatus.Aborted, "timeout:Running", false, ScenarioStatus.Timeout)]
+        [InlineData(RunStatus.Aborted, "timeout:Armed", false, ScenarioStatus.Timeout)]
+        [InlineData(RunStatus.Aborted, "stall:CharacterCreation", false, ScenarioStatus.Timeout)]
+        [InlineData(RunStatus.Aborted, "stall:Running", true, ScenarioStatus.Timeout)]
+        [InlineData(RunStatus.Aborted, "end-stall", true, ScenarioStatus.Timeout)]
+        [InlineData(RunStatus.Aborted, "stall:Map;end-stall", false, ScenarioStatus.Timeout)]
+        [InlineData(RunStatus.Aborted, "timeout:Running;end-stall", false, ScenarioStatus.Timeout)]
+        [InlineData(RunStatus.Aborted, "config:missing required key 'seed'", false, ScenarioStatus.Error)]
+        [InlineData(RunStatus.Aborted, "stalled", false, ScenarioStatus.Error)]
+        [InlineData(RunStatus.Aborted, "crash", false, ScenarioStatus.Error)]
+        [InlineData(RunStatus.Aborted, "unhandled:Running", true, ScenarioStatus.Failed)]
+        [InlineData(RunStatus.Aborted, "unhandled:Armed", false, ScenarioStatus.Failed)]
+        [InlineData(RunStatus.Aborted, "", false, ScenarioStatus.Error)]
+        [InlineData(RunStatus.Aborted, null, false, ScenarioStatus.Error)]
+        [InlineData(RunStatus.Running, null, false, ScenarioStatus.Error)]
+        public void ClassifySoak_MapsStatusAndReason(RunStatus status, string reason, bool checkPassed, ScenarioStatus expected)
+        {
+            Assert.Equal(expected, HarnessRun.ClassifySoak(status, reason, checkPassed));
+        }
+
+        // ------------------------------------------------- unhandled exception record
+
+        [Fact]
+        public void ToUnhandledResult_WhileRunning_IsAbortedWithUnhandledPhaseReason()
+        {
+            HarnessRun run = NewRun(days: 5, start: 0);
+            DriveToRunning(run, 0);
+            run.Tick(Obs(30, map: true, inGame: true, days: 2));
+            ExceptionSummary exceptions = new ExceptionSummary(9, 0, 1, new ExceptionKeyCount[0]);
+
+            RunResult result = run.ToUnhandledResult(60, SomeModules, exceptions);
+
+            Assert.Equal(RunStatus.Aborted, result.Status);
+            Assert.Equal("unhandled:Running", result.Reason);
+            Assert.Equal(2, result.DaysReached);
+            Assert.Equal(60, result.RealSeconds);
+            Assert.Same(exceptions, result.Exceptions);
+            Assert.Equal(60, result.Scenarios[0].Seconds);
+            Assert.Equal(ScenarioStatus.Failed, result.Scenarios[0].Status);
+            Assert.False(result.Checks[0].Passed);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_BeforeTheMap_NamesThePhase()
+        {
+            HarnessRun run = NewRun(start: 0);
+            run.Tick(Obs(1, menu: true));   // StartRequested
+
+            Assert.Equal("unhandled:StartRequested", ToUnhandledResult(run, 2).Reason);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_DoesNotChangeTheRun()
+        {
+            HarnessRun run = NewRun(start: 0);
+            DriveToRunning(run, 0);
+
+            ToUnhandledResult(run, 10);
+
+            Assert.Equal(RunStatus.Running, run.Status);
+            Assert.Null(run.Reason);
+            Assert.Equal(HarnessPhase.Running, run.Phase);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_AfterCompletion_KeepsTheFinalStatus()
+        {
+            HarnessRun run = NewRun(days: 1, start: 0);
+            DriveToRunning(run, 0);
+            run.Tick(Obs(10, map: true, inGame: true, days: 1));   // Completed -> Ending
+
+            RunResult result = ToUnhandledResult(run, 20);
+
+            Assert.Equal(RunStatus.Completed, result.Status);
+            Assert.Equal(string.Empty, result.Reason);
+            Assert.Equal(ScenarioStatus.Passed, result.Scenarios[0].Status);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_AfterCompletion_KeepsTheTimeOfTheCompletion()
+        {
+            HarnessRun run = NewRun(days: 1, start: 0);
+            DriveToRunning(run, 0);
+            run.Tick(Obs(30, map: true, inGame: true, days: 1));   // Completed -> Ending at 30 s
+            run.Tick(Obs(90, map: true, inGame: true, days: 1));   // still Ending
+            ExceptionSummary exceptions = new ExceptionSummary(4, 1, 1, new ExceptionKeyCount[0]);
+
+            RunResult result = run.ToUnhandledResult(200, SomeModules, exceptions);
+
+            Assert.Equal(30, result.RealSeconds);
+            Assert.Equal(2.0, result.GameDaysPerRealMinute);
+            Assert.Equal(30, result.Scenarios[0].Seconds);
+            Assert.Same(exceptions, result.Exceptions);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_AfterAnAbort_KeepsTheTimeOfTheAbort()
+        {
+            HarnessRun run = NewRun(stallMinutes: 5, start: 0);
+            run.Tick(Obs(300));   // stall:Armed -> Ending at 300 s
+
+            RunResult result = ToUnhandledResult(run, 450);
+
+            Assert.Equal(300, result.RealSeconds);
+            Assert.Equal(300, result.Scenarios[0].Seconds);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_AfterAnEndStall_KeepsTheTimeOfTheEndStall()
+        {
+            HarnessRun run = NewRun(days: 1, stallMinutes: 5, start: 0);
+            DriveToRunning(run, 0);
+            run.Tick(Obs(10, map: true, inGame: true, days: 1));         // Completed -> Ending
+            run.Tick(Obs(10 + 300, map: true, inGame: true, days: 1));   // end-stall -> Quit at 310 s
+
+            RunResult result = ToUnhandledResult(run, 500);
+
+            Assert.Equal("end-stall", result.Reason);
+            Assert.Equal(310, result.RealSeconds);
+            Assert.Equal(310, result.Scenarios[0].Seconds);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_AfterAnAbort_KeepsTheAbortReason()
+        {
+            HarnessRun run = NewRun(stallMinutes: 5, start: 0);
+            run.Tick(Obs(300));   // stall:Armed -> Ending
+
+            RunResult result = ToUnhandledResult(run, 301);
+
+            Assert.Equal(RunStatus.Aborted, result.Status);
+            Assert.Equal("stall:Armed", result.Reason);
+            Assert.Equal(ScenarioStatus.Timeout, result.Scenarios[0].Status);
+        }
+
+        private static RunResult ToUnhandledResult(HarnessRun run, double realSeconds)
+        {
+            return run.ToUnhandledResult(realSeconds, SomeModules, new ExceptionStats().Summary());
+        }
+
+        [Fact]
+        public void ToResult_EndStallAfterCompletion_IsTimeout()
+        {
+            HarnessRun run = NewRun(days: 1, stallMinutes: 5);
+            DriveToRunning(run, 0);
+            run.Tick(Obs(10, map: true, inGame: true, days: 1));        // Completed -> Ending
+            run.Tick(Obs(10 + 300, map: true, inGame: true, days: 1));  // end-stall -> Quit
+
+            RunResult result = ToResult(run, 400);
+
+            Assert.Equal("end-stall", result.Reason);
+            Assert.Equal(ScenarioStatus.Timeout, result.Scenarios[0].Status);
+            Assert.True(result.Checks[0].Passed);
+        }
+
+        // ------------------------------------------------- ownAssemblies config key
+
+        [Fact]
+        public void Parse_OwnAssemblies_Missing_IsEmpty()
+        {
+            Assert.Empty(ValidConfig(MinimalCfg).OwnAssemblies);
+        }
+
+        [Fact]
+        public void Parse_OwnAssemblies_CommaSeparated_ReturnsTrimmedNamesInOrder()
+        {
+            RunConfig config = ValidConfig(MinimalCfg + "\nownAssemblies=CoherentWarAI, SmithingSuite ,AutoTraderSpeed");
+
+            Assert.Equal(new[] { "CoherentWarAI", "SmithingSuite", "AutoTraderSpeed" }, config.OwnAssemblies);
+        }
+
+        [Theory]
+        [InlineData("ownAssemblies=")]
+        [InlineData("ownAssemblies=   ")]
+        [InlineData("ownAssemblies= , ,,")]
+        public void Parse_OwnAssemblies_EmptyOrBlank_IsEmpty(string line)
+        {
+            Assert.Empty(ValidConfig(MinimalCfg + "\n" + line).OwnAssemblies);
+        }
+
+        [Fact]
+        public void Parse_OwnAssemblies_IgnoresEmptyEntriesAndWhitespace()
+        {
+            RunConfig config = ValidConfig(MinimalCfg + "\nOWNASSEMBLIES = , A ,, B ,");
+
+            Assert.Equal(new[] { "A", "B" }, config.OwnAssemblies);
+        }
+
+        [Fact]
+        public void Parse_OwnAssemblies_DuplicateKey_IsInvalid()
+        {
+            RunConfigResult result = RunConfig.Parse(MinimalCfg + "\nownAssemblies=A\nownAssemblies=B");
+
+            Assert.Equal(RunConfigStatus.Invalid, result.Status);
+            Assert.Contains("ownAssemblies", result.Error);
+        }
+
+        [Fact]
+        public void Parse_OwnAssemblies_ControlCharacter_IsInvalid()
+        {
+            RunConfigResult result = RunConfig.Parse(MinimalCfg + "\nownAssemblies=A\u0000B");
+
+            Assert.Equal(RunConfigStatus.Invalid, result.Status);
+            Assert.Contains("ownAssemblies", result.Error);
+        }
+
+        [Fact]
+        public void Parse_OwnAssembliesTypo_IsStillRejectedAsUnknownKey()
+        {
+            RunConfigResult result = RunConfig.Parse(MinimalCfg + "\nownAssembly=A");
+
+            Assert.Equal(RunConfigStatus.Invalid, result.Status);
+            Assert.Contains("unknown key 'ownAssembly'", result.Error);
         }
     }
 }

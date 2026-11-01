@@ -508,10 +508,15 @@ function Get-PreflightError {
     return $null
 }
 
+function Get-ModulesDir {
+    param($Config)
+    return (Join-Path $Config.gamePath 'Modules')
+}
+
 function Install-JobModules {
     # Replaces <gamePath>\Modules\<id> for the (already allowlist-checked) ids.
     param($Config, [string]$PackageRoot, [string[]]$ModuleIds)
-    $modulesDir = Join-Path $Config.gamePath 'Modules'
+    $modulesDir = Get-ModulesDir $Config
     New-Item -ItemType Directory -Path $modulesDir -Force | Out-Null
     foreach ($id in $ModuleIds) {
         $target = Join-Path $modulesDir $id
@@ -540,7 +545,8 @@ function Get-HarnessDir {
 }
 
 function Get-RunCfgText {
-    param($Run)
+    # ownAssemblies is written only when given: the CoherentWarAI harness rejects unknown keys.
+    param($Run, [string[]]$OwnAssemblies = @())
     $lines = @(
         ('seed=' + [System.Convert]::ToString($Run.seed, $script:Invariant)),
         ('days=' + [System.Convert]::ToString($Run.days, $script:Invariant)),
@@ -548,7 +554,38 @@ function Get-RunCfgText {
         ('stallMinutes=' + [System.Convert]::ToString($Run.stallMinutes, $script:Invariant)),
         ('budgetMinutes=' + [System.Convert]::ToString($Run.budgetMinutes, $script:Invariant))
     )
+    if (@($OwnAssemblies).Count -gt 0) { $lines += ('ownAssemblies=' + (@($OwnAssemblies) -join ',')) }
     return ($lines -join "`n") + "`n"
+}
+
+function Get-OwnAssemblyNames {
+    # Simple DLL names (no .dll) of every non-harness module, from its installed SubModule.xml:
+    # SubModules/SubModule/DLLName/@value. Order kept, case-insensitive de-duplication.
+    # A module whose SubModule.xml is missing or unparseable is skipped and logged.
+    param([string]$ModulesDir, [string[]]$ModuleIds, [string[]]$HarnessModuleIds)
+    $names = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object System.Collections.Generic.HashSet[string] ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($id in @($ModuleIds)) {
+        if (@($HarnessModuleIds) -contains $id) { continue }
+        $xmlPath = Join-Path (Join-Path $ModulesDir $id) 'SubModule.xml'
+        try {
+            $doc = New-Object System.Xml.XmlDocument
+            $doc.XmlResolver = $null
+            $doc.LoadXml((Read-Utf8Text $xmlPath))
+            foreach ($node in $doc.SelectNodes('/Module/SubModules/SubModule/DLLName/@value')) {
+                $name = [System.Text.RegularExpressions.Regex]::Replace($node.Value.Trim(), '\.dll\z', '', 'IgnoreCase')
+                if ($name -eq '') { continue }
+                if ($name -notmatch '\A[A-Za-z0-9_.-]+\z') {
+                    # Would corrupt run.cfg (key=value lines, comma-separated list). Log it printable-only.
+                    Write-AgentLog "ownAssemblies: skipping invalid DLL name '$($name -replace '[^\x20-\x7E]', '?')' in module ${id}"
+                    continue
+                }
+                if ($seen.Add($name)) { $names.Add($name) }
+            }
+        }
+        catch { Write-AgentLog "ownAssemblies: skipping module ${id}: $($_.Exception.Message)" }
+    }
+    return $names.ToArray()
 }
 
 function Get-GameArguments {
@@ -578,11 +615,26 @@ function Get-LastLogLine {
 }
 
 function Get-ResultStatus {
-    # status value of result.txt, or $null.
-    param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    # status of the harness result in $HarnessDir: run-result.json (TestRig harness) if present,
+    # else result.txt (CoherentWarAI harness). Unreadable or invalid run-result.json = no result
+    # (logged, no fallback). Returns $null if there is no usable status.
+    param([string]$HarnessDir)
+    $jsonPath = Join-Path $HarnessDir 'run-result.json'
+    if (Test-Path -LiteralPath $jsonPath -PathType Leaf) {
+        try {
+            $json = Read-Utf8Text $jsonPath | ConvertFrom-Json
+            if ($null -eq $json -or $json -isnot [System.Management.Automation.PSCustomObject]) { throw 'top level is not a JSON object' }
+            $status = $json.status
+            if ($status -is [string] -and $status -ne '') { return $status }
+            Write-AgentLog 'run-result.json has no status; treating the run as having no result.'
+        }
+        catch { Write-AgentLog "run-result.json is unreadable or invalid; treating the run as having no result: $($_.Exception.Message)" }
+        return $null
+    }
+    $txtPath = Join-Path $HarnessDir 'result.txt'
+    if (-not (Test-Path -LiteralPath $txtPath -PathType Leaf)) { return $null }
     try {
-        foreach ($line in (Read-Utf8Text $Path) -split "`r?`n") {
+        foreach ($line in (Read-Utf8Text $txtPath) -split "`r?`n") {
             if ($line -match '^\s*status\s*=\s*(.+?)\s*$') { return $Matches[1] }
         }
     }
@@ -846,10 +898,11 @@ function Invoke-Run {
     $mcmPath = Join-Path $configsDir 'ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json'
     $modLogDir = Join-Path $docs 'CoherentWarAI'
     $harnessDir = Get-HarnessDir $Config ([string]$Run.harness)   # $null for an unknown harness (rejected below)
-    $runCfgPath = $resultPath = $harnessLogPath = $null
+    $runCfgPath = $resultPath = $runResultPath = $harnessLogPath = $null
     if ($harnessDir) {
         $runCfgPath = Join-Path $harnessDir 'run.cfg'
         $resultPath = Join-Path $harnessDir 'result.txt'
+        $runResultPath = Join-Path $harnessDir 'run-result.json'
         $harnessLogPath = Join-Path $harnessDir 'harness.log'
     }
     $engineLogDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Mount and Blade II Bannerlord\logs'
@@ -884,11 +937,16 @@ function Invoke-Run {
         Set-McmSettingsValues $mcmPath ($Run.mode -ne 'FeatureOff')
 
         New-Item -ItemType Directory -Path $harnessDir -Force | Out-Null
-        foreach ($stale in @($resultPath, $harnessLogPath)) {
+        foreach ($stale in @($resultPath, $runResultPath, ($runResultPath + '.tmp'), $harnessLogPath)) {
             if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
         }
+        $ownAssemblies = @()
+        if ([string]$Run.harness -eq 'TestRig') {
+            $ownAssemblies = @(Get-OwnAssemblyNames -ModulesDir (Get-ModulesDir $Config) `
+                -ModuleIds $PackageModuleIds -HarnessModuleIds @($script:Harnesses.Values | ForEach-Object { $_.Module }))
+        }
         $runCfgTouched = $true   # before the write: a partial file must be deleted too
-        Write-Utf8Text $runCfgPath (Get-RunCfgText $Run) $false
+        Write-Utf8Text $runCfgPath (Get-RunCfgText $Run -OwnAssemblies $ownAssemblies) $false
 
         # Compile the Win32 helper here, not inside the supervision. Not fatal: the run goes on without dialog handling.
         try { Initialize-GameWindows }
@@ -963,7 +1021,7 @@ function Invoke-Run {
 
     if ($null -ne $process) {
         $elapsedSeconds = ([DateTime]::UtcNow - $startedAt).TotalSeconds
-        $status = Get-ResultStatus $resultPath
+        $status = if ($harnessDir) { Get-ResultStatus $harnessDir } else { $null }
         if ($killFailed -or -not $runCfgRemoved) {
             $record.exitClass = 'CleanupFailed'
             $record.message = 'The game could not be stopped or run.cfg could not be removed.'
@@ -985,6 +1043,7 @@ function Invoke-Run {
     Write-JobState -Context $Context -State 'collecting' -RunId $runId -RunIndex $RunIndex
     $copies = @()
     if ($harnessDir) {
+        $copies += @{ Name = 'run-result.json'; Source = $runResultPath }
         $copies += @{ Name = 'result.txt'; Source = $resultPath }
         $copies += @{ Name = 'harness.log'; Source = $harnessLogPath }
     }

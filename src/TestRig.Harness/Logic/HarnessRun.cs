@@ -1,6 +1,6 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
-using System.Text;
 
 namespace TestRig.Harness.Logic
 {
@@ -62,13 +62,21 @@ namespace TestRig.Harness.Logic
         public double StallMinutes { get; }
         public double BudgetMinutes { get; }
 
-        private RunConfig(int seed, int days, HarnessMode mode, double stallMinutes, double budgetMinutes)
+        /// <summary>
+        /// Simple names (without ".dll") of the assemblies under test, trimmed and without empty
+        /// entries; empty when the key is absent. Classifies exceptions as own in run-result.json.
+        /// </summary>
+        public IReadOnlyList<string> OwnAssemblies { get; }
+
+        private RunConfig(int seed, int days, HarnessMode mode, double stallMinutes, double budgetMinutes,
+            IReadOnlyList<string> ownAssemblies)
         {
             Seed = seed;
             Days = days;
             Mode = mode;
             StallMinutes = stallMinutes;
             BudgetMinutes = budgetMinutes;
+            OwnAssemblies = ownAssemblies;
         }
 
         /// <summary>
@@ -87,6 +95,7 @@ namespace TestRig.Harness.Logic
             HarnessMode? mode = null;
             double? stallMinutes = null;
             double? budgetMinutes = null;
+            string[] ownAssemblies = null;
             bool anyLine = false;
 
             foreach (string rawLine in text.Split('\n'))
@@ -128,6 +137,10 @@ namespace TestRig.Harness.Logic
                 {
                     error = ReadMinutes("budgetMinutes", value, ref budgetMinutes);
                 }
+                else if (string.Equals(key, "ownAssemblies", StringComparison.OrdinalIgnoreCase))
+                {
+                    error = ReadNameList("ownAssemblies", value, ref ownAssemblies);
+                }
                 else
                 {
                     error = "unknown key '" + key + "'";
@@ -164,7 +177,8 @@ namespace TestRig.Harness.Logic
                 days.Value,
                 mode.Value,
                 stallMinutes ?? DefaultStallMinutes,
-                budgetMinutes ?? DefaultBudgetMinutes));
+                budgetMinutes ?? DefaultBudgetMinutes,
+                ownAssemblies ?? new string[0]));
         }
 
         // Each Read* helper stores into the slot and returns null, or returns an error text.
@@ -208,6 +222,33 @@ namespace TestRig.Harness.Logic
             }
 
             slot = parsed;
+            return null;
+        }
+
+        // Comma-separated names; an empty value or empty entries are allowed and dropped.
+        private static string ReadNameList(string key, string value, ref string[] slot)
+        {
+            if (slot != null)
+            {
+                return "duplicate key '" + key + "'";
+            }
+
+            if (HasControlCharacter(value))
+            {
+                return "invalid value for '" + key + "' (expected comma-separated names): " + value;
+            }
+
+            var names = new List<string>();
+            foreach (string entry in value.Split(','))
+            {
+                string name = entry.Trim();
+                if (name.Length > 0)
+                {
+                    names.Add(name);
+                }
+            }
+
+            slot = names.ToArray();
             return null;
         }
 
@@ -282,6 +323,9 @@ namespace TestRig.Harness.Logic
         private int _maxDaysSeen;
         private bool _wasInMapEvent;
 
+        // Real time of the last change to a final Status/Reason (completion, abort, end-stall).
+        private double _finalRealSeconds;
+
         public HarnessRun(RunConfig config, double startRealSeconds)
         {
             if (config == null)
@@ -341,44 +385,114 @@ namespace TestRig.Harness.Logic
             return action;
         }
 
-        /// <summary>Key=value result record, LF-separated with a trailing LF.</summary>
-        public string FormatResult(double realSeconds)
+        /// <summary>
+        /// Result record of this run at <paramref name="realSeconds"/>: one soak scenario and one
+        /// daysReached check. realSeconds is rounded to whole seconds and the rate to two decimals.
+        /// </summary>
+        public RunResult ToResult(double realSeconds, IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions)
         {
-            double elapsed = Math.Max(0, realSeconds - _startRealSeconds);
-            double rate = elapsed > 0 ? DaysReached / (elapsed / 60.0) : 0;
-
-            var sb = new StringBuilder();
-            AppendLine(sb, "status", Status.ToString());
-            AppendLine(sb, "reason", Reason ?? string.Empty);
-            AppendLine(sb, "seed", _config.Seed.ToString(CultureInfo.InvariantCulture));
-            AppendLine(sb, "mode", _config.Mode.ToString());
-            AppendLine(sb, "daysRequested", _config.Days.ToString(CultureInfo.InvariantCulture));
-            AppendLine(sb, "daysReached", DaysReached.ToString(CultureInfo.InvariantCulture));
-            AppendLine(sb, "realSeconds", elapsed.ToString("F0", CultureInfo.InvariantCulture));
-            AppendLine(sb, "gameDaysPerRealMinute", rate.ToString("F2", CultureInfo.InvariantCulture));
-            AppendLine(sb, "playerMapEvents", PlayerMapEvents.ToString(CultureInfo.InvariantCulture));
-            return sb.ToString();
+            return ToResult(Status, Reason, realSeconds, modules, exceptions);
         }
 
         /// <summary>
-        /// Result record for an invalid run.cfg: same keys as <see cref="FormatResult"/>, status
-        /// Aborted, reason "config:&lt;error on one line&gt;", every other value empty.
+        /// Result record for an unhandled exception that terminates the process. A run without a
+        /// final status yet (Running) becomes Aborted with reason "unhandled:&lt;phase&gt;" (scenario
+        /// Failed) as of <paramref name="realSeconds"/>. A run that already has a final status keeps
+        /// it and its timing as of the final transition (realSeconds, rate, scenario seconds), so the
+        /// crash only updates the exception counts. The run itself is not changed.
         /// </summary>
-        public static string FormatConfigError(string error)
+        public RunResult ToUnhandledResult(double realSeconds, IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions)
         {
-            string oneLine = (error ?? string.Empty).Replace("\r", " ").Replace("\n", " ");
+            return Status == RunStatus.Running
+                ? ToResult(RunStatus.Aborted, "unhandled:" + Phase, realSeconds, modules, exceptions)
+                : ToResult(Status, Reason, _finalRealSeconds, modules, exceptions);
+        }
 
-            var sb = new StringBuilder();
-            AppendLine(sb, "status", RunStatus.Aborted.ToString());
-            AppendLine(sb, "reason", "config:" + oneLine);
-            AppendLine(sb, "seed", string.Empty);
-            AppendLine(sb, "mode", string.Empty);
-            AppendLine(sb, "daysRequested", string.Empty);
-            AppendLine(sb, "daysReached", string.Empty);
-            AppendLine(sb, "realSeconds", string.Empty);
-            AppendLine(sb, "gameDaysPerRealMinute", string.Empty);
-            AppendLine(sb, "playerMapEvents", string.Empty);
-            return sb.ToString();
+        private RunResult ToResult(RunStatus status, string reason, double realSeconds,
+            IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions)
+        {
+            double elapsed = Math.Max(0, realSeconds - _startRealSeconds);
+            double rate = elapsed > 0 ? DaysReached / (elapsed / 60.0) : 0;
+            int seconds = (int)Math.Round(elapsed, MidpointRounding.AwayFromZero);
+            bool daysPassed = DaysReached >= _config.Days;
+
+            var check = new CheckResult(
+                "daysReached",
+                ">= " + _config.Days.ToString(CultureInfo.InvariantCulture),
+                DaysReached.ToString(CultureInfo.InvariantCulture),
+                daysPassed);
+            var soak = new ScenarioResult(RunResult.SoakScenarioId, ClassifySoak(status, reason, daysPassed), seconds);
+
+            return new RunResult(
+                status,
+                reason ?? string.Empty,
+                _config.Seed,
+                _config.Mode.ToString(),
+                _config.Days,
+                DaysReached,
+                seconds,
+                Math.Round(rate, 2, MidpointRounding.AwayFromZero),
+                PlayerMapEvents,
+                modules,
+                exceptions,
+                new[] { soak },
+                new[] { check });
+        }
+
+        /// <summary>
+        /// Maps the run outcome to the soak scenario status. Reasons come from this class
+        /// (<see cref="Abort"/>, <see cref="TickEnding"/>, <see cref="ToUnhandledResult"/>) and from the
+        /// config-error record:
+        /// <code>
+        /// status     reason                              scenario
+        /// Completed  (none)                              Passed if the check passed, else Failed
+        /// Aborted    "timeout:&lt;phase&gt;"  (budget)          Timeout
+        /// Aborted    "stall:&lt;phase&gt;"    (no progress)     Timeout
+        /// Aborted    "end-stall"            (no clean exit)  Timeout
+        /// Aborted    "timeout:&lt;phase&gt;;end-stall"         Timeout
+        /// Aborted    "stall:&lt;phase&gt;;end-stall"           Timeout
+        /// Aborted    "config:&lt;error&gt;"                   Error
+        /// Aborted    "unhandled:&lt;phase&gt;" (crash)          Failed (the mod under test crashed)
+        /// Aborted    anything else / none                Error
+        /// Running    any (not a final state)             Error
+        /// </code>
+        /// </summary>
+        public static ScenarioStatus ClassifySoak(RunStatus status, string reason, bool checkPassed)
+        {
+            switch (status)
+            {
+                case RunStatus.Completed:
+                    return checkPassed ? ScenarioStatus.Passed : ScenarioStatus.Failed;
+
+                case RunStatus.Aborted:
+                    if (IsTimeLimitReason(reason))
+                    {
+                        return ScenarioStatus.Timeout;
+                    }
+
+                    return IsUnhandledReason(reason) ? ScenarioStatus.Failed : ScenarioStatus.Error;
+
+                default:
+                    return ScenarioStatus.Error;
+            }
+        }
+
+        // The first segment decides; ";end-stall" is only ever appended to a time-limit reason.
+        private static bool IsTimeLimitReason(string reason)
+        {
+            if (string.IsNullOrEmpty(reason))
+            {
+                return false;
+            }
+
+            return reason.StartsWith("timeout:", StringComparison.Ordinal)
+                || reason.StartsWith("stall:", StringComparison.Ordinal)
+                || string.Equals(reason, "end-stall", StringComparison.Ordinal);
+        }
+
+        private static bool IsUnhandledReason(string reason)
+        {
+            return reason != null && reason.StartsWith("unhandled:", StringComparison.Ordinal);
         }
 
         private void RecordObservation(HarnessObservation o)
@@ -396,11 +510,6 @@ namespace TestRig.Harness.Logic
             _wasInMapEvent = o.PlayerInMapEvent;
         }
 
-        private static void AppendLine(StringBuilder sb, string key, string value)
-        {
-            sb.Append(key).Append('=').Append(value).Append('\n');
-        }
-
         private HarnessAction TickEnding(HarnessObservation o)
         {
             if (o.GameEnded || !o.InGame)
@@ -414,6 +523,7 @@ namespace TestRig.Harness.Logic
             {
                 Reason = Status == RunStatus.Aborted ? Reason + ";end-stall" : "end-stall";
                 Status = RunStatus.Aborted;
+                _finalRealSeconds = o.RealSeconds;
                 Phase = HarnessPhase.Quit;
                 return HarnessAction.QuitProcess;
             }
@@ -441,6 +551,7 @@ namespace TestRig.Harness.Logic
         {
             Status = RunStatus.Aborted;
             Reason = kind + ":" + Phase;
+            _finalRealSeconds = realSeconds;
             EnterPhase(HarnessPhase.Ending, realSeconds);
             return HarnessAction.RequestEndGame;
         }
@@ -501,6 +612,7 @@ namespace TestRig.Harness.Logic
             if (o.DaysElapsed >= _config.Days)
             {
                 Status = RunStatus.Completed;
+                _finalRealSeconds = o.RealSeconds;
                 EnterPhase(HarnessPhase.Ending, o.RealSeconds);
                 return HarnessAction.RequestEndGame;
             }

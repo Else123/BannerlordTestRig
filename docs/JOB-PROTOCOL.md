@@ -80,7 +80,7 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
 
 - `modules` is the full `_MODULES_` load order; the agent passes it unchanged.
 - `expectedGameVersion`: `null` in S1 = not checked.
-- `harness`: selects the in-game harness; `run.cfg`, `result.txt` and `harness.log` live in its folder
+- `harness`: selects the in-game harness; `run.cfg`, the result file and `harness.log` live in its folder
   below `<MyDocuments>\Mount and Blade II Bannerlord\`. Anything else -> run classified `SetupError`.
 
   | `harness` | Folder | Harness module id in `modules` |
@@ -109,9 +109,13 @@ before anything is installed. Native, NavalDLC and Workshop modules are never to
 
 ```json
 { "schema": 1, "runId": "r1", "exitClass": "Completed", "pid": 1234,
-  "startedUtc": "...", "endedUtc": "...", "artifacts": [ "result.txt", "harness.log" ],
+  "startedUtc": "...", "endedUtc": "...", "artifacts": [ "run-result.json", "harness.log" ],
   "baselineRestored": null, "message": null, "dismissedDialogs": [ "Mod change detected" ] }
 ```
+
+`artifacts` lists what was copied to the run folder (only files that exist, written during the run):
+`run-result.json`, `result.txt`, `harness.log`, `CoherentWarAI.log` (mod log, if present) and the
+engine logs `rgl_log_<pid>.txt` / `rgl_log_errors_<pid>.txt`.
 
 `dismissedDialogs`: titles of game dialogs the agent sent OK to during the run, empty if none.
 While the game runs, the agent checks its visible standard dialogs (`#32770`) every second. Only the
@@ -122,14 +126,75 @@ changed) gets OK; any other dialog title is logged once per run and left alone.
 
 | exitClass | Meaning |
 |---|---|
-| `Completed` | game ended, `result.txt` has `status=Completed` |
+| `Completed` | game ended, the harness result has status `Completed` (`run-result.json`, else `result.txt`) |
 | `SetupError` | precondition or setup failed before or at launch |
 | `LaunchFailed` | process exited within 30 s and the harness log never appeared |
 | `HardTimeout` | `hardTimeoutMinutes` expired, game killed |
-| `NotCompleted` | game ended, but no `result.txt` or status not `Completed` |
+| `NotCompleted` | game ended, but no usable result (missing, or `run-result.json` invalid JSON) or status not `Completed` |
 | `CleanupFailed` | the game could not be stopped or `run.cfg` could not be removed |
 | `Crashed` | crash detected (not in S1: arrives with slice S5/#7) |
 | `Aborted` | `abort` file seen, game killed |
+
+## Harness result: `run-result.json` / `result.txt`
+
+The harness writes its result into its harness folder. The `TestRig` harness writes `run-result.json`
+(schema 1, UTF-8 without BOM, written via `run-result.json.tmp` + rename); the old `CoherentWarAI` harness
+writes `result.txt` (`key=value` lines, e.g. `status=Completed`, `daysReached=3`).
+
+```json
+{
+  "schema": 1, "status": "Completed", "reason": "", "seed": 1, "mode": "WarSails",
+  "daysRequested": 1, "daysReached": 1, "realSeconds": 25, "gameDaysPerRealMinute": 2.41, "playerMapEvents": 0,
+  "modules": [ { "id": "Native", "version": "v1.4.8" } ],
+  "exceptions": { "total": 3, "own": 1, "unhandled": 0, "top": [ { "key": "KeyA", "count": 2 }, { "key": "KeyB", "count": 1 } ] },
+  "scenarios": [ { "id": "soak", "status": "Passed", "seconds": 25 } ],
+  "checks": [ { "name": "daysReached", "expected": ">= 1", "actual": "1", "passed": true } ]
+}
+```
+
+Unknown values are `null`. Scenario `status`: `Passed` | `Failed` | `Error` | `Timeout` | `Skipped` (`Skipped` is reserved:
+the harness does not produce it yet). `exceptions.total` counts first-chance exceptions in the game process, including
+the harness's own (e.g. a retried file write); `top` lists the most frequent keys (`<type>: <message> @ <site>`, at most
+10000 distinct keys are tracked, later new keys never enter `top`), so its counts add up to at most `total`.
+Exception counting starts when the harness module loads (`OnSubModuleLoad`, once `run.cfg` was read and accepted), by
+installing the first-chance and unhandled hooks; a later map window only restarts the log budget, not the counters.
+`exceptions.own` is an **estimate** and is only counted when `run.cfg` has `ownAssemblies`: exceptions are grouped by
+exception type and throw site (`<type> @ <declaring type>.<method>`, no message); each group is classified once, by one
+stack walk at its first occurrence, and every repeat gets the same answer, so `own` can be too high (a vanilla throw
+site first reached through an own mod) or too low (at most 1000 walks per run; groups first seen after that, and a
+failed classification, count as not own).
+`exceptions.unhandled`: on a terminating unhandled .NET exception the harness counts it and writes `run-result.json`
+at once (best effort, values read without a lock, so they can be one tick old). A run still in progress then ends as
+`status` `Aborted`, `reason` `unhandled:<phase>`, scenario `Failed` (runner exit `2`, a failure of the mods under test);
+the times are those of the crash. A run that had already finished keeps its status, reason, `daysReached` and checks,
+and its times frozen at the moment it finished; only `exceptions` is updated. Before the run is armed (module loading,
+before the initial state) nothing is written. A native engine crash never reaches this handler: then there is no new
+record and `unhandled` stays `0` in any file written earlier. The harness writes the file with up to 4 attempts 75 ms
+apart on `IOException` or `UnauthorizedAccessException` (e.g. a virus scanner holding the old file). A config error
+has `status` `Aborted`, `reason` `config:...`, run values `null` and `scenarios` `[ { "id": "soak", "status": "Error", "seconds": null } ]`.
+
+Fallback rule (agent and runner): read `run-result.json` if it exists, else `result.txt`. If `run-result.json`
+exists but is unreadable, not valid JSON, not a JSON object at top level (array, number, string, `null`), or has no `status`, the run has **no result**: there is no fallback to
+`result.txt`; the agent logs it once and classifies `NotCompleted`, the runner warns. Before each launch the agent
+deletes `run-result.json`, `run-result.json.tmp`, `result.txt` and `harness.log`, so a result of an earlier run is never read.
+
+Runner output: with `run-result.json` one console line per scenario (scenario `id` in the kind column, scenario
+`status` in the status column; a result without scenarios prints one line with `soak` and the run status). With
+`result.txt` one line per run (`soak`, status from the file), unchanged.
+
+`job-result.json` (written by the runner) holds one `result` per run, in one of two shapes: from `run-result.json`, the
+parsed object as written by the harness (nested, typed values as above); from legacy `result.txt`, a flat map of the
+`key=value` lines (all values strings, e.g. `{ "status": "Completed", "daysReached": "3" }`); `{}` when there is no result
+(missing file, or invalid `run-result.json`).
+
+### `run.cfg`
+
+`seed`, `days`, `mode`, `stallMinutes`, `budgetMinutes`, plus, for harness `TestRig` only:
+`ownAssemblies=<comma-separated simple DLL names without .dll>` - for every module of the package that is not a
+harness module (`CoherentWarAI.TestHarness`, `TestRig.Harness`), the `SubModules/SubModule/DLLName/@value` entries of its
+installed `SubModule.xml`, in order, de-duplicated case-insensitively. A module with a missing or unparseable
+`SubModule.xml` is skipped (logged); a name that does not match `[A-Za-z0-9_.-]+` (after stripping `.dll`) is skipped
+(logged); no names = no line. The `CoherentWarAI` harness never gets this key (its parser rejects unknown keys).
 
 ## `results\<jobId>\done.json`
 
@@ -148,11 +213,14 @@ runs are skipped because the game could not be stopped).
 
 `0` every run `Completed` and `daysReached >= days` - `1` rig or infrastructure error
 (`blocked`, `rejected`, `failed`, `SetupError`, `LaunchFailed`, `CleanupFailed`, transport error,
-open job) - `2` test failure (`NotCompleted`, `Crashed`, or `Completed` with too few days) -
+open job, a scenario with status `Error`) - `2` test failure (`NotCompleted`, `Crashed`, `Completed` with too few days,
+a scenario with status `Failed`) -
 `3` time limit or agent not responding (`HardTimeout`, `Aborted`, done status `aborted`, claim
 timeout, stale heartbeat, overall deadline; the runner aborts at its deadline and, best effort,
 on a stale heartbeat). Precedence:
-1 > 3 > 2 > 0. An unknown `exitClass` or `status` maps to `1`.
+1 > 3 > 2 > 0. An unknown `exitClass` or `status` maps to `1`. Scenario statuses (case-insensitive): `Passed`,
+`Timeout` and `Skipped` do not change the code by themselves, `Failed` gives `2`, `Error` and any other value (unknown
+string, empty, `null`, non-string) give `1`.
 
 ## Agent restart
 
