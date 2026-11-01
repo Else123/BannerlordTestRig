@@ -10,7 +10,8 @@ anything from them.
 
 ```
 C:\TestRig\
-  agent\                 TestRigAgent.ps1, agent.config.json
+  agent\                 TestRigAgent.ps1, Save-TestRigBaseline.ps1, agent.config.json
+  baseline\              Configs\... (recorded game configuration, see "Baseline")
   queue\jobs\<jobId>\    package.zip, job.json | job.claimed.json | job.withdrawn.json, state.json, abort
   queue\results\<jobId>\ <runId>\..., done.json (written last)
   work\<jobId>\          local copy + extracted package (DLLs are never loaded from the queue)
@@ -79,7 +80,11 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
 ```
 
 - `modules` is the full `_MODULES_` load order; the agent passes it unchanged.
-- `expectedGameVersion`: `null` in S1 = not checked.
+- `expectedGameVersion`: the runner sets it to the `Singleplayer` `Value` of the tower's
+  `<towerGamePath>\bin\Win64_Shipping_Client\Version.xml`. A missing or unreadable file -> runner exit 1
+  before anything is published. `towerGamePath` not configured -> `null` and one
+  `WARN towerGamePath is not configured: game version and module versions not checked.` The agent checks
+  it in preflight (see "Preflight"): `null` or `""` = not checked.
 - `harness`: selects the in-game harness; `run.cfg`, the result file and `harness.log` live in its folder
   below `<MyDocuments>\Mount and Blade II Bannerlord\`. Anything else -> run classified `SetupError`.
 
@@ -105,17 +110,45 @@ before anything is installed. Native, NavalDLC and Workshop modules are never to
 
 `state`: `claimed` | `preflight` | `installing` | `running` | `collecting` | `finished`.
 
+## Preflight (job level)
+
+Before anything is installed the agent checks, in this order; the first failure ends the job with
+`done.json` status `blocked` and the reason in `message`:
+
+1. Bannerlord is not already running.
+2. The game executable exists.
+3. A `steam` process is running.
+4. Game version: `Singleplayer` `Value` of `<gamePath>\bin\Win64_Shipping_Client\Version.xml` must equal
+   `job.expectedGameVersion` (exact, case-sensitive) when that is a non-empty string. `null` or `""` = not
+   checked. A non-string value -> `blocked`. A `Version.xml` that cannot be read while a version is expected
+   -> `blocked`.
+5. Every id in `job.modules` is present: in the package, else as `<gamePath>\Modules\<id>\SubModule.xml`,
+   else in the workshop folder (`workshopRoot`; matched by the `<Id value>` of each item's `SubModule.xml`).
+   All missing ids are listed in the message.
+
+The versions found here go into every `agent-run.json` (`gameVersion`, `moduleVersions`).
+
 ## `results\<jobId>\<runId>\agent-run.json`
 
 ```json
 { "schema": 1, "runId": "r1", "exitClass": "Completed", "pid": 1234,
   "startedUtc": "...", "endedUtc": "...", "artifacts": [ "run-result.json", "harness.log" ],
-  "baselineRestored": null, "message": null, "dismissedDialogs": [ "Mod change detected" ] }
+  "baselineRestored": true,
+  "baselineSha256": { "Configs/BannerlordConfig.txt": "<uppercase hex>" },
+  "gameVersion": "v1.4.8",
+  "moduleVersions": [ { "id": "Bannerlord.Harmony", "version": "v2.3.6", "source": "workshop" } ],
+  "message": null, "dismissedDialogs": [ "Mod change detected" ] }
 ```
 
 `artifacts` lists what was copied to the run folder (only files that exist, written during the run):
 `run-result.json`, `result.txt`, `harness.log`, `CoherentWarAI.log` (mod log, if present) and the
-engine logs `rgl_log_<pid>.txt` / `rgl_log_errors_<pid>.txt`.
+engine logs `rgl_log_<pid>.txt` / `rgl_log_errors_<pid>.txt` / `watchdog_log_<pid>.txt`.
+
+`baselineRestored`: `true` if the baseline was restored before this run, `false` if the restore failed or was not
+reached. `baselineSha256`: relative path (with `/`) -> uppercase hex SHA-256 of every restored file, `null` if not
+restored. `gameVersion`: installed game version, `string|null`. `moduleVersions`: one entry per id of
+`job.modules`, in that order: `version` is `string|null` (module without `Version`), `source` is `package` |
+`game` | `workshop` (where the agent found the module, checked in this order).
 
 `dismissedDialogs`: titles of game dialogs the agent sent OK to during the run, empty if none.
 While the game runs, the agent checks its visible standard dialogs (`#32770`) every second. Only the
@@ -132,8 +165,68 @@ changed) gets OK; any other dialog title is logged once per run and left alone.
 | `HardTimeout` | `hardTimeoutMinutes` expired, game killed |
 | `NotCompleted` | game ended, but no usable result (missing, or `run-result.json` invalid JSON) or status not `Completed` |
 | `CleanupFailed` | the game could not be stopped or `run.cfg` could not be removed |
-| `Crashed` | crash detected (not in S1: arrives with slice S5/#7) |
+| `Crashed` | the watchdog log reported `Crash occurred`, game killed (see "Crash watchdog") |
 | `Aborted` | `abort` file seen, game killed |
+
+If several apply, the first in this order wins: `CleanupFailed` > `Aborted` > `SetupError` > `Crashed` >
+`HardTimeout` > `Completed` > `LaunchFailed` > `NotCompleted`.
+
+### Crash watchdog
+
+About once per second while the game runs, the agent looks for `Crash occurred` in
+`<engineLogDir>\watchdog_log_<pid>.txt` (fallback, e.g. after a relaunch under another PID: another
+`watchdog_log_*.txt`, most recently written first). At the launch the agent records the name and length of every
+`watchdog_log_*.txt`; only a new file, or the bytes appended to a recorded file after the launch, count (a file that got
+shorter counts as replaced and is read in full). An old crash log, or a log from an earlier run under a reused PID,
+therefore never counts, and neither does a mere write to an old log. If `engineLogDir` does not exist at the launch the
+agent logs that once per run (no watchdog log is seen unless the game creates the folder).
+On a hit it kills the process tree at once (the crash dialog would otherwise block the game until the hard timeout) and
+classifies the run `Crashed`. After the game exited on its own the check repeats for up to 2 s (not after an abort, a
+hard timeout or a supervision error); a crash found only then still counts as `Crashed`. After every launched run
+(whatever its outcome) the agent stops every process with the name of `gameExecutable` (without `.exe`) that started at
+or after the launch, except the launched process; processes with other names are never touched. A process whose start
+time cannot be read (e.g. an elevated game) is not stopped but makes the run `CleanupFailed`, as does a process (or the
+launched process tree) that cannot be stopped, or a `run.cfg` that cannot be removed: the job is then `failed` and no
+further run starts. `watchdog_log_<pid>.txt` is copied to the run folder when it exists.
+
+## Baseline
+
+The agent keeps the game configuration of the test PC at a recorded baseline (`baselineRoot`, recorded once with
+`agent\Save-TestRigBaseline.ps1`, see `docs/SETUP-GAMESERVER.md`). The folder mirrors
+`<MyDocuments>\Mount and Blade II Bannerlord\`:
+
+- `Configs\BannerlordConfig.txt` (required)
+- `Configs\ModSettings\Global\<folder>\*` for the managed MCM folders `CoherentWarAI`, `AutoTraderSpeed`,
+  `SmithingSuite`, `CompanionManagementSuite` (`$script:BaselineMcmFolders` in `TestRigAgent.ps1`).
+
+Restore: delete the files in the managed folders that the baseline does not have (and empty folders the baseline lacks;
+empty folders the baseline has are kept), copy the baseline files, verify the SHA-256 of each copied file, verify that
+no extra file is left. Nothing else is touched (`engine_config.txt`, `LauncherData.xml`, `ModLogs`, other folders).
+Restore fails, before anything is deleted ("Nothing was changed"), when the game documents folder does not exist (it is
+never created) or when a reparse point (junction or symlink) is in the managed tree of the documents folder or of the
+baseline: `Configs`, `Configs\ModSettings`, `Configs\ModSettings\Global`, `BannerlordConfig.txt`, the managed MCM
+folders and their contents. A restore that fails after it started changing the documents tree says "The managed
+configuration may be partly restored" instead. The marker file `Configs\.testrig-baseline` that
+`Save-TestRigBaseline.ps1` writes into the baseline is not a managed file: the restore neither needs nor copies it.
+
+Agent config: `workRoot`, `documentsRoot` (also its MyDocuments default) and `baselineRoot` (also its default) must be
+absolute (`X:\...` or `\\server\share\...`; relative, drive-relative `C:x`, rooted `\x` and the `\\?\` and `\\.\`
+device forms are rejected) and are normalized (no trailing backslash except at a drive root; 8.3 short names are
+expanded only when the whole path exists). `baselineRoot` must not be, contain or lie inside
+`<documentsRoot>\Mount and Blade II Bannerlord` (case-insensitive, whole path segments), and neither `baselineRoot` nor
+any existing folder above it may be a junction or symbolic link (through one it could be the documents folder under
+another name). A violation makes the agent exit with 1 and `Save-TestRigBaseline.ps1` refuse.
+
+- Before each run: restore, then the per-run patch (section "`run.cfg`" and `docs/SETUP-GAMESERVER.md` section d). A
+  failed restore -> the run is `SetupError` with message `Baseline restore failed: ...`; the game is not started.
+- Before the first patch of a job the agent writes `<workRoot>\restore-pending`. After the job (also after skipped,
+  aborted or rejected jobs): restore again, best effort, if a run reached the restore or the marker exists, and not
+  while any Bannerlord process runs (`baselineRestored: false`, `baselineError: "Bannerlord still running"`). The
+  outcome goes into `done.json` (`baselineRestored`, `baselineError`). The marker is deleted only after a successful
+  restore; if it is still there at agent start (agent died mid-job, or the restore was skipped or failed), the agent
+  restores at startup when no Bannerlord runs.
+- The agent holds the mutex `Global\BannerlordTestRigConfig` from claiming a job until the job is done.
+  `Save-TestRigBaseline.ps1` refuses while it is held, and the agent claims no job while the save holds it.
 
 ## Harness result: `run-result.json` / `result.txt`
 
@@ -182,10 +275,25 @@ Runner output: with `run-result.json` one console line per scenario (scenario `i
 `status` in the status column; a result without scenarios prints one line with `soak` and the run status). With
 `result.txt` one line per run (`soak`, status from the file), unchanged.
 
+### Version warnings (runner)
+
+After fetching, the runner compares the game version and the versions of modules with source `game` or `workshop`
+(from `agent-run.json`) with the tower: game version from `<towerGamePath>\bin\Win64_Shipping_Client\Version.xml`,
+module version from the place matching the source `.20` reported: for `workshop` the tower workshop folder (matched by
+`<Id value>`) first, else `Modules\<id>\SubModule.xml`; for `game` the tower `Modules\<id>\SubModule.xml` first, else
+the workshop folder. The tower workshop folder is indexed once per job; for a workshop id found in several folders the
+newest copy wins (`SubModule.xml` `LastWriteTime`, then folder name), and if the copies carry different versions the
+runner prints `WARN duplicate workshop id <id> on tower`. Each distinct value (game) or (id, version) is compared once per job. A difference prints, after the table:
+`WARN version differs: <id> tower <v|missing|unknown>, .20 <v>` (`game` instead of `<id>` for the game version). The
+exit code does not change. Old agents without the fields produce no warning. If the tower `Version.xml` cannot be read
+at that time: `WARN version check skipped: <reason>`. Without `towerGamePath` no comparison runs.
+
 `job-result.json` (written by the runner) holds one `result` per run, in one of two shapes: from `run-result.json`, the
 parsed object as written by the harness (nested, typed values as above); from legacy `result.txt`, a flat map of the
 `key=value` lines (all values strings, e.g. `{ "status": "Completed", "daysReached": "3" }`); `{}` when there is no result
-(missing file, or invalid `run-result.json`).
+(missing file, or invalid `run-result.json`). Per run it also holds `gameVersion` and `moduleVersions`, copied from
+`agent-run.json` (`moduleVersions` is always a JSON array when present, also with 0 or 1 entry; `null` only for an old
+agent); on job level `versionWarnings` is an array of the warning lines above.
 
 ### `run.cfg`
 
@@ -200,8 +308,13 @@ installed `SubModule.xml`, in order, de-duplicated case-insensitively. A module 
 
 ```json
 { "schema": 1, "jobId": "...", "status": "completed", "finishedUtc": "...",
-  "runs": [ { "runId": "r1", "exitClass": "Completed" } ], "message": null }
+  "runs": [ { "runId": "r1", "exitClass": "Completed" } ], "message": null,
+  "baselineRestored": true, "baselineError": null }
 ```
+
+`baselineRestored` (bool|null) and `baselineError` (string|null): result of the restore after the job; both `null` when
+no run reached the restore (e.g. `rejected`, `blocked`, or an orphaned `done.json` written for a job without run after
+an agent restart).
 
 `status`: `completed` (all runs executed, whatever their result) | `aborted` (an `abort` was
 seen; `runs` lists only the executed runs) | `blocked` (preflight failed, e.g. Bannerlord.exe

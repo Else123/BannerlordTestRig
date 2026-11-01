@@ -1,16 +1,30 @@
 # Pester 3.4 tests for agent\TestRigAgent.ps1 (slice S1).
 # Run:  powershell -NoProfile -Command "Invoke-Pester <repo>\tests\agent"
-# The end-to-end tests start powershell.exe with fixtures\fake-game.ps1 as the "game".
+# The end-to-end tests start a renamed copy of powershell.exe with fixtures\fake-game.ps1 as the "game".
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $agentScript = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'agent\TestRigAgent.ps1'
 $fakeGame = Join-Path $here 'fixtures\fake-game.ps1'
 $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+# The agent stops every process named like gameExecutable that started after a launch. Under its own name the fake game
+# (and every process it starts as a stray or child) is the only such process: the developer's shells and tool hooks,
+# all named powershell, are never touched. The copy is cached and refreshed when powershell.exe changes.
+$fakeGameName = 'TestRigFakeGame'
+$fakeGameExe = Join-Path $env:TEMP "BannerlordTestRig\$fakeGameName.exe"
+$fakeGameSource = Get-Item -LiteralPath $powershellExe
+$fakeGameCopy = Get-Item -LiteralPath $fakeGameExe -ErrorAction SilentlyContinue
+if ($null -eq $fakeGameCopy -or $fakeGameCopy.Length -ne $fakeGameSource.Length -or
+        $fakeGameCopy.VersionInfo.FileVersion -ne $fakeGameSource.VersionInfo.FileVersion) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $fakeGameExe) -Force | Out-Null
+    Copy-Item -LiteralPath $powershellExe -Destination $fakeGameExe -Force
+}
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 . $agentScript
+# Save-TestRigBaseline.ps1 dot-sources the agent again and adds its own functions (no exit when dot-sourced).
+. (Join-Path (Split-Path -Parent $agentScript) 'Save-TestRigBaseline.ps1')
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
@@ -23,22 +37,56 @@ function New-Rig {
         Game       = Join-Path $root 'game'
         Docs       = Join-Path $root 'docs'
         ConfigPath = Join-Path $root 'agent.config.json'
+        Baseline   = Join-Path $root 'baseline'   # the default baselineRoot: <parent of workRoot>\baseline
+        Workshop   = Join-Path $root 'workshop'
+        EngineLogs = Join-Path $root 'enginelogs'
     }
-    foreach ($d in @((Join-Path $rig.Queue 'jobs'), (Join-Path $rig.Queue 'results'), $rig.Work, (Join-Path $rig.Game 'Modules'), $rig.Docs)) {
+    # The game's documents folder exists on a real rig (the agent refuses to create it).
+    foreach ($d in @((Join-Path $rig.Queue 'jobs'), (Join-Path $rig.Queue 'results'), $rig.Work, (Join-Path $rig.Game 'Modules'),
+            (Join-Path $rig.Docs 'Mount and Blade II Bannerlord'), $rig.Workshop, $rig.EngineLogs)) {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
     }
     $cfg = [ordered]@{
         queueRoot           = $rig.Queue
         workRoot            = $rig.Work
         gamePath            = $rig.Game
-        gameExecutable      = $powershellExe
+        gameExecutable      = $fakeGameExe
         gameArgumentsPrefix = ('-NoProfile -File "{0}" /singleplayer' -f $fakeGame)
         documentsRoot       = $rig.Docs
         pollSeconds         = 1
+        workshopRoot        = $rig.Workshop
+        engineLogDir        = $rig.EngineLogs
     }
     [System.IO.File]::WriteAllText($rig.ConfigPath, ($cfg | ConvertTo-Json -Depth 10), $utf8NoBom)
+    # Baseline: BannerlordConfig.txt and the CoherentWarAI MCM json (feature flags off, so the per-run patch is visible).
+    Write-RigFile (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') "Keep=1`r`nAutoSaveInterval=5`r`n"
+    Write-RigFile (Join-Path $rig.Baseline 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json') '{ "EnableChainOfCommand": false, "EnableNavalOrders": false, "EnableLogging": false, "Other": 3 }'
+    # The modules every test job needs besides its package: Native and NavalDLC in the game, Harmony in the workshop.
+    New-SubModuleXml (Join-Path $rig.Game 'Modules\Native') 'Native' 'v1.4.8'
+    New-SubModuleXml (Join-Path $rig.Game 'Modules\NavalDLC') 'NavalDLC' 'v1.4.8'
+    New-SubModuleXml (Join-Path $rig.Workshop '2859188632') 'Bannerlord.Harmony' 'v2.4.2.248'
     return $rig
 }
+
+function Write-RigFile {
+    param([string]$Path, [string]$Text)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    [System.IO.File]::WriteAllText($Path, $Text, $utf8NoBom)
+}
+
+function New-SubModuleXml {
+    # <Dir>\SubModule.xml with <Id value> and, unless $Version is empty, <Version value>.
+    param([string]$Dir, [string]$Id, [string]$Version = '')
+    $versionXml = if ($Version) { '<Version value="' + $Version + '"/>' } else { '' }
+    Write-RigFile (Join-Path $Dir 'SubModule.xml') ('<?xml version="1.0" encoding="utf-8"?><Module><Name value="' + $Id + '"/><Id value="' + $Id + '"/>' + $versionXml + '</Module>')
+}
+
+function Set-RigGameVersion {
+    param([hashtable]$Rig, [string]$Version)
+    Write-RigFile (Join-Path $Rig.Game 'bin\Win64_Shipping_Client\Version.xml') ('<?xml version="1.0" encoding="utf-8"?><Version><Singleplayer Value="' + $Version + '"/></Version>')
+}
+
+function Get-Sha256 { param([string]$Path) return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 
 function New-ZipFile {
     param([string]$Path, [string[]]$Entries)
@@ -160,18 +208,20 @@ function Start-AbortWatcher {
 
 function Stop-FakeGameLeftovers {
     # Best effort: no stray fake game (or its child) may outlive a test. Reads the PIDs the
-    # agent and the fake game recorded under FAKEGAME_DOCS' parent. Only powershell processes are touched.
+    # agent and the fake game recorded under FAKEGAME_DOCS' parent. Only fake game processes are touched.
     if ([string]::IsNullOrEmpty($env:FAKEGAME_DOCS)) { return }
     $root = Split-Path -Parent $env:FAKEGAME_DOCS
     $pids = @()
-    $childFile = Join-Path $env:FAKEGAME_DOCS 'child-pid.txt'
-    if (Test-Path -LiteralPath $childFile) { $pids += [int](Get-Content -Raw -LiteralPath $childFile) }
+    foreach ($name in @('child-pid.txt', 'stray-pid.txt')) {
+        $pidFile = Join-Path $env:FAKEGAME_DOCS $name
+        if (Test-Path -LiteralPath $pidFile) { $pids += [int](Get-Content -Raw -LiteralPath $pidFile) }
+    }
     foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -Filter 'agent-run.json' -ErrorAction SilentlyContinue)) {
         $pids += [int]((Get-Content -Raw -LiteralPath $f.FullName | ConvertFrom-Json).pid)
     }
     foreach ($p in ($pids | Where-Object { $_ -gt 0 })) {
         $proc = Get-Process -Id $p -ErrorAction SilentlyContinue
-        if ($proc -and $proc.ProcessName -eq 'powershell') { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+        if ($proc -and $proc.ProcessName -eq $fakeGameName) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -321,6 +371,7 @@ Describe 'Config patching' {
 
 Describe 'Invoke-Job: rejection and preflight' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     It 'rejects an invalid job.json' {
         $rig = New-Rig
@@ -386,6 +437,7 @@ Describe 'Invoke-Job: rejection and preflight' {
 
 Describe 'Invoke-Job: end-to-end with a fake game' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
     AfterEach {
@@ -432,11 +484,21 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
             Should Be '/singleplayer _MODULES_*Bannerlord.Harmony*Native*NavalDLC*CoherentWarAI*CoherentWarAI.TestHarness*_MODULES_'
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) | Should Match 'seed=7'
 
-        # run.cfg removed after the run, configs patched
+        # run.cfg removed after the run; the game saw the baseline with the per-run patch on top
         Test-Path (Join-Path $harnessDir 'run.cfg') | Should Be $false
+        $seenConfig = Read-Utf8Text (Join-Path $rig.Docs 'fake-bannerlordconfig.txt')
+        $seenConfig | Should Match 'Keep=1'
+        $seenConfig | Should Match 'AutoSaveInterval=-1'
+        $seenMcm = Read-Utf8Text (Join-Path $rig.Docs 'fake-mcm.json') | ConvertFrom-Json
+        $seenMcm.EnableChainOfCommand | Should Be $true
+        $seenMcm.Other | Should Be 3
+        # after the job the configs equal the baseline again
         $docs = Join-Path $rig.Docs 'Mount and Blade II Bannerlord'
-        Read-Utf8Text (Join-Path $docs 'Configs\BannerlordConfig.txt') | Should Match 'AutoSaveInterval=-1'
-        (Read-Utf8Text (Join-Path $docs 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json') | ConvertFrom-Json).EnableChainOfCommand | Should Be $true
+        Get-Sha256 (Join-Path $docs 'Configs\BannerlordConfig.txt') | Should Be (Get-Sha256 (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt'))
+        Get-Sha256 (Join-Path $docs 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json') |
+            Should Be (Get-Sha256 (Join-Path $rig.Baseline 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json'))
+        $done.baselineRestored | Should Be $true
+        $done.baselineError | Should Be $null
 
         # done.json is the last thing written and no temp files remain
         $doneItem = Get-Item (Join-Path $rig.Queue 'results\20261031-120000-aaaa\done.json')
@@ -495,6 +557,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $done.status | Should Be 'aborted'
         @($done.runs).Count | Should Be 1
         $done.runs[0].exitClass | Should Be 'Aborted'
+        $done.baselineRestored | Should Be $true   # restored after the job although a run was skipped
         $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
         @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
     }
@@ -561,6 +624,8 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
         $env:FAKEGAME_HARNESS = 'TestRig'
+        # A stale copy from an earlier job passes the job-level module check; the run must still refuse it.
+        New-SubModuleXml (Join-Path $rig.Game 'Modules\TestRig.Harness') 'TestRig.Harness' 'v0.0.1'
         $null = New-TestRigHarnessJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml')
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'SetupError'
@@ -734,6 +799,7 @@ Describe 'ownAssemblies for run.cfg' {
 
 Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
     BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
     AfterEach {
         Stop-FakeGameLeftovers
@@ -814,6 +880,7 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
 
 Describe 'Invoke-Job: unexpected errors' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     It 'reports failed with the message when an unexpected error occurs' {
         $rig = New-Rig
@@ -1043,6 +1110,7 @@ Describe 'Resolve-OrphanedJobs at startup (W3)' {
 
 Describe 'Invoke-Job: hardening end-to-end' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
     AfterEach {
@@ -1153,7 +1221,8 @@ Describe 'Invoke-Job: hardening end-to-end' {
         $done = Read-Done $rig
         $done.status | Should Be 'rejected'
         $done.message | Should Match 'Native'
-        Test-Path (Join-Path $rig.Game 'Modules\Native') | Should Be $false
+        # the game's own Native (created by New-Rig) is untouched
+        Read-Utf8Text (Join-Path $rig.Game 'Modules\Native\SubModule.xml') | Should Match '<Id value="Native"/>'
         Test-Path (Join-Path $rig.Game 'Modules\CoherentWarAI') | Should Be $false
     }
 
@@ -1161,6 +1230,7 @@ Describe 'Invoke-Job: hardening end-to-end' {
 
 Describe 'Invoke-Run: supervision failure after launch (C1)' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
     AfterEach {
@@ -1184,6 +1254,7 @@ Describe 'Invoke-Run: supervision failure after launch (C1)' {
 
 Describe 'Invoke-Job: failed kill stops the job (C2)' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
     AfterEach {
@@ -1221,6 +1292,7 @@ Describe 'Invoke-Job: failed kill stops the job (C2)' {
 
 Describe 'Invoke-Job: state names (S7)' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
     AfterEach {
@@ -1255,6 +1327,7 @@ Describe 'TestRigAgent.ps1 run via powershell -File without -ConfigPath (PS 5.1)
 
 Describe 'Invoke-Run: game dialogs during supervision' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
     AfterEach {
@@ -1386,6 +1459,7 @@ Describe 'Invoke-Run: game dialogs during supervision' {
 
 Describe 'Initialize-GameWindows: failed compile is cached (W3)' {
     Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
 
     # Own Context: the Add-Type mock would otherwise stay active for the next It (Pester 3.4) and break the package check.
     Context 'with a failing Add-Type' {
@@ -1414,6 +1488,1222 @@ Describe 'Initialize-GameWindows: failed compile is cached (W3)' {
         finally {
             Stop-FakeGameLeftovers
             Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Slice S7: baseline, preflight, versions, watchdog crash detection
+# ---------------------------------------------------------------------------
+
+function Get-RigDocsPath { param([hashtable]$Rig, [string]$Relative) return (Join-Path (Join-Path $Rig.Docs 'Mount and Blade II Bannerlord') $Relative) }
+
+function Read-RunRecord {
+    param([hashtable]$Rig, [string]$RunId = 'r1')
+    return (Get-Content -Raw (Join-Path $Rig.Queue "results\20261031-120000-aaaa\$RunId\agent-run.json") | ConvertFrom-Json)
+}
+
+Describe 'Get-AgentConfig: baselineRoot, engineLogDir, workshopRoot' {
+    It 'defaults baselineRoot to <parent of workRoot>\baseline, engineLogDir to ProgramData and workshopRoot to the steamapps workshop' {
+        $rig = New-Rig
+        $raw = [System.IO.File]::ReadAllText($rig.ConfigPath) | ConvertFrom-Json
+        $raw.PSObject.Properties.Remove('engineLogDir')
+        $raw.PSObject.Properties.Remove('workshopRoot')
+        $raw.gamePath = 'C:\SteamX\steamapps\common\Mount & Blade II Bannerlord'
+        [System.IO.File]::WriteAllText($rig.ConfigPath, ($raw | ConvertTo-Json), $utf8NoBom)
+        $cfg = Get-ConfigFor $rig
+        $cfg.baselineRoot | Should Be $rig.Baseline
+        $cfg.engineLogDir | Should Be (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Mount and Blade II Bannerlord\logs')
+        $cfg.workshopRoot | Should Be 'C:\SteamX\steamapps\workshop\content\261550'
+    }
+    It 'takes baselineRoot, engineLogDir and workshopRoot from the config' {
+        $rig = New-Rig
+        Set-RigConfigValue $rig 'baselineRoot' 'C:\Elsewhere\base'
+        $cfg = Get-ConfigFor $rig
+        $cfg.baselineRoot | Should Be 'C:\Elsewhere\base'
+        $cfg.engineLogDir | Should Be $rig.EngineLogs
+        $cfg.workshopRoot | Should Be $rig.Workshop
+    }
+}
+
+Describe 'Restore-TestRigBaseline' {
+    It 'copies the baseline, deletes extra files in the managed MCM folders only and returns the SHA-256 per file' {
+        $rig = New-Rig
+        $smithing = 'Configs\ModSettings\Global\SmithingSuite\SmithingSuite_v1.json'
+        Write-RigFile (Join-Path $rig.Baseline $smithing) '{ "a": 1 }'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Changed=1'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json') '{ "EnableChainOfCommand": true }'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\old\stale.json') '{}'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\AutoTraderSpeed\AutoTraderSpeed_v3.json') '{}'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CompanionManagementSuite\CompanionManagementSuite_v1.json') '{}'
+        $untouched = @('Configs\ModSettings\Global\OtherMod\OtherMod.json', 'Configs\engine_config.txt', 'Configs\LauncherData.xml', 'ModLogs\x.log')
+        foreach ($rel in $untouched) { Write-RigFile (Get-RigDocsPath $rig $rel) "keep $rel" }
+
+        $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+
+        $r.Ok | Should Be $true
+        $r.Error | Should Be $null
+        $restored = @('Configs\BannerlordConfig.txt', 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json', $smithing)
+        foreach ($rel in $restored) {
+            $expected = Get-Sha256 (Join-Path $rig.Baseline $rel)
+            Get-Sha256 (Get-RigDocsPath $rig $rel) | Should Be $expected
+            $r.Sha256[$rel.Replace('\', '/')] | Should Be $expected
+        }
+        @($r.Sha256.Keys).Count | Should Be 3
+        Test-Path (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\old') | Should Be $false
+        Test-Path (Get-RigDocsPath $rig 'Configs\ModSettings\Global\AutoTraderSpeed\AutoTraderSpeed_v3.json') | Should Be $false
+        Test-Path (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CompanionManagementSuite\CompanionManagementSuite_v1.json') | Should Be $false
+        foreach ($rel in $untouched) { Read-Utf8Text (Get-RigDocsPath $rig $rel) | Should Be "keep $rel" }
+    }
+    It 'fails without touching anything when the baseline has no BannerlordConfig.txt' {
+        $rig = New-Rig
+        Remove-Item -LiteralPath (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt')
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Changed=1'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\AutoTraderSpeed\AutoTraderSpeed_v3.json') '{}'
+        $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+        $r.Ok | Should Be $false
+        $r.Error | Should Match 'BannerlordConfig\.txt'
+        Read-Utf8Text (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') | Should Be 'Changed=1'
+        Test-Path (Get-RigDocsPath $rig 'Configs\ModSettings\Global\AutoTraderSpeed\AutoTraderSpeed_v3.json') | Should Be $true
+    }
+    Context 'with a copy that does not arrive' {
+        It 'fails when a restored file does not match the baseline SHA-256' {
+            Mock Copy-BaselineFile { }   # nothing is copied: the old content stays
+            $rig = New-Rig
+            Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Changed=1'
+            $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+            $r.Ok | Should Be $false
+            $r.Error | Should Match 'SHA-256'
+        }
+    }
+    Context 'with a failing copy' {
+        It 'never throws and reports the error' {
+            Mock Copy-BaselineFile { throw 'disk full' }
+            $rig = New-Rig
+            $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+            $r.Ok | Should Be $false
+            $r.Error | Should Match 'disk full'
+        }
+    }
+}
+
+Describe 'Get-JobPreflight: game version, steam, required modules, versions' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+
+    function New-PreflightJob {
+        param([string[]]$Modules = @('Bannerlord.Harmony', 'Native', 'NavalDLC', 'CoherentWarAI'), $Expected = $null)
+        return [pscustomobject]@{ modules = $Modules; expectedGameVersion = $Expected }
+    }
+    function Invoke-TestPreflight {
+        param([hashtable]$Rig, $Job)
+        $packageRoot = Join-Path $Rig.Root 'pkg'
+        New-SubModuleXml (Join-Path $packageRoot 'Modules\CoherentWarAI') 'CoherentWarAI' 'v0.3.0'
+        return Get-JobPreflight -Config (Get-ConfigFor $Rig) -Job $Job -PackageRoot $packageRoot -PackageModuleIds @('CoherentWarAI')
+    }
+    function Format-ModuleVersions { param($List) return ((@($List) | ForEach-Object { '{0}={1}@{2}' -f $_.id, $_.version, $_.source }) -join ';') }
+
+    It 'passes and collects the versions in job.modules order with their source' {
+        $rig = New-Rig; Set-RigGameVersion $rig 'v1.4.8'
+        $r = Invoke-TestPreflight $rig (New-PreflightJob -Expected 'v1.4.8')
+        $r.Error | Should Be $null
+        $r.GameVersion | Should Be 'v1.4.8'
+        Format-ModuleVersions $r.ModuleVersions |
+            Should Be 'Bannerlord.Harmony=v2.4.2.248@workshop;Native=v1.4.8@game;NavalDLC=v1.4.8@game;CoherentWarAI=v0.3.0@package'
+    }
+    It 'reports a null version for a SubModule.xml without <Version>' {
+        $rig = New-Rig
+        New-SubModuleXml (Join-Path $rig.Game 'Modules\SandBox') 'SandBox'
+        $r = Invoke-TestPreflight $rig (New-PreflightJob -Modules @('SandBox', 'CoherentWarAI'))
+        $r.Error | Should Be $null
+        $first = @($r.ModuleVersions)[0]
+        $first.id | Should Be 'SandBox'
+        $first.source | Should Be 'game'
+        $first.version | Should Be $null
+    }
+    It 'blocks on a game version mismatch and names both versions' {
+        $rig = New-Rig; Set-RigGameVersion $rig 'v1.4.8'
+        $r = Invoke-TestPreflight $rig (New-PreflightJob -Expected 'v1.4.9')
+        $r.Error | Should Match 'v1\.4\.9'
+        $r.Error | Should Match 'v1\.4\.8'
+    }
+    It 'blocks when expectedGameVersion is set and Version.xml is missing' {
+        $rig = New-Rig
+        $r = Invoke-TestPreflight $rig (New-PreflightJob -Expected 'v1.4.8')
+        $r.Error | Should Match 'Version\.xml'
+    }
+    It 'blocks when expectedGameVersion is set and Version.xml is unreadable' {
+        $rig = New-Rig
+        Write-RigFile (Join-Path $rig.Game 'bin\Win64_Shipping_Client\Version.xml') '<Version><Singleplayer'
+        $r = Invoke-TestPreflight $rig (New-PreflightJob -Expected 'v1.4.8')
+        $r.Error | Should Match 'Version\.xml'
+    }
+    It 'does not check the game version when expectedGameVersion is null and logs one line' {
+        Mock Write-AgentLog { }
+        $rig = New-Rig
+        $r = Invoke-TestPreflight $rig (New-PreflightJob -Expected $null)
+        $r.Error | Should Be $null
+        $r.GameVersion | Should Be $null
+        Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -match 'expectedGameVersion' }
+    }
+    It 'blocks when required modules are in neither the game nor the workshop and lists every missing id' {
+        $rig = New-Rig
+        $r = Invoke-TestPreflight $rig (New-PreflightJob -Modules @('Native', 'Foo.Missing', 'CoherentWarAI', 'Bar.Missing'))
+        $r.Error | Should Match 'Foo\.Missing'
+        $r.Error | Should Match 'Bar\.Missing'
+        $r.Error | Should Not Match 'Native'
+    }
+    It 'finds a workshop module by its <Id value>, not by the folder name' {
+        $rig = New-Rig
+        New-SubModuleXml (Join-Path $rig.Workshop '2859232415') 'Bannerlord.UIExtenderEx' 'v3.0.3'
+        New-SubModuleXml (Join-Path $rig.Workshop 'Bannerlord.ButterLib') 'Something.Else' 'v1'
+        $ok = Invoke-TestPreflight $rig (New-PreflightJob -Modules @('Bannerlord.UIExtenderEx', 'CoherentWarAI'))
+        $ok.Error | Should Be $null
+        Format-ModuleVersions $ok.ModuleVersions | Should Be 'Bannerlord.UIExtenderEx=v3.0.3@workshop;CoherentWarAI=v0.3.0@package'
+        $missing = Invoke-TestPreflight $rig (New-PreflightJob -Modules @('Bannerlord.ButterLib', 'CoherentWarAI'))
+        $missing.Error | Should Match 'Bannerlord\.ButterLib'
+    }
+    Context 'without Steam' {
+        Mock Get-SteamProcess { return $null }
+        It 'blocks when no steam process runs' {
+            $rig = New-Rig
+            $r = Invoke-TestPreflight $rig (New-PreflightJob)
+            $r.Error | Should Match 'steam'
+        }
+    }
+}
+
+Describe 'Invoke-Job: preflight and versions end-to-end' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
+    AfterEach {
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+    }
+
+    It 'writes gameVersion and moduleVersions into agent-run.json' {
+        $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+        Set-RigGameVersion $rig 'v1.4.8'
+        $null = New-TestJob $rig -Mutate { param($j) $j['expectedGameVersion'] = 'v1.4.8' }
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $run = Read-RunRecord $rig
+        $run.gameVersion | Should Be 'v1.4.8'
+        (@($run.moduleVersions) | ForEach-Object { '{0}@{1}' -f $_.id, $_.source }) -join ';' |
+            Should Be 'Bannerlord.Harmony@workshop;Native@game;NavalDLC@game;CoherentWarAI@package;CoherentWarAI.TestHarness@package'
+        @($run.moduleVersions)[0].version | Should Be 'v2.4.2.248'
+    }
+    It 'blocks a version mismatch before installing anything and does not touch the configs' {
+        $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+        Set-RigGameVersion $rig 'v1.4.8'
+        $null = New-TestJob $rig -Mutate { param($j) $j['expectedGameVersion'] = 'v1.5.0' }
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $done = Read-Done $rig
+        $done.status | Should Be 'blocked'
+        $done.message | Should Match 'v1\.5\.0'
+        $done.baselineRestored | Should Be $null
+        $done.baselineError | Should Be $null
+        Test-Path (Join-Path $rig.Game 'Modules\CoherentWarAI') | Should Be $false
+        Test-Path (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') | Should Be $false
+    }
+    It 'blocks a job whose module is missing in the game and the workshop' {
+        $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+        Remove-Item -LiteralPath (Join-Path $rig.Workshop '2859188632') -Recurse -Force
+        $null = New-TestJob $rig
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $done = Read-Done $rig
+        $done.status | Should Be 'blocked'
+        $done.message | Should Match 'Bannerlord\.Harmony'
+    }
+}
+
+Describe 'Invoke-Job: baseline end-to-end' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    BeforeEach { $env:FAKEGAME_BEHAVIOR = 'complete' }
+    AfterEach {
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+    }
+
+    It 'restores the baseline before each run and records baselineRestored and baselineSha256' {
+        $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\AutoTraderSpeed\stale.json') '{}'
+        $null = New-TestJob $rig -Mutate { param($j) Add-SecondRun $j }
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $done = Read-Done $rig
+        @($done.runs | ForEach-Object { $_.exitClass }) -join ',' | Should Be 'Completed,Completed'
+        # what the game of the last run saw: only the baseline MCM file, patched
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-mcm-files.txt')).Trim() | Should Be 'CoherentWarAI\CoherentWarAI_v1.json'
+        foreach ($runId in @('r1', 'r2')) {
+            $run = Read-RunRecord $rig $runId
+            $run.baselineRestored | Should Be $true
+            $run.baselineSha256.'Configs/BannerlordConfig.txt' | Should Be (Get-Sha256 (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt'))
+            $run.baselineSha256.'Configs/ModSettings/Global/CoherentWarAI/CoherentWarAI_v1.json' |
+                Should Be (Get-Sha256 (Join-Path $rig.Baseline 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json'))
+        }
+        $done.baselineRestored | Should Be $true
+        Test-Path (Get-RigDocsPath $rig 'Configs\ModSettings\Global\AutoTraderSpeed\stale.json') | Should Be $false
+    }
+    It 'ends the run SetupError without launching when the baseline is missing, and reports the failed after-job restore' {
+        $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+        Remove-Item -LiteralPath $rig.Baseline -Recurse -Force
+        $null = New-TestJob $rig
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $done = Read-Done $rig
+        $done.status | Should Be 'completed'
+        $done.runs[0].exitClass | Should Be 'SetupError'
+        $done.baselineRestored | Should Be $false
+        $done.baselineError | Should Match 'BannerlordConfig\.txt'
+        $run = Read-RunRecord $rig
+        $run.baselineRestored | Should Be $false
+        $run.baselineSha256 | Should Be $null
+        $run.message | Should Match 'aseline'
+        Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
+        Test-Path (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') | Should Be $false
+    }
+}
+
+Describe 'Find-CrashedWatchdogLog' {
+    BeforeEach {
+        $script:logs = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:logs -Force | Out-Null
+    }
+    function Write-Watchdog([int]$ProcessId, [string]$Text) { Write-RigFile (Join-Path $script:logs "watchdog_log_$ProcessId.txt") $Text }
+    function Add-Watchdog([int]$ProcessId, [string]$Text) { [System.IO.File]::AppendAllText((Join-Path $script:logs "watchdog_log_$ProcessId.txt"), $Text, $utf8NoBom) }
+
+    It 'finds the log of the launched pid' {
+        Write-Watchdog 100 "start`r`nCrash occurred`r`n"
+        (Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot @{}).Name | Should Be 'watchdog_log_100.txt'
+    }
+    It 'returns null when no log says "Crash occurred"' {
+        Write-Watchdog 100 "start`r`nall fine`r`n"
+        Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot @{} | Should Be $null
+    }
+    It 'falls back to another watchdog log that is new since the launch' {
+        Write-Watchdog 200 'Crash occurred'
+        (Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot @{}).Name | Should Be 'watchdog_log_200.txt'
+    }
+    It 'ignores a crash log of another pid that existed at the launch' {
+        Write-Watchdog 200 'Crash occurred'
+        $snapshot = Get-WatchdogLogSnapshot -LogsDir $script:logs
+        Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot $snapshot | Should Be $null
+    }
+    It 'ignores an old crash log that only gets a line without a crash appended after the launch (W3)' {
+        Write-Watchdog 200 "Crash occurred`r`n"
+        $snapshot = Get-WatchdogLogSnapshot -LogsDir $script:logs
+        Add-Watchdog 200 "watchdog still running`r`n"
+        Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot $snapshot | Should Be $null
+    }
+    It 'finds "Crash occurred" appended after the launch to a log that existed then (W3)' {
+        Write-Watchdog 100 "watchdog started`r`n"
+        $snapshot = Get-WatchdogLogSnapshot -LogsDir $script:logs
+        Add-Watchdog 100 "Crash occurred`r`n"
+        (Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot $snapshot).Name | Should Be 'watchdog_log_100.txt'
+    }
+    It 'reads a log that became shorter than at the launch as a new one (replaced) (W3)' {
+        Write-Watchdog 100 ("old content`r`n" * 20)
+        $snapshot = Get-WatchdogLogSnapshot -LogsDir $script:logs
+        Write-Watchdog 100 "Crash occurred`r`n"
+        (Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot $snapshot).Name | Should Be 'watchdog_log_100.txt'
+    }
+    It 'sees text appended to a log held open for writing, whose listed length is stale (V1)' {
+        Write-Watchdog 100 "watchdog started`r`n"
+        $snapshot = Get-WatchdogLogSnapshot -LogsDir $script:logs
+        $fs = New-Object System.IO.FileStream((Join-Path $script:logs 'watchdog_log_100.txt'), 'Append', 'Write', 'ReadWrite')
+        try {
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes("Crash occurred`r`n")
+            $fs.Write($bytes, 0, $bytes.Length); $fs.Flush()
+            (Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot $snapshot).Name | Should Be 'watchdog_log_100.txt'
+        }
+        finally { $fs.Dispose() }
+    }
+    It 'reads a log the watchdog still holds open for writing' {
+        $path = Join-Path $script:logs 'watchdog_log_100.txt'
+        $fs = New-Object System.IO.FileStream($path, 'Create', 'Write', 'ReadWrite')
+        try {
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes("Crash occurred`r`n")
+            $fs.Write($bytes, 0, $bytes.Length); $fs.Flush()
+            (Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot @{}).Name | Should Be 'watchdog_log_100.txt'
+        }
+        finally { $fs.Dispose() }
+    }
+    It 'returns null for a missing folder' {
+        Find-CrashedWatchdogLog -LogsDir (Join-Path $script:logs 'nope') -ProcessId 100 -Snapshot @{} | Should Be $null
+    }
+}
+
+Describe 'Invoke-Run: watchdog crash detection end-to-end' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach {
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_ENGINELOGS -ErrorAction SilentlyContinue
+    }
+    function Start-CrashRig([string]$Behavior) {
+        $env:FAKEGAME_BEHAVIOR = $Behavior
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_ENGINELOGS = $rig.EngineLogs
+        $null = New-TestJob $rig   # hardTimeoutMinutes = 1
+        return $rig
+    }
+
+    It 'detects "Crash occurred" while the game hangs, kills it at once and classifies Crashed' {
+        $rig = Start-CrashRig 'crash'
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $watch.Elapsed.TotalSeconds | Should BeLessThan 30
+        $done = Read-Done $rig
+        $done.status | Should Be 'completed'
+        $done.runs[0].exitClass | Should Be 'Crashed'
+        $run = Read-RunRecord $rig
+        $run.message | Should Match 'Crash occurred'
+        @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
+        $name = "watchdog_log_$($run.pid).txt"
+        $run.artifacts -contains $name | Should Be $true
+        (Get-Content -Raw (Join-Path $rig.Queue "results\20261031-120000-aaaa\r1\$name")) | Should Match 'Crash occurred'
+    }
+    It 'classifies Crashed by the final check when the game exits right after the crash' {
+        $rig = Start-CrashRig 'crashexit'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        $run = Read-RunRecord $rig
+        $run.artifacts -contains "watchdog_log_$($run.pid).txt" | Should Be $true
+    }
+    It 'copies the watchdog log of a run without a crash and keeps Completed' {
+        $rig = Start-CrashRig 'complete'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $run = Read-RunRecord $rig
+        $run.artifacts -contains "watchdog_log_$($run.pid).txt" | Should Be $true
+    }
+}
+
+Describe 'Save-TestRigBaseline.ps1' {
+    $saveScript = Join-Path (Split-Path -Parent $agentScript) 'Save-TestRigBaseline.ps1'
+    function Invoke-Save {
+        param([hashtable]$Rig, [switch]$Force)
+        $argList = @('-NoProfile', '-File', $saveScript, '-ConfigPath', $Rig.ConfigPath)
+        if ($Force) { $argList += '-Force' }
+        $out = (& $powershellExe @argList 2>&1 | Out-String)
+        return @{ Code = $LASTEXITCODE; Out = $out }
+    }
+    function New-SaveRig {
+        $rig = New-Rig
+        Remove-Item -LiteralPath $rig.Baseline -Recurse -Force
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') "Live=1`r`n"
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json') '{ "EnableLogging": true }'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CompanionManagementSuite\sub\x.json') '{}'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\ModSettings\Global\OtherMod\o.json') '{}'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\engine_config.txt') 'engine'
+        return $rig
+    }
+
+    It 'copies BannerlordConfig.txt and the managed MCM folders and prints each file with its SHA-256' {
+        $rig = New-SaveRig
+        $r = Invoke-Save $rig
+        $r.Code | Should Be 0
+        foreach ($rel in @('Configs\BannerlordConfig.txt', 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json',
+                'Configs\ModSettings\Global\CompanionManagementSuite\sub\x.json')) {
+            $hash = Get-Sha256 (Join-Path $rig.Baseline $rel)
+            $hash | Should Be (Get-Sha256 (Get-RigDocsPath $rig $rel))
+            $r.Out | Should Match ([regex]::Escape($rel.Replace('\', '/')) + '\s+' + $hash)
+        }
+        Test-Path (Join-Path $rig.Baseline 'Configs\ModSettings\Global\OtherMod') | Should Be $false
+        Test-Path (Join-Path $rig.Baseline 'Configs\engine_config.txt') | Should Be $false
+        # the agent accepts what the script saved
+        (Restore-TestRigBaseline -Config (Get-ConfigFor $rig)).Ok | Should Be $true
+    }
+    It 'refuses to overwrite an existing baseline without -Force' {
+        $rig = New-SaveRig
+        (Invoke-Save $rig).Code | Should Be 0
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Live=2'
+        $r = Invoke-Save $rig
+        $r.Code | Should Be 1
+        $r.Out | Should Match 'Force'
+        Read-Utf8Text (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be "Live=1`r`n"
+    }
+    It 'replaces the baseline with -Force: files gone from the documents tree are gone from the baseline' {
+        $rig = New-SaveRig
+        (Invoke-Save $rig).Code | Should Be 0
+        Remove-Item -LiteralPath (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CompanionManagementSuite') -Recurse -Force
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Live=2'
+        (Invoke-Save $rig -Force).Code | Should Be 0
+        Read-Utf8Text (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be 'Live=2'
+        Test-Path (Join-Path $rig.Baseline 'Configs\ModSettings\Global\CompanionManagementSuite') | Should Be $false
+    }
+    It 'fails when the documents tree has no BannerlordConfig.txt' {
+        $rig = New-SaveRig
+        Remove-Item -LiteralPath (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt')
+        $r = Invoke-Save $rig
+        $r.Code | Should Be 1
+        Test-Path (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be $false
+    }
+    It 'refuses a baselineRoot in the documents tree, even with -Force, and leaves the game configs alone (K1)' {
+        $rig = New-SaveRig
+        Set-RigConfigValue $rig 'baselineRoot' (Join-Path $rig.Docs 'Mount and Blade II Bannerlord')
+        $r = Invoke-Save $rig -Force
+        $r.Code | Should Be 1
+        $r.Out | Should Match 'baselineRoot'
+        Read-Utf8Text (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') | Should Be "Live=1`r`n"
+        Test-Path (Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json') | Should Be $true
+    }
+    It 'keeps the old baseline when -Force cannot complete the new one (K1)' {
+        $rig = New-SaveRig
+        (Invoke-Save $rig).Code | Should Be 0
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Live=2'
+        $locked = Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json'
+        $fs = [System.IO.File]::Open($locked, 'Open', 'ReadWrite', 'None')   # unreadable for the script
+        try { $r = Invoke-Save $rig -Force }
+        finally { $fs.Dispose() }
+        $r.Code | Should Be 1
+        Read-Utf8Text (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be "Live=1`r`n"
+        Test-Path (Join-Path $rig.Baseline 'Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json') | Should Be $true
+        Test-Path (Join-Path $rig.Baseline 'Configs.new') | Should Be $false
+    }
+    It 'refuses while Bannerlord is running (S8)' {
+        $rig = New-SaveRig
+        $exe = Join-Path $rig.Root 'Bannerlord.exe'   # any process named Bannerlord: a copy of ping that waits
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination $exe
+        $game = Start-Process -FilePath $exe -ArgumentList '-n', '60', '127.0.0.1' -PassThru -WindowStyle Hidden
+        try { $r = Invoke-Save $rig }
+        finally { if (-not $game.HasExited) { $game.Kill() }; $null = $game.WaitForExit(10000) }
+        $r.Code | Should Be 1
+        $r.Out | Should Match 'Bannerlord'
+        Test-Path (Join-Path $rig.Baseline 'Configs') | Should Be $false
+    }
+    It 'marks the saved baseline with .testrig-baseline, which a restore never copies into the game documents (W1)' {
+        $rig = New-SaveRig
+        (Invoke-Save $rig).Code | Should Be 0
+        Test-Path -LiteralPath (Join-Path $rig.Baseline 'Configs\.testrig-baseline') -PathType Leaf | Should Be $true
+        (Restore-TestRigBaseline -Config (Get-ConfigFor $rig)).Ok | Should Be $true
+        Test-Path -LiteralPath (Get-RigDocsPath $rig 'Configs\.testrig-baseline') | Should Be $false
+    }
+    It 'refuses -Force on an existing Configs without the .testrig-baseline marker and leaves it intact (W1)' {
+        $rig = New-SaveRig
+        Write-RigFile (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') 'Old=1'
+        Write-RigFile (Join-Path $rig.Baseline 'Configs\engine_config.txt') 'not a baseline file'
+        $r = Invoke-Save $rig -Force
+        $r.Code | Should Be 1
+        $r.Out | Should Match 'testrig-baseline'
+        Read-Utf8Text (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be 'Old=1'
+        Test-Path -LiteralPath (Join-Path $rig.Baseline 'Configs\engine_config.txt') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $rig.Baseline 'Configs.new') | Should Be $false
+    }
+    It 'refuses -Force through a baselineRoot junction to the game documents folder and leaves the game configs alone (W1)' {
+        $rig = New-SaveRig
+        $link = Join-Path $rig.Root 'baseline-link'
+        $null = cmd /c mklink /J "$link" "$(Join-Path $rig.Docs 'Mount and Blade II Bannerlord')"
+        try {
+            Set-RigConfigValue $rig 'baselineRoot' $link
+            $r = Invoke-Save $rig -Force
+            $r.Code | Should Be 1
+            $r.Out | Should Match 'baselineRoot'
+            Read-Utf8Text (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') | Should Be "Live=1`r`n"
+            Test-Path -LiteralPath (Get-RigDocsPath $rig 'Configs\engine_config.txt') | Should Be $true
+            Test-Path -LiteralPath (Get-RigDocsPath $rig 'Configs\ModSettings\Global\OtherMod\o.json') | Should Be $true
+        }
+        finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }   # the junction only, never its target
+    }
+    It 'puts back a Configs.old that an interrupted swap left without Configs' {
+        $rig = New-SaveRig
+        (Invoke-Save $rig).Code | Should Be 0
+        [System.IO.Directory]::Move((Join-Path $rig.Baseline 'Configs'), (Join-Path $rig.Baseline 'Configs.old'))
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Live=2'
+        $r = Invoke-Save $rig
+        $r.Code | Should Be 1
+        $r.Out | Should Match 'Force'
+        Read-Utf8Text (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be "Live=1`r`n"
+        Test-Path -LiteralPath (Join-Path $rig.Baseline 'Configs.old') | Should Be $false
+    }
+    It 'refuses while the agent holds the config lock, also with -Force (W4)' {
+        $rig = New-SaveRig
+        $mutex = New-Object System.Threading.Mutex($false, 'Global\BannerlordTestRigConfig')
+        $null = $mutex.WaitOne(0)
+        try { $r = Invoke-Save $rig -Force }
+        finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+        $r.Code | Should Be 1
+        $r.Out | Should Match 'job'
+        Test-Path (Join-Path $rig.Baseline 'Configs') | Should Be $false
+    }
+    It 'refuses while a restore is pending, also with -Force, and says how to clear it (W4)' {
+        $rig = New-SaveRig
+        (Invoke-Save $rig).Code | Should Be 0
+        Write-RigFile (Join-Path $rig.Work 'restore-pending') 'job'
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'AutoSaveInterval=-1'
+        $r = Invoke-Save $rig -Force
+        $r.Code | Should Be 1
+        $r.Out | Should Match 'restore-pending'
+        $r.Out | Should Match 'restart the agent'
+        Read-Utf8Text (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be "Live=1`r`n"
+    }
+}
+
+Describe 'Save-TestRigBaseline: swap rollback (in-process)' {
+    Mock Get-BannerlordProcess { return $null }
+    function New-SwapRig {
+        $rig = New-Rig
+        Remove-Item -LiteralPath $rig.Baseline -Recurse -Force
+        Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Live=1'
+        return $rig
+    }
+
+    Context 'when the second rename (Configs.new -> Configs) fails' {
+        Mock Move-BaselineFolder { throw 'simulated rename failure' } -ParameterFilter { $From -like '*\Configs.new' }
+        It 'puts the previous baseline back and removes the staging folder' {
+            $rig = New-SwapRig
+            # the previous baseline, as an earlier save left it
+            Write-RigFile (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') 'Live=1'
+            Write-RigFile (Join-Path $rig.Baseline 'Configs\.testrig-baseline') 'marker'
+            Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'Live=2'
+            Save-TestRigBaseline -Path $rig.ConfigPath -Overwrite $true | Should Be 1
+            Assert-MockCalled Move-BaselineFolder -Scope It -Exactly -Times 1 -ParameterFilter { $From -like '*\Configs.new' }
+            Read-Utf8Text (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt') | Should Be 'Live=1'
+            Test-Path -LiteralPath (Join-Path $rig.Baseline 'Configs\.testrig-baseline') | Should Be $true
+            Test-Path -LiteralPath (Join-Path $rig.Baseline 'Configs.old') | Should Be $false
+            Test-Path -LiteralPath (Join-Path $rig.Baseline 'Configs.new') | Should Be $false
+        }
+    }
+}
+
+# --- Review fixes ---------------------------------------------------------------
+
+Describe 'Get-AgentConfig: path rules for workRoot, documentsRoot and baselineRoot (K1)' {
+    function Get-DocsDir { param([hashtable]$Rig) return (Join-Path $Rig.Docs 'Mount and Blade II Bannerlord') }
+
+    It 'rejects a baselineRoot equal to the game documents folder' {
+        $rig = New-Rig; Set-RigConfigValue $rig 'baselineRoot' (Get-DocsDir $rig)
+        { Get-ConfigFor $rig } | Should Throw 'baselineRoot'
+    }
+    It 'rejects a baselineRoot inside the game documents folder (a managed MCM folder)' {
+        $rig = New-Rig; Set-RigConfigValue $rig 'baselineRoot' (Join-Path (Get-DocsDir $rig) 'Configs\ModSettings\Global\CoherentWarAI')
+        { Get-ConfigFor $rig } | Should Throw 'baselineRoot'
+    }
+    It 'rejects a baselineRoot that contains the game documents folder, also when written differently' {
+        $rig = New-Rig; Set-RigConfigValue $rig 'baselineRoot' ($rig.Docs.ToUpperInvariant() + '\.\')
+        { Get-ConfigFor $rig } | Should Throw 'baselineRoot'
+    }
+    It 'accepts a sibling whose name starts like the documents folder and stores normalized paths' {
+        $rig = New-Rig
+        Set-RigConfigValue $rig 'baselineRoot' ((Get-DocsDir $rig) + ' baseline\x\..\')
+        Set-RigConfigValue $rig 'workRoot' ($rig.Work + '\')
+        $cfg = Get-ConfigFor $rig
+        $cfg.baselineRoot | Should Be ((Get-DocsDir $rig) + ' baseline')
+        $cfg.workRoot | Should Be $rig.Work
+        $cfg.documentsRoot | Should Be $rig.Docs
+    }
+    It 'rejects relative and drive-relative workRoot, documentsRoot and baselineRoot' {
+        foreach ($case in @(@('workRoot', 'work'), @('documentsRoot', '\docs'), @('baselineRoot', 'C:baseline'))) {
+            $rig = New-Rig; Set-RigConfigValue $rig $case[0] $case[1]
+            { Get-ConfigFor $rig } | Should Throw $case[0]
+        }
+    }
+}
+
+Describe 'Restore-TestRigBaseline: documents folder, empty folders, reparse points (S1, S3)' {
+    It 'fails without creating anything when the game documents folder does not exist (S1)' {
+        $rig = New-Rig
+        $docsDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord'
+        Remove-Item -LiteralPath $docsDir -Recurse -Force
+        $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+        $r.Ok | Should Be $false
+        $r.Error | Should Match 'documentsRoot wrong\?'
+        Test-Path -LiteralPath $docsDir | Should Be $false
+    }
+    It 'keeps empty folders in a managed MCM folder that exist in the baseline and removes the others' {
+        $rig = New-Rig
+        New-Item -ItemType Directory -Path (Join-Path $rig.Baseline 'Configs\ModSettings\Global\SmithingSuite\presets') -Force | Out-Null
+        $kept = Get-RigDocsPath $rig 'Configs\ModSettings\Global\SmithingSuite\presets'
+        $gone = Get-RigDocsPath $rig 'Configs\ModSettings\Global\SmithingSuite\other'
+        foreach ($d in @($kept, $gone)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+        (Restore-TestRigBaseline -Config (Get-ConfigFor $rig)).Ok | Should Be $true
+        Test-Path -LiteralPath $kept -PathType Container | Should Be $true
+        Test-Path -LiteralPath $gone | Should Be $false
+    }
+    It 'treats a junction inside a managed MCM folder as an error and deletes nothing (S3)' {
+        $rig = New-Rig
+        $outside = Join-Path $rig.Root 'outside'
+        Write-RigFile (Join-Path $outside 'precious.json') '{}'
+        $stale = Get-RigDocsPath $rig 'Configs\ModSettings\Global\AutoTraderSpeed\stale.json'
+        Write-RigFile $stale '{}'
+        $link = Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\linked'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $link) -Force | Out-Null
+        $null = cmd /c mklink /J "$link" "$outside"
+        try {
+            (Get-Item -LiteralPath $link -Force).Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint) | Should Be $true
+            $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+            $r.Ok | Should Be $false
+            $r.Error | Should Match 'reparse point'
+            $r.Error | Should Match 'Nothing was changed'
+            Test-Path -LiteralPath (Join-Path $outside 'precious.json') | Should Be $true
+            Test-Path -LiteralPath $stale | Should Be $true
+        }
+        finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }   # removes the junction only, never its target
+    }
+    It 'treats a managed MCM folder that is itself a junction as an error (S3)' {
+        $rig = New-Rig
+        $outside = Join-Path $rig.Root 'outside'
+        Write-RigFile (Join-Path $outside 'precious.json') '{}'
+        $link = Get-RigDocsPath $rig 'Configs\ModSettings\Global\SmithingSuite'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $link) -Force | Out-Null
+        $null = cmd /c mklink /J "$link" "$outside"
+        try {
+            $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+            $r.Ok | Should Be $false
+            $r.Error | Should Match 'reparse point'
+            Test-Path -LiteralPath (Join-Path $outside 'precious.json') | Should Be $true
+        }
+        finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }
+    }
+}
+
+Describe 'Read-XmlFile: a path that is not a valid URI (S2)' {
+    It 'reads a SubModule.xml in a folder whose name contains # and %20' {
+        $dir = Join-Path $TestDrive 'a#b%20c'
+        New-SubModuleXml $dir 'X.Mod' 'v1.2'
+        (Get-SubModuleInfo (Join-Path $dir 'SubModule.xml')).Version | Should Be 'v1.2'
+    }
+}
+
+Describe 'Get-JobPreflight: expectedGameVersion type and check order' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    function Invoke-OrderPreflight {
+        param([hashtable]$Rig, $Expected, [string[]]$Modules = @('Native'))
+        $job = [pscustomobject]@{ modules = $Modules; expectedGameVersion = $Expected }
+        return Get-JobPreflight -Config (Get-ConfigFor $Rig) -Job $job -PackageRoot (Join-Path $Rig.Root 'pkg') -PackageModuleIds @()
+    }
+    function New-OrderRig {
+        # every check fails: exe missing, version mismatch (v9 expected), module missing
+        $rig = New-Rig; Set-RigGameVersion $rig 'v1.4.8'
+        Set-RigConfigValue $rig 'gameExecutable' (Join-Path $rig.Root 'missing\Bannerlord.exe')
+        return $rig
+    }
+
+    It 'blocks a non-string expectedGameVersion' {
+        $rig = New-Rig; Set-RigGameVersion $rig 'v1.4.8'
+        (Invoke-OrderPreflight $rig 1.48).Error | Should Match 'expectedGameVersion must be a string'
+    }
+    It 'reports a version mismatch before missing modules' {
+        $rig = New-Rig; Set-RigGameVersion $rig 'v1.4.8'
+        $r = Invoke-OrderPreflight $rig 'v9' @('Foo.Missing')
+        $r.Error | Should Match 'does not match'
+        $r.Error | Should Not Match 'Foo\.Missing'
+    }
+    Context 'with Bannerlord running and no Steam' {
+        Mock Get-BannerlordProcess { return [pscustomobject]@{ Id = 4242 } }
+        Mock Get-SteamProcess { return $null }
+        It 'reports the running game first' {
+            (Invoke-OrderPreflight (New-OrderRig) 'v9' @('Foo.Missing')).Error | Should Match 'already running'
+        }
+    }
+    Context 'without Steam' {
+        Mock Get-SteamProcess { return $null }
+        It 'reports a missing game executable before a missing Steam' {
+            (Invoke-OrderPreflight (New-OrderRig) 'v9' @('Foo.Missing')).Error | Should Match 'Game executable not found'
+        }
+        It 'reports a missing Steam before a version mismatch and missing modules' {
+            $rig = New-Rig; Set-RigGameVersion $rig 'v1.4.8'
+            (Invoke-OrderPreflight $rig 'v9' @('Foo.Missing')).Error | Should Match 'steam'
+        }
+    }
+}
+
+Describe 'Find-CrashedWatchdogLog: launch time for the own log (W1, S5)' {
+    BeforeEach {
+        $script:logs = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:logs -Force | Out-Null
+    }
+    function Write-Watchdog([int]$ProcessId, [string]$Text) { Write-RigFile (Join-Path $script:logs "watchdog_log_$ProcessId.txt") $Text }
+
+    It 'ignores a stale own log from an earlier crash under a reused PID' {
+        Write-Watchdog 100 "Crash occurred`r`n"
+        $snapshot = Get-WatchdogLogSnapshot -LogsDir $script:logs
+        Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot $snapshot | Should Be $null
+    }
+    Context 'counting the reads' {
+        Mock Test-WatchdogCrash { return $false }
+        It 'reads the own log once and not again in the fallback' {
+            Write-Watchdog 100 'fine'
+            Write-Watchdog 200 'fine'
+            $null = Find-CrashedWatchdogLog -LogsDir $script:logs -ProcessId 100 -Snapshot @{}
+            Assert-MockCalled Test-WatchdogCrash -Scope It -Exactly -Times 1 -ParameterFilter { $Path -like '*watchdog_log_100.txt' }
+            Assert-MockCalled Test-WatchdogCrash -Scope It -Exactly -Times 1 -ParameterFilter { $Path -like '*watchdog_log_200.txt' }
+        }
+    }
+}
+
+Describe 'Stop-StrayGameProcesses (W2)' {
+    function Start-Sleeper { return (Start-Process -FilePath $fakeGameExe -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 60' -PassThru -WindowStyle Hidden) }
+
+    Context 'with a game process started since the launch' {
+        $since = [DateTime]::UtcNow.AddSeconds(-1)
+        $script:stray = Start-Sleeper
+        Mock Get-GameProcess { return (Get-Process -Id $script:stray.Id -ErrorAction SilentlyContinue) } -ParameterFilter { $Name -eq $fakeGameName }
+        It 'stops it and reports success' {
+            try {
+                Stop-StrayGameProcesses -GameName $fakeGameName -Since $since -ExcludeId 0 | Should Be $true
+                $script:stray.WaitForExit(10000) | Should Be $true
+            }
+            finally { if (-not $script:stray.HasExited) { $script:stray.Kill() } }
+        }
+    }
+    Context 'with a game process started before the launch' {
+        $script:old = Start-Sleeper
+        Start-Sleep -Milliseconds 500
+        $since = [DateTime]::UtcNow
+        Mock Get-GameProcess { return (Get-Process -Id $script:old.Id -ErrorAction SilentlyContinue) }
+        It 'leaves it alone' {
+            try {
+                Stop-StrayGameProcesses -GameName $fakeGameName -Since $since -ExcludeId 0 | Should Be $true
+                $script:old.HasExited | Should Be $false
+            }
+            finally { if (-not $script:old.HasExited) { $script:old.Kill() } }
+        }
+    }
+    Context 'when a stray process cannot be stopped' {
+        $since = [DateTime]::UtcNow.AddSeconds(-1)
+        $script:stuck = Start-Sleeper
+        Mock Get-GameProcess { return (Get-Process -Id $script:stuck.Id -ErrorAction SilentlyContinue) }
+        Mock Stop-ProcessTree { return $false }
+        It 'reports failure' {
+            try { Stop-StrayGameProcesses -GameName $fakeGameName -Since $since -ExcludeId 0 | Should Be $false }
+            finally { if (-not $script:stuck.HasExited) { $script:stuck.Kill() } }
+        }
+    }
+    Context 'with a game process whose start time is unreadable (W2)' {
+        Mock Get-GameProcess {
+            $p = [pscustomobject]@{ Id = 999999; ProcessName = 'Bannerlord' }
+            $p | Add-Member -MemberType ScriptProperty -Name StartTime -Value { throw 'Access is denied' }
+            return $p
+        }
+        Mock Stop-ProcessTree { return $true }
+        It 'does not stop it and reports failure' {
+            Stop-StrayGameProcesses -GameName 'Bannerlord' -Since ([DateTime]::UtcNow) -ExcludeId 0 | Should Be $false
+            Assert-MockCalled Stop-ProcessTree -Scope It -Exactly -Times 0
+        }
+    }
+    Context 'looking up the game processes (K1)' {
+        Mock Get-GameProcess { return $null }
+        It 'asks only for processes named like the game executable' {
+            Stop-StrayGameProcesses -GameName 'Bannerlord' -Since ([DateTime]::UtcNow) -ExcludeId 0 | Should Be $true
+            Assert-MockCalled Get-GameProcess -Scope It -ParameterFilter { $Name -ne 'Bannerlord' } -Exactly -Times 0
+            Assert-MockCalled Get-GameProcess -Scope It -ParameterFilter { $Name -eq 'Bannerlord' }
+        }
+    }
+}
+
+Describe 'Invoke-Run: crash just after the exit and relaunched games (S4, W2)' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach {
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_ENGINELOGS -ErrorAction SilentlyContinue
+    }
+    function Start-CrashRig([string]$Behavior) {
+        $env:FAKEGAME_BEHAVIOR = $Behavior
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_ENGINELOGS = $rig.EngineLogs
+        $null = New-TestJob $rig
+        return $rig
+    }
+
+    It 'classifies Crashed when "Crash occurred" reaches the log just after the game exited (S4)' {
+        $rig = Start-CrashRig 'crashlate'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+    }
+    It 'stops the relaunched game named by the crash log and classifies Crashed (W2)' {
+        $rig = Start-CrashRig 'relaunch'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $done = Read-Done $rig
+        $done.runs[0].exitClass | Should Be 'Crashed'
+        $strayPid = [int](Get-Content -Raw (Join-Path $rig.Docs 'stray-pid.txt'))
+        Start-Sleep -Milliseconds 500
+        @(Get-Process -Id $strayPid -ErrorAction SilentlyContinue).Count | Should Be 0
+        (Read-RunRecord $rig).artifacts -contains "watchdog_log_$strayPid.txt" | Should Be $true
+    }
+    Context 'when the relaunched game cannot be stopped' {
+        Mock Stop-ProcessTree { return $false }
+        It 'ends the run CleanupFailed and the job failed (W2)' {
+            $rig = Start-CrashRig 'relaunch'
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            $done = Read-Done $rig
+            $done.runs[0].exitClass | Should Be 'CleanupFailed'
+            $done.status | Should Be 'failed'
+        }
+    }
+}
+
+Describe 'Invoke-Job: no baseline restore while Bannerlord still runs (W3)' {
+    # Bannerlord "runs" once the fake game has started: the preflight before the launch sees none.
+    Mock Get-BannerlordProcess {
+        if ($env:FAKEGAME_DOCS -and (Test-Path -LiteralPath (Join-Path $env:FAKEGAME_DOCS 'fake-args.txt'))) { return [pscustomobject]@{ Id = 4242 } }
+    }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach {
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+    }
+
+    It 'skips the after-job restore and reports it in done.json' {
+        $env:FAKEGAME_BEHAVIOR = 'complete'
+        $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+        $null = New-TestJob $rig
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $done = Read-Done $rig
+        $done.runs[0].exitClass | Should Be 'Completed'
+        $done.baselineRestored | Should Be $false
+        $done.baselineError | Should Be 'Bannerlord still running'
+        # the run's patch is still in place
+        Get-Sha256 (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') | Should Not Be (Get-Sha256 (Join-Path $rig.Baseline 'Configs\BannerlordConfig.txt'))
+    }
+}
+
+Describe 'Copy-RunArtifacts: a log the game still holds open (W4)' {
+    It 'copies a file another handle holds open for writing' {
+        $dir = Join-Path $TestDrive 'w4'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $source = Join-Path $dir 'watchdog_log_1.txt'
+        $fs = New-Object System.IO.FileStream($source, 'Create', 'Write', 'ReadWrite')
+        try {
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes("Crash occurred`r`n")
+            $fs.Write($bytes, 0, $bytes.Length); $fs.Flush()
+            $copied = @(Copy-RunArtifacts -Copies @(@{ Name = 'watchdog_log_1.txt'; Source = $source }) -Since ([DateTime]::UtcNow.AddMinutes(-1)) -TargetDir (Join-Path $dir 'out'))
+            $copied -contains 'watchdog_log_1.txt' | Should Be $true
+            [System.IO.File]::ReadAllText((Join-Path $dir 'out\watchdog_log_1.txt')) | Should Be "Crash occurred`r`n"
+        }
+        finally { $fs.Dispose() }
+    }
+}
+
+Describe 'Invoke-Run: moduleVersions is always a JSON array (W5)' {
+    function Invoke-SetupErrorRun {
+        param([hashtable]$Rig, $ModuleVersions)
+        $results = Join-Path $Rig.Root 'w5results'
+        $context = @{ JobId = 'j'; JobDir = $Rig.Root; ResultsDir = $results; Beat = 0; RunCount = 1; AbortSeen = $false
+            ConfigTouched = $false; GameVersion = 'v1.4.8'; ModuleVersions = $ModuleVersions }
+        $run = [pscustomobject]@{ runId = 'r1'; harness = 'NoSuchHarness'; mode = 'WarSails' }   # SetupError before anything is touched
+        $null = Invoke-Run -Config (Get-ConfigFor $Rig) -Context $context -Run $run -Modules @('Native') -RunIndex 1 -ResultsDir $results
+        return [System.IO.File]::ReadAllText((Join-Path $results 'r1\agent-run.json'))
+    }
+
+    It 'writes an empty array for no module' {
+        Invoke-SetupErrorRun (New-Rig) @() | Should Match '"moduleVersions":\s*\[\s*\]'
+    }
+    It 'writes a one-element array for one module' {
+        $json = Invoke-SetupErrorRun (New-Rig) @([ordered]@{ id = 'Native'; version = 'v1.4.8'; source = 'game' })
+        $json | Should Match '"moduleVersions":\s*\[\s*\{'
+        @(($json | ConvertFrom-Json).moduleVersions)[0].id | Should Be 'Native'
+    }
+}
+
+Describe 'Resolve-OrphanedJobs: done.json shape (S7)' {
+    It 'writes baselineRestored and baselineError as null' {
+        $rig = New-Rig
+        $dir = New-TestJob $rig
+        Rename-Item (Join-Path $dir 'job.json') 'job.claimed.json'
+        Resolve-OrphanedJobs -Config (Get-ConfigFor $rig)
+        $text = [System.IO.File]::ReadAllText((Join-Path $rig.Queue 'results\20261031-120000-aaaa\done.json'))
+        $text | Should Match '"baselineRestored":\s*null'
+        $text | Should Match '"baselineError":\s*null'
+    }
+}
+
+# --- Review fixes, wave 6 (K1, W1-W4, V2, V3) -------------------------------------
+
+function Clear-FakeGameEnvironment {
+    Stop-FakeGameLeftovers
+    foreach ($name in @('FAKEGAME_BEHAVIOR', 'FAKEGAME_DOCS', 'FAKEGAME_ENGINELOGS')) { Remove-Item "Env:\$name" -ErrorAction SilentlyContinue }
+}
+
+function Start-FakeGameRig {
+    # A rig with a one-run job for the fake game behavior; the fake game writes its watchdog log into the rig's engineLogDir.
+    param([string]$Behavior, [scriptblock]$Mutate = $null)
+    $env:FAKEGAME_BEHAVIOR = $Behavior
+    $rig = New-Rig
+    $env:FAKEGAME_DOCS = $rig.Docs
+    $env:FAKEGAME_ENGINELOGS = $rig.EngineLogs
+    $null = New-TestJob $rig -Mutate $Mutate
+    return $rig
+}
+
+function Get-StrayProcess {
+    # The process the fake game started outside its tree (PID in <docs>\<file>), or $null once it is gone.
+    param([hashtable]$Rig, [string]$File = 'stray-pid.txt')
+    $path = Join-Path $Rig.Docs $File
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    return (Get-Process -Id ([int](Get-Content -Raw -LiteralPath $path)) -ErrorAction SilentlyContinue)
+}
+
+Describe 'Invoke-Run: a crash log naming the PID of another program (K1)' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach { Clear-FakeGameEnvironment }
+
+    It 'classifies Crashed but leaves a process with another name alone, although it started after the launch' {
+        $rig = Start-FakeGameRig 'crashforeign'
+        try {
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+            $foreign = Get-StrayProcess $rig 'foreign-pid.txt'
+            $foreign | Should Not Be $null
+            $foreign.ProcessName | Should Be 'PING'
+        }
+        finally {
+            $foreign = Get-StrayProcess $rig 'foreign-pid.txt'
+            if ($foreign -and $foreign.ProcessName -eq 'PING') { Stop-Process -Id $foreign.Id -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Describe 'Invoke-Run: stray game processes after every run (W2)' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach { Clear-FakeGameEnvironment }
+
+    It 'stops a game relaunched outside the tree after a normal exit and keeps Completed' {
+        $rig = Start-FakeGameRig 'relaunchexit'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        Start-Sleep -Milliseconds 500
+        Get-StrayProcess $rig | Should Be $null
+    }
+    It 'stops a game relaunched outside the tree after a hard timeout' {
+        $rig = Start-FakeGameRig 'relaunchsleep' { param($j) $j['runs'][0]['hardTimeoutMinutes'] = 0.05 }
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+        Start-Sleep -Milliseconds 500
+        Get-StrayProcess $rig | Should Be $null
+    }
+    Context 'with a game process whose start time is unreadable' {
+        Mock Get-GameProcess {
+            $p = [pscustomobject]@{ Id = 999999; ProcessName = $fakeGameName }
+            $p | Add-Member -MemberType ScriptProperty -Name StartTime -Value { throw 'Access is denied' }
+            return $p
+        }
+        It 'ends the run CleanupFailed and the job failed' {
+            $rig = Start-FakeGameRig 'complete'
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            $done = Read-Done $rig
+            $done.runs[0].exitClass | Should Be 'CleanupFailed'
+            $done.status | Should Be 'failed'
+        }
+    }
+}
+
+Describe 'Invoke-Run: watchdog logs of an earlier run (W3)' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach { Clear-FakeGameEnvironment }
+
+    It 'does not classify run 2 Crashed when the watchdog of run 1 still writes to its crash log after run 2 launched' {
+        $rig = Start-FakeGameRig 'crashfirst' { param($j) Add-SecondRun $j }
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $done = Read-Done $rig
+        $done.runs[0].exitClass | Should Be 'Crashed'
+        $done.runs[1].exitClass | Should Be 'Completed'
+    }
+}
+
+Describe 'Invoke-Run: missing engineLogDir (V2)' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach { Clear-FakeGameEnvironment }
+    Mock Write-AgentLog { }
+
+    It 'logs once per run that crash detection cannot see the watchdog logs' {
+        $env:FAKEGAME_BEHAVIOR = 'complete'
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        Remove-Item -LiteralPath $rig.EngineLogs -Recurse -Force
+        $null = New-TestJob $rig -Mutate { param($j) Add-SecondRun $j }
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[1].exitClass | Should Be 'Completed'
+        Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 2 -ParameterFilter { $Message -like '*engineLogDir*does not exist*' }
+    }
+}
+
+Describe 'Config lock and restore-pending marker (W4)' {
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach { Clear-FakeGameEnvironment }
+    function Test-ConfigLockFree {
+        # Tries the config mutex from another process; $true if it was free.
+        $job = Start-Job -ScriptBlock {
+            $m = New-Object System.Threading.Mutex($false, 'Global\BannerlordTestRigConfig')
+            try { $got = $m.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+            if ($got) { $m.ReleaseMutex() }
+            $m.Dispose()
+            $got
+        }
+        try { return [bool]($job | Wait-Job -Timeout 60 | Receive-Job) }
+        finally { Remove-Job $job -Force }
+    }
+    function Get-MarkerPath { param([hashtable]$Rig) return (Join-Path $Rig.Work 'restore-pending') }
+    function Test-DocsAtBaseline {
+        param([hashtable]$Rig)
+        return ((Get-Sha256 (Get-RigDocsPath $Rig 'Configs\BannerlordConfig.txt')) -eq (Get-Sha256 (Join-Path $Rig.Baseline 'Configs\BannerlordConfig.txt')))
+    }
+
+    Context 'during a job' {
+        Mock Get-BannerlordProcess { return $null }
+        Mock Invoke-JobSteps {
+            $script:lockFreeDuringJob = Test-ConfigLockFree
+            return New-Outcome 'completed'
+        }
+        It 'holds the config lock for the whole job and releases it afterwards' {
+            $script:lockFreeDuringJob = $null
+            $rig = New-Rig
+            $null = New-TestJob $rig
+            (Invoke-AgentCycle -Config (Get-ConfigFor $rig)) | Should Be $true
+            $script:lockFreeDuringJob | Should Be $false
+            Test-ConfigLockFree | Should Be $true
+        }
+    }
+    Context 'while Save-TestRigBaseline.ps1 holds the config lock' {
+        Mock Get-BannerlordProcess { return $null }
+        It 'claims no job in this poll' {
+            $rig = New-Rig
+            $jobDir = New-TestJob $rig
+            $signal = Join-Path $rig.Root 'lock-held.txt'
+            $holder = Start-Job -ScriptBlock {
+                param($signal)
+                $m = New-Object System.Threading.Mutex($false, 'Global\BannerlordTestRigConfig')
+                $null = $m.WaitOne(0)
+                [System.IO.File]::WriteAllText($signal, 'held')
+                Start-Sleep -Seconds 30
+                $m.ReleaseMutex()
+            } -ArgumentList $signal
+            try {
+                $end = (Get-Date).AddSeconds(60)
+                while (-not (Test-Path -LiteralPath $signal) -and (Get-Date) -lt $end) { Start-Sleep -Milliseconds 100 }
+                (Invoke-AgentCycle -Config (Get-ConfigFor $rig)) | Should Be $false
+                Test-Path -LiteralPath (Join-Path $jobDir 'job.json') | Should Be $true
+            }
+            finally { Remove-Job $holder -Force }
+        }
+    }
+    Context 'with the game still running after the job' {
+        # Bannerlord "runs" once the fake game has started: the preflight before the launch sees none.
+        Mock Get-BannerlordProcess {
+            if ($env:FAKEGAME_DOCS -and (Test-Path -LiteralPath (Join-Path $env:FAKEGAME_DOCS 'fake-args.txt'))) { return [pscustomobject]@{ Id = 4242 } }
+        }
+        It 'leaves the restore-pending marker when the after-job restore is skipped' {
+            $env:FAKEGAME_BEHAVIOR = 'complete'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).baselineRestored | Should Be $false
+            Test-Path -LiteralPath (Get-MarkerPath $rig) -PathType Leaf | Should Be $true
+        }
+    }
+    Context 'with no game running' {
+        Mock Get-BannerlordProcess { return $null }
+        It 'removes the marker after the successful after-job restore' {
+            $env:FAKEGAME_BEHAVIOR = 'complete'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).baselineRestored | Should Be $true
+            Test-Path -LiteralPath (Get-MarkerPath $rig) | Should Be $false
+        }
+        It 'restores a pending baseline after a rejected job and removes the marker' {
+            $rig = New-Rig
+            Write-RigFile (Get-MarkerPath $rig) 'earlier job'
+            Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'AutoSaveInterval=-1'
+            $null = New-TestJob $rig -Mutate { param($j) $j['schema'] = 2 }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            $done = Read-Done $rig
+            $done.status | Should Be 'rejected'
+            $done.baselineRestored | Should Be $true
+            Test-DocsAtBaseline $rig | Should Be $true
+            Test-Path -LiteralPath (Get-MarkerPath $rig) | Should Be $false
+        }
+        It 'restores a pending baseline at startup (agent died mid-job) and removes the marker' {
+            $rig = New-Rig
+            Write-RigFile (Get-MarkerPath $rig) 'earlier job'
+            Write-RigFile (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') 'AutoSaveInterval=-1'
+            Invoke-AgentMain -ConfigPath $rig.ConfigPath -Once | Should Be 0
+            Test-DocsAtBaseline $rig | Should Be $true
+            Test-Path -LiteralPath (Get-MarkerPath $rig) | Should Be $false
+        }
+    }
+}
+
+Describe 'Get-AgentConfig: aliases of the game documents folder as baselineRoot (W1)' {
+    It 'rejects the \\?\ and \\.\ forms of a folder' {
+        foreach ($prefix in @('\\?\', '\\.\')) {
+            $rig = New-Rig; Set-RigConfigValue $rig 'baselineRoot' ($prefix + $rig.Baseline)
+            { Get-ConfigFor $rig } | Should Throw 'baselineRoot'
+        }
+    }
+    It 'rejects a baselineRoot that is a junction' {
+        $rig = New-Rig
+        $link = Join-Path $rig.Root 'baseline-link'
+        $null = cmd /c mklink /J "$link" "$(Join-Path $rig.Docs 'Mount and Blade II Bannerlord')"
+        try {
+            Set-RigConfigValue $rig 'baselineRoot' $link
+            { Get-ConfigFor $rig } | Should Throw 'junction'
+        }
+        finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }
+    }
+    It 'rejects a baselineRoot below a junction, also when the baselineRoot itself does not exist yet' {
+        $rig = New-Rig
+        $link = Join-Path $rig.Root 'docs-link'
+        $null = cmd /c mklink /J "$link" "$($rig.Docs)"
+        try {
+            Set-RigConfigValue $rig 'baselineRoot' (Join-Path $link 'Mount and Blade II Bannerlord\new-baseline')
+            { Get-ConfigFor $rig } | Should Throw 'junction'
+        }
+        finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }
+    }
+}
+
+Describe 'Restore-TestRigBaseline: reparse points on the baseline side and after the copy (V3)' {
+    It 'fails on a junction in the baseline and changes nothing' {
+        $rig = New-Rig
+        $outside = Join-Path $rig.Root 'outside'
+        Write-RigFile (Join-Path $outside 'precious.json') '{}'
+        $stale = Get-RigDocsPath $rig 'Configs\ModSettings\Global\SmithingSuite\stale.json'
+        Write-RigFile $stale '{}'
+        $link = Join-Path $rig.Baseline 'Configs\ModSettings\Global\AutoTraderSpeed'
+        $null = cmd /c mklink /J "$link" "$outside"
+        try {
+            $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+            $r.Ok | Should Be $false
+            $r.Error | Should Match 'reparse point'
+            $r.Error | Should Match 'Nothing was changed'
+            Test-Path -LiteralPath $stale | Should Be $true
+            Test-Path -LiteralPath (Get-RigDocsPath $rig 'Configs\BannerlordConfig.txt') | Should Be $false
+            Test-Path -LiteralPath (Join-Path $outside 'precious.json') | Should Be $true
+        }
+        finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }
+    }
+    Context 'with a junction that appears in the documents tree during the copy' {
+        Mock Copy-BaselineFile {
+            [System.IO.File]::Copy($Source, $Destination, $true)
+            $link = Join-Path (Split-Path -Parent $Destination) 'appeared'
+            if ($Destination -like '*CoherentWarAI_v1.json' -and -not (Test-Path -LiteralPath $link)) {
+                $null = cmd /c mklink /J "$link" "$script:v3Outside"
+            }
+        }
+        It 'fails and does not claim that nothing was changed' {
+            $rig = New-Rig
+            $script:v3Outside = Join-Path $rig.Root 'outside'
+            New-Item -ItemType Directory -Path $script:v3Outside -Force | Out-Null
+            $link = Get-RigDocsPath $rig 'Configs\ModSettings\Global\CoherentWarAI\appeared'
+            try {
+                $r = Restore-TestRigBaseline -Config (Get-ConfigFor $rig)
+                $r.Ok | Should Be $false
+                $r.Error | Should Match 'reparse point'
+                $r.Error | Should Not Match 'Nothing was changed'
+            }
+            finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }
         }
     }
 }

@@ -31,6 +31,7 @@ Describe 'Install-TestRigAgent' {
         $root = Join-Path $TestDrive 'install1'
         & $installer -InstallRoot $root
         Test-Path (Join-Path $root 'TestRigAgent.ps1') | Should Be $true
+        Test-Path (Join-Path $root 'Save-TestRigBaseline.ps1') | Should Be $true
         Assert-MockCalled Register-ScheduledTask -Exactly -Times 1 -ParameterFilter {
             $TaskName -eq 'BannerlordTestRigAgent' -and
             @($Trigger)[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and

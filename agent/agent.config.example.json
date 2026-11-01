@@ -5,6 +5,9 @@
   "gameExecutable": "",
   "gameArgumentsPrefix": "/singleplayer",
   "documentsRoot": "",
+  "baselineRoot": "",
+  "engineLogDir": "",
+  "workshopRoot": "",
   "pollSeconds": 10,
   "heartbeatSeconds": 10,
   "moduleAllowlist": [

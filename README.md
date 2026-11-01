@@ -9,6 +9,11 @@ Slice S1 (one soak run of the existing CoherentWarAI harness) is implemented:
 
 - `runner/Invoke-TestRig.ps1` with the SSH transport `runner/Transport.Ssh.ps1`
 - `agent/TestRigAgent.ps1` with its installer `agent/Install-TestRigAgent.ps1`
+- `agent/Save-TestRigBaseline.ps1` records the game configuration baseline the agent restores before each run
+  (one-time step, see `docs/SETUP-GAMESERVER.md` section g)
+
+Also implemented: agent preflight (game version, modules, Steam), the baseline restore, the crash watchdog
+(`Crashed`), and version reporting with runner warnings (`WARN version differs: ...`); see `docs/JOB-PROTOCOL.md`.
 
 The job protocol between them is `docs/JOB-PROTOCOL.md`. Harness module and scenarios are
 not implemented yet; the layout below is the plan.

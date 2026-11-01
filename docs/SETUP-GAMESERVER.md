@@ -76,7 +76,7 @@ How to switch Steam into offline mode (menu path) is unverified: see the Steam d
 
 - Run in **windowed mode**.
 - Turn **"Stop Game on Focus Lost" off**, otherwise the game pauses while unattended.
-- The agent sets this itself before every run: `StopGameOnFocusLost=False`,
+- The agent sets this itself before every run (after the baseline restore, section g): `StopGameOnFocusLost=False`,
   `AutoSaveInterval=-1` and `EnableTutorialHints=False` in
   `Documents\Mount and Blade II Bannerlord\Configs\BannerlordConfig.txt` (the same keys the
   CoherentWarAI `Run-SoakTest.ps1` patches).
@@ -133,8 +133,17 @@ ssh -i <key> <user>@<test-pc> "powershell -NoProfile -File C:\TestRig\src\agent\
 
 What the installer does:
 
-- Copies the agent to `C:\TestRig\agent\` and creates `agent.config.json` from the example if
-  none exists. Set `gamePath` in it to the Bannerlord install folder.
+- Copies the agent and `Save-TestRigBaseline.ps1` to `C:\TestRig\agent\` and creates
+  `agent.config.json` from the example if none exists. Set `gamePath` in it to the Bannerlord
+  install folder.
+- `workRoot`, `documentsRoot` and `baselineRoot` (also their defaults) must be absolute (`X:\...` or
+  `\\server\share\...`; not `\\?\` or `\\.\`); `baselineRoot` must not be, contain or lie inside
+  `<documentsRoot>\Mount and Blade II Bannerlord`, and neither it nor a folder above it may be a junction
+  or symbolic link. Otherwise the agent exits with 1.
+- Optional config keys (empty = default): `baselineRoot` (default `<parent of workRoot>\baseline`,
+  i.e. `C:\TestRig\baseline`), `engineLogDir` (default
+  `%ProgramData%\Mount and Blade II Bannerlord\logs`), `workshopRoot` (default
+  `<parent of parent of gamePath>\workshop\content\261550`).
 - Registers a scheduled task that starts the agent **at logon of the current user**, with
   logon type **Interactive** and run level **Limited** (no elevation), for the current user.
 - The agent polls `C:\TestRig\queue\jobs` every 10 s and holds the named mutex
@@ -142,20 +151,41 @@ What the installer does:
 
 ## g. Capture the baseline config
 
-Planned for a later wave (TODO #7): the rig will restore this configuration before every run.
-Until then the agent only patches the keys listed in section d and keeps no backup
-(`baselineRestored` in `agent-run.json` is `null`). Capture the baseline once anyway, after
-steps a to d, so it exists when restore arrives:
+The agent restores this configuration before every run (then applies the per-run patch from
+section d) and again after each job. **One-time step after the install**, once steps a to d are
+done and the game was started once: record the baseline from the current state, via SSH or at
+the console:
 
 ```powershell
-New-Item -ItemType Directory -Force C:\TestRig\baseline | Out-Null
-$cfg = Join-Path $env:USERPROFILE 'Documents\Mount and Blade II Bannerlord\Configs'
-Copy-Item (Join-Path $cfg 'BannerlordConfig.txt') C:\TestRig\baseline\
+ssh -i <key> <user>@<test-pc> "powershell -NoProfile -File C:\TestRig\agent\Save-TestRigBaseline.ps1"
 ```
 
-The `Configs` location is unverified: confirm it on the test PC. The MCM JSON files of the four
-mods are added to `C:\TestRig\baseline\` as well once they exist (their location is determined
-in slice S3).
+- It copies `<Documents>\Mount and Blade II Bannerlord\Configs\BannerlordConfig.txt` (required) and
+  the managed MCM folders `Configs\ModSettings\Global\{CoherentWarAI,AutoTraderSpeed,SmithingSuite,CompanionManagementSuite}`
+  into `baselineRoot` (default `C:\TestRig\baseline`) with the same layout, and prints each file
+  with its SHA-256. Exit code `0` = saved, `1` = refused or failed.
+- It refuses if `<baselineRoot>\Configs` already exists. `-Force` replaces `Configs` completely. It also refuses
+  while Bannerlord runs and when a junction or symlink is in the managed tree.
+- It writes the marker file `Configs\.testrig-baseline` into every baseline. An existing `Configs` or
+  `Configs.old` without that marker is never replaced or deleted, also not with `-Force` ("Nothing was
+  changed"). A baseline recorded by an older version has no marker: the agent keeps restoring it, but to
+  replace it check `baselineRoot`, then delete or move `<baselineRoot>\Configs` by hand and save again.
+  Junctions or symlinks inside `Configs`, `Configs.new` or `Configs.old` are refused as well.
+- It refuses while the agent runs a job (the agent holds the mutex `Global\BannerlordTestRigConfig`;
+  try again when the job is done), and while `<workRoot>\restore-pending` exists (with the
+  example config `C:\TestRig\work\restore-pending`): a job's run patch may still be in the game configuration. To
+  clear it, restart the agent or let it finish a job (it restores the baseline and deletes the marker),
+  or, after checking the game configuration by hand, delete the file.
+- It stages the copy in `<baselineRoot>\Configs.new`, checks the SHA-256 of each copied file, requires
+  `BannerlordConfig.txt`, then swaps `Configs` -> `Configs.old` and `Configs.new` -> `Configs` and deletes
+  `Configs.old`; a leftover `Configs.old` without `Configs` is put back first. `Configs.new` and `Configs.old` are
+  reserved names in `baselineRoot`. Exit `0` only if `Configs\BannerlordConfig.txt` is in place with the staged hash.
+  `-ConfigPath <agent.config.json>` selects another config (default: the one next to the script).
+- Without a baseline every job that reaches a run ends `SetupError` (`Baseline restore failed:
+  Baseline missing: ...`).
+- Restore fails (run ends `SetupError`) if the game documents folder is missing (it is not created) or a
+  junction or symlink is in the managed tree; nothing is changed then.
+- Restore touches only these files; `engine_config.txt`, `LauncherData.xml` and `ModLogs` are left alone.
 
 ## h. Verify: no new inbound port
 

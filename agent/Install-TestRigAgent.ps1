@@ -3,7 +3,7 @@
     Installs the Bannerlord test rig agent on the test PC.
 
 .DESCRIPTION
-    - Copies TestRigAgent.ps1 to -InstallRoot (default C:\TestRig\agent).
+    - Copies TestRigAgent.ps1 and Save-TestRigBaseline.ps1 to -InstallRoot (default C:\TestRig\agent).
     - Creates agent.config.json from agent.config.example.json only if none exists.
     - Registers the scheduled task "BannerlordTestRigAgent": at logon of the current user,
       principal = current user, logon type Interactive, run level Limited (no elevation).
@@ -28,18 +28,22 @@ $taskName = 'BannerlordTestRigAgent'
 $sourceDir = $PSScriptRoot
 
 $agentSource = Join-Path $sourceDir 'TestRigAgent.ps1'
+$baselineSource = Join-Path $sourceDir 'Save-TestRigBaseline.ps1'
 $exampleSource = Join-Path $sourceDir 'agent.config.example.json'
-foreach ($required in @($agentSource, $exampleSource)) {
+foreach ($required in @($agentSource, $baselineSource, $exampleSource)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing file next to the installer: $required" }
 }
 
 $agentTarget = Join-Path $InstallRoot 'TestRigAgent.ps1'
 $configTarget = Join-Path $InstallRoot 'agent.config.json'
 
-if ($PSCmdlet.ShouldProcess($InstallRoot, 'Copy TestRigAgent.ps1')) {
+if ($PSCmdlet.ShouldProcess($InstallRoot, 'Copy TestRigAgent.ps1 and Save-TestRigBaseline.ps1')) {
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    Copy-Item -LiteralPath $agentSource -Destination $agentTarget -Force
-    Write-Host "Installed $agentTarget"
+    foreach ($source in @($agentSource, $baselineSource)) {
+        $target = Join-Path $InstallRoot (Split-Path -Leaf $source)
+        Copy-Item -LiteralPath $source -Destination $target -Force
+        Write-Host "Installed $target"
+    }
 }
 
 if (Test-Path -LiteralPath $configTarget) {

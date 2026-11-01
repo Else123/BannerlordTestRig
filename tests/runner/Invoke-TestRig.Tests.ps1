@@ -855,6 +855,10 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
         $script:t = New-TempDir
         $script:out = Join-Path $script:t 'out'
         $script:cfg = Join-Path $script:t 'build.config.json'
+        # The tower game install (read-only for the rig): only its Version.xml matters here.
+        $script:game = Join-Path $script:t 'game'
+        New-Item -ItemType Directory -Path (Join-Path $script:game 'bin\Win64_Shipping_Client') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $script:game 'bin\Win64_Shipping_Client\Version.xml'), '<Version><Singleplayer Value="v1.4.8"/></Version>')
         $script:buildCalls = @()
         $script:buildFailure = $null
         $script:published = $null
@@ -900,25 +904,25 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
     }
 
     It 'builds into <OutRoot>\stage\<jobId> using towerGamePath\Modules and the default msbuildPath, then publishes' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Write-BuildConfig @{ towerGamePath = $script:game }
         (Start-BuildRig @{}) | Should Be 0
         Assert-MockCalled Invoke-RigBuildPackage -Exactly 1 -Scope It
         $script:calls.Publish | Should Be 1
         $b = $script:buildCalls[0]
         $b.StageDir | Should Be (Join-Path (Join-Path $script:out 'stage') $script:published.JobId)
-        $b.TowerGamePath | Should Be 'C:\Games\Bannerlord'
+        $b.TowerGamePath | Should Be $script:game
         $b.MsBuildPath | Should Be 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
         $b.WorkspaceRoot | Should Be (Split-Path -Parent (Resolve-Path (Join-Path $here '..\..')).ProviderPath)
     }
 
     It 'uses msbuildPath from the config when given' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord'; msbuildPath = 'D:\tools\MSBuild.exe' }
+        Write-BuildConfig @{ towerGamePath = $script:game; msbuildPath = 'D:\tools\MSBuild.exe' }
         (Start-BuildRig @{}) | Should Be 0
         $script:buildCalls[0].MsBuildPath | Should Be 'D:\tools\MSBuild.exe'
     }
 
     It 'packs the staged folder, writes the repo states into job.json and copies manifest.json next to it' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Write-BuildConfig @{ towerGamePath = $script:game }
         (Start-BuildRig @{}) | Should Be 0
         $dir = $script:published.Dir
         $dir | Should Be (Join-Path (Join-Path $script:out 'jobs') $script:published.JobId)
@@ -939,13 +943,13 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
     }
 
     It 'keeps the module load order of job.json' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Write-BuildConfig @{ towerGamePath = $script:game }
         Start-BuildRig @{ Mode = 'NoDlc' } | Out-Null
         ($script:published.Job.modules -join ',') | Should Be ((Get-RigModules -Mode NoDlc) -join ',')
     }
 
     It 'prints a line containing "tower Modules unchanged"' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Write-BuildConfig @{ towerGamePath = $script:game }
         (Start-BuildRig @{}) | Should Be 0
         ($script:lines -join "`n") | Should Match 'tower Modules unchanged'
     }
@@ -959,7 +963,7 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
     }
 
     It 'a build failure: exit 1, message shown, nothing published' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Write-BuildConfig @{ towerGamePath = $script:game }
         $script:buildFailure = 'MSBuild failed for SmithingSuite.csproj (exit 1)'
         (Start-BuildRig @{}) | Should Be 1
         ($script:lines -join "`n") | Should Match 'SmithingSuite\.csproj'
@@ -967,7 +971,7 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
     }
 
     It 'a tower change: exit 1, message shown, nothing published, no "unchanged" line' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Write-BuildConfig @{ towerGamePath = $script:game }
         $script:buildFailure = 'tower Modules changed during the build: Native\x.dll'
         (Start-BuildRig @{}) | Should Be 1
         ($script:lines -join "`n") | Should Match 'tower Modules changed'
@@ -976,7 +980,7 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
     }
 
     It 'an open job refuses before anything is built' {
-        Write-BuildConfig @{ towerGamePath = 'C:\Games\Bannerlord' }
+        Write-BuildConfig @{ towerGamePath = $script:game }
         Mock Get-JobState { @('20261031-120000-dead') } -ParameterFilter { $OpenJobs }
         (Start-BuildRig @{}) | Should Be 1
         Assert-MockCalled Invoke-RigBuildPackage -Exactly 0 -Scope It

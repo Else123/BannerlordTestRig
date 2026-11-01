@@ -147,13 +147,14 @@ function New-RigJobManifest {
         [Parameter(Mandatory)][int]$BudgetMinutes,
         [Parameter(Mandatory)][int]$HardTimeoutMinutes,
         [object[]]$Repos = @(),   # build mode: repo states (name, sha, dirty); empty with -PackageFrom
-        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI'
+        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+        [AllowNull()][AllowEmptyString()][string]$ExpectedGameVersion   # tower game version; $null/empty = not checked
     )
     [ordered]@{
         schema              = 1
         jobId               = $JobId
         createdUtc          = $CreatedUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
-        expectedGameVersion = $null
+        expectedGameVersion = if ([string]::IsNullOrWhiteSpace($ExpectedGameVersion)) { $null } else { $ExpectedGameVersion }
         package             = [ordered]@{ file = 'package.zip'; sha256 = $PackageSha256 }
         repos               = @($Repos)
         modules             = @(Get-RigModules -Mode $Mode -Harness $Harness)
@@ -231,6 +232,148 @@ function Read-RigRunResult {
         if ($result.Contains('daysReached') -and [int]::TryParse($result['daysReached'], [ref]$parsed)) { $info.DaysReached = $parsed }
     }
     $info
+}
+
+# Loads an XML file as data: no DTD, no external resolver. Throws on unreadable or malformed XML.
+function Read-RigXmlFile {
+    param([Parameter(Mandatory)][string]$Path)
+    $settings = New-Object Xml.XmlReaderSettings
+    $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $reader = [Xml.XmlReader]::Create($stream, $settings)
+        try {
+            $doc = New-Object Xml.XmlDocument
+            $doc.XmlResolver = $null
+            $doc.Load($reader)
+            $doc
+        } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
+# Game version of the tower install: <Version><Singleplayer Value="v1.4.8"/></Version> in
+# <towerGamePath>\bin\Win64_Shipping_Client\Version.xml. Throws with a clear message when it cannot be read.
+function Get-RigTowerGameVersion {
+    param([Parameter(Mandatory)][string]$TowerGamePath)
+    $file = Join-Path $TowerGamePath 'bin\Win64_Shipping_Client\Version.xml'
+    try { $doc = Read-RigXmlFile -Path $file } catch {
+        throw "Cannot read the tower game version from '$file' (Version.xml): $($_.Exception.Message)"
+    }
+    $node = $doc.SelectSingleNode('/Version/Singleplayer/@Value')
+    if ($null -eq $node -or [string]::IsNullOrWhiteSpace($node.Value)) {
+        throw "Version.xml '$file' has no <Singleplayer Value=...> entry."
+    }
+    $node.Value.Trim()
+}
+
+# Scans the tower workshop folder <steamapps>\workshop\content\261550\*\SubModule.xml once (steamapps = two levels
+# above the game folder). Returns Versions (module id -> version, '' = no Version element) and Duplicates (ids that
+# occur in several folders with different versions). With duplicates the copy with the newest SubModule.xml
+# LastWriteTime wins; equal times are decided by folder name, ascending.
+function Get-RigTowerWorkshopIndex {
+    param([Parameter(Mandatory)][string]$TowerGamePath)
+    $versions = @{}
+    $duplicates = New-Object System.Collections.Generic.List[string]
+    $steamApps = Split-Path -Parent (Split-Path -Parent $TowerGamePath.TrimEnd('\'))
+    $workshop = if ($steamApps) { Join-Path $steamApps 'workshop\content\261550' } else { $null }
+    if ($workshop -and (Test-Path -LiteralPath $workshop -PathType Container)) {
+        $copies = @{}   # id -> list of @{ Folder; Written; Version }
+        foreach ($d in Get-ChildItem -LiteralPath $workshop -Directory -ErrorAction SilentlyContinue) {
+            $file = Join-Path $d.FullName 'SubModule.xml'
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            try { $doc = Read-RigXmlFile -Path $file } catch { continue }
+            $id = $doc.SelectSingleNode('/Module/Id/@value')
+            if ($null -eq $id -or [string]::IsNullOrWhiteSpace($id.Value)) { continue }
+            $ver = $doc.SelectSingleNode('/Module/Version/@value')
+            if (-not $copies.ContainsKey($id.Value)) { $copies[$id.Value] = New-Object System.Collections.Generic.List[object] }
+            $copies[$id.Value].Add([pscustomobject]@{
+                    Folder = $d.Name; Written = (Get-Item -LiteralPath $file).LastWriteTimeUtc
+                    Version = $(if ($null -ne $ver) { $ver.Value.Trim() } else { '' })
+                })
+        }
+        foreach ($id in $copies.Keys) {
+            $ordered = @($copies[$id] | Sort-Object -Property @{ Expression = 'Written'; Descending = $true }, @{ Expression = 'Folder'; Descending = $false })
+            $versions[$id] = $ordered[0].Version
+            if (@($ordered | ForEach-Object { $_.Version } | Select-Object -Unique).Count -gt 1) { $duplicates.Add($id) }
+        }
+    }
+    [pscustomobject]@{ Versions = $versions; Duplicates = $duplicates.ToArray() }
+}
+
+# Version of module $ModuleId on the tower. $Source says where the .20 copy came from: 'workshop' looks in the tower
+# workshop first, anything else in <game>\Modules\<id>\SubModule.xml first; the other place is the fallback.
+# $Cache (one per job) holds the workshop index so the folder is scanned at most once.
+# Returns $null when the module is not on the tower, '' when it is there without a Version.
+function Get-RigTowerModuleVersion {
+    param(
+        [Parameter(Mandatory)][string]$TowerGamePath,
+        [Parameter(Mandatory)][string]$ModuleId,
+        [string]$Source = '',
+        [hashtable]$Cache = @{}
+    )
+    # The id comes from fetched data and ends up in a path: plain module ids only.
+    if ($ModuleId -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*\z') { return $null }
+    $places = if ($Source -eq 'workshop') { 'workshop', 'game' } else { 'game', 'workshop' }
+    foreach ($place in $places) {
+        if ($place -eq 'workshop') {
+            if (-not $Cache.ContainsKey('WorkshopIndex')) { $Cache['WorkshopIndex'] = Get-RigTowerWorkshopIndex -TowerGamePath $TowerGamePath }
+            if ($Cache['WorkshopIndex'].Versions.ContainsKey($ModuleId)) { return $Cache['WorkshopIndex'].Versions[$ModuleId] }
+            continue
+        }
+        $file = Join-Path $TowerGamePath "Modules\$ModuleId\SubModule.xml"
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        try { $doc = Read-RigXmlFile -Path $file } catch { continue }
+        $id = $doc.SelectSingleNode('/Module/Id/@value')
+        if ($null -eq $id -or $id.Value -cne $ModuleId) { continue }
+        $ver = $doc.SelectSingleNode('/Module/Version/@value')
+        return $(if ($null -ne $ver) { $ver.Value.Trim() } else { '' })
+    }
+    $null
+}
+
+# Warning lines (warning only, never an exit code) for versions the .20 agent reports that differ from the tower:
+# the game version and modules with source game/workshop. Each distinct value / (id, version) is compared once.
+# Runs without gameVersion/moduleVersions (old agent) contribute nothing. Throws if the tower game version is unreadable.
+function Get-RigVersionWarnings {
+    param(
+        [Parameter(Mandatory)][string]$TowerGamePath,
+        [object[]]$Runs
+    )
+    $warnings = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $towerGame = $null
+    $towerModules = @{}
+    $cache = @{}   # shared tower workshop index: scanned at most once per job
+    foreach ($run in @($Runs | Where-Object { $null -ne $_ })) {
+        $gameVersion = if ($run.PSObject.Properties.Name -contains 'gameVersion') { $run.gameVersion } else { $null }
+        if ($gameVersion -is [string] -and $gameVersion -ne '' -and $seen.Add("game|$gameVersion")) {
+            if ($null -eq $towerGame) { $towerGame = Get-RigTowerGameVersion -TowerGamePath $TowerGamePath }
+            if ($gameVersion -cne $towerGame) { $warnings.Add("WARN version differs: game tower $towerGame, .20 $gameVersion") }
+        }
+        $modules = if ($run.PSObject.Properties.Name -contains 'moduleVersions') { @($run.moduleVersions) } else { @() }
+        foreach ($m in $modules) {
+            if ($m -isnot [System.Management.Automation.PSCustomObject]) { continue }
+            $id = $m.id
+            $version = $m.version
+            if ($id -isnot [string] -or $id -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*\z') { continue }
+            if ($m.source -notin 'game', 'workshop') { continue }
+            if ($version -isnot [string] -or $version -eq '') { continue }
+            if (-not $seen.Add("module|$($m.source)|$id|$version")) { continue }
+            $lookupKey = "$($m.source)|$id"
+            if (-not $towerModules.ContainsKey($lookupKey)) {
+                $towerModules[$lookupKey] = Get-RigTowerModuleVersion -TowerGamePath $TowerGamePath -ModuleId $id -Source $m.source -Cache $cache
+                if ($cache.ContainsKey('WorkshopIndex') -and $cache['WorkshopIndex'].Duplicates -contains $id -and $seen.Add("dup|$id")) {
+                    $warnings.Add("WARN duplicate workshop id $id on tower")
+                }
+            }
+            $tower = $towerModules[$lookupKey]
+            if ($null -eq $tower) { $warnings.Add("WARN version differs: $id tower missing, .20 $version") }
+            elseif ($tower -eq '') { $warnings.Add("WARN version differs: $id tower unknown, .20 $version") }
+            elseif ($tower -cne $version) { $warnings.Add("WARN version differs: $id tower $tower, .20 $version") }
+        }
+    }
+    $warnings.ToArray()   # callers wrap in @(): zero or one warning must not collapse
 }
 
 # Exit code of one finished job. Per run: the exitClass maps to 0/1/2/3 (see below); additionally a scenario
@@ -378,6 +521,7 @@ function Publish-RigResult {
         [Parameter(Mandatory)][string]$ResultDir,
         [Parameter(Mandatory)][string]$JobId,
         [Parameter(Mandatory)][int]$Days,
+        [string]$TowerGamePath,   # when set, versions reported by the agent are compared with the tower (warnings only)
         [switch]$ForceTimeout
     )
     $doneFile = Join-Path $ResultDir 'done.json'
@@ -406,6 +550,7 @@ function Publish-RigResult {
         $daysReached = $rr.DaysReached
 
         $duration = $null
+        $ar = $null
         $agentRun = Join-Path $runDir 'agent-run.json'
         if (Test-Path -LiteralPath $agentRun) {
             try {
@@ -413,10 +558,17 @@ function Publish-RigResult {
                 $duration = ([datetime]$ar.endedUtc) - ([datetime]$ar.startedUtc)
             } catch { $duration = $null }
         }
+        # .20 versions (agent >= version-reporting): absent in older agents = $null
+        $arProps = if ($ar -is [System.Management.Automation.PSCustomObject]) { $ar.PSObject.Properties.Name } else { @() }
+        $gameVersion = if ($arProps -contains 'gameVersion') { $ar.gameVersion } else { $null }
+        # Explicit assignment: `$x = if (...) { @(...) }` would unroll 0 elements to $null and 1 to a scalar (not a JSON array).
+        $moduleVersions = $null
+        if ($arProps -contains 'moduleVersions' -and $null -ne $ar.moduleVersions) { $moduleVersions = @($ar.moduleVersions) }
 
         $runs += [pscustomobject]@{
             runId = $runId; kind = 'soak'; exitClass = [string]$dr.exitClass; daysReached = $daysReached; result = $rr.Result
             scenarioStatuses = @($rr.Scenarios | ForEach-Object { $_.Status })
+            gameVersion = $gameVersion; moduleVersions = $moduleVersions
         }
         # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario
         $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } else { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) }
@@ -427,14 +579,26 @@ function Publish-RigResult {
     }
     $lines | ForEach-Object { Write-RigMessage $_ }
 
+    $versionWarnings = @()
+    if (-not [string]::IsNullOrWhiteSpace($TowerGamePath)) {
+        try { $versionWarnings = @(Get-RigVersionWarnings -TowerGamePath $TowerGamePath -Runs $runs) } catch {
+            Write-RigMessage "WARN version check skipped: $($_.Exception.Message)"
+        }
+    }
+    $versionWarnings | ForEach-Object { Write-RigMessage $_ }
+
     $code = Resolve-RigExitCode -DoneStatus $doneStatus -Runs $runs -Days $Days -ForceTimeout:$ForceTimeout
     Write-RigJsonFile -Path (Join-Path $ResultDir 'job-result.json') -InputObject ([ordered]@{
             jobId    = $JobId
             status   = if ($doneStatus) { $doneStatus } else { $null }
             exitCode = $code
             runs     = @($runs | ForEach-Object {
-                    [ordered]@{ runId = $_.runId; exitClass = $_.exitClass; result = $_.result }
+                    [ordered]@{
+                        runId = $_.runId; exitClass = $_.exitClass; result = $_.result
+                        gameVersion = $_.gameVersion; moduleVersions = $_.moduleVersions
+                    }
                 })
+            versionWarnings = $versionWarnings
         })
     $code
 }
@@ -474,6 +638,15 @@ function Start-TestRigJob {
             if (-not $WorkspaceRoot) { $WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
         }
 
+        # Game version the job expects: the tower install's Version.xml (unreadable = abort before anything is built or published).
+        $towerGamePath = [string]$target.towerGamePath
+        $expectedGameVersion = $null
+        if ([string]::IsNullOrWhiteSpace($towerGamePath)) {
+            Write-RigMessage "WARN towerGamePath is not configured: game version and module versions not checked."
+        } else {
+            $expectedGameVersion = Get-RigTowerGameVersion -TowerGamePath $towerGamePath
+        }
+
         $open = @(Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action { Get-JobState -Target $target -OpenJobs })
         if ($open.Count -gt 0) {
             Write-RigMessage "ERROR: job '$($open -join ', ')' is still open on the test PC. Refusing to publish (clean up manually if it is stuck)."
@@ -496,7 +669,7 @@ function Start-TestRigJob {
         $pkg = New-RigPackage -PackageFrom $PackageFrom -ZipPath (Join-Path $jobDir 'package.zip')
         $manifest = New-RigJobManifest -JobId $jobId -CreatedUtc ([datetime]::UtcNow) -PackageSha256 $pkg.Sha256 `
             -Seed $Seed -Days $Days -Mode $Mode -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes `
-            -Repos $repos -Harness $Harness
+            -Repos $repos -Harness $Harness -ExpectedGameVersion $expectedGameVersion
         Write-RigJsonFile -Path (Join-Path $jobDir 'job.json') -InputObject $manifest
 
         Publish-Job -Target $target -JobId $jobId -JobDirectory $jobDir
@@ -525,7 +698,7 @@ function Start-TestRigJob {
         $localDir = Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action {
             Receive-JobResult -Target $target -JobId $jobId -DestinationRoot (Join-Path $OutRoot 'results')
         }
-        return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -ForceTimeout:$forceTimeout)
+        return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -TowerGamePath $towerGamePath -ForceTimeout:$forceTimeout)
     } catch {
         Write-RigMessage "ERROR: $($_.Exception.Message)"
         return 1
