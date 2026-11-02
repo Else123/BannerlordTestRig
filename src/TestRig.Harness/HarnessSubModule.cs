@@ -83,6 +83,10 @@ namespace TestRig.Harness
         private HarnessAction _lastMapAction = HarnessAction.None;
         private int _speedChangesTraced;
         private int _inquiriesClosedTraced;
+        private int _timeStopBlockedTraced;
+        private bool _timeStopBlocked;
+        private bool? _timeRunLogged;
+        private int _scenariosFinishedWritten;
 
         private string _harnessDirectory;
         private RunConfig _config;
@@ -128,19 +132,77 @@ namespace TestRig.Harness
             try
             {
                 // Also called when the game returns to the main menu after EndGame: arm only once.
-                if (_config == null || _run != null)
+                if (_config == null || _run != null || _configError != null)
                 {
                     return;
                 }
 
                 _clock.Start();
-                _run = new HarnessRun(_config, RealSeconds);
+                if (_config.Scenarios.Count == 0)
+                {
+                    _run = new HarnessRun(_config, RealSeconds);
+                }
+                else
+                {
+                    ScenarioRunner runner = PrepareScenarios();
+                    if (runner == null)
+                    {
+                        return;
+                    }
+
+                    _run = new HarnessRun(_config, RealSeconds, runner);
+                }
+
                 Log("Armed, phase " + _run.Phase);
             }
             catch (Exception e)
             {
                 LogError("OnInitialState", e);
             }
+        }
+
+        // Discovery runs here, not in OnSubModuleLoad: by the initial state every module's assemblies
+        // are loaded. Any failure is a config error, so the process quits on the next tick instead of
+        // idling until the runner's hard timeout.
+        private ScenarioRunner PrepareScenarios()
+        {
+            try
+            {
+                ScenarioDiscoveryResult discovery = ScenarioDiscovery.Discover(AppDomain.CurrentDomain.GetAssemblies());
+                foreach (string note in discovery.Notes)
+                {
+                    Log("Scenario discovery: " + OneLine(note));
+                }
+
+                foreach (IScenario scenario in discovery.Scenarios)
+                {
+                    Log("Scenario discovered: " + scenario.Id + " (" + scenario.GetType().FullName
+                        + ", assembly " + scenario.GetType().Assembly.GetName().Name + ")");
+                }
+
+                Log("Scenario discovery: " + discovery.Scenarios.Count + " found, requested " + string.Join(",", _config.Scenarios));
+
+                ScenarioResolution resolution = ScenarioRunner.Resolve(_config.Scenarios, discovery.Scenarios);
+                if (!resolution.IsValid)
+                {
+                    FailScenarioConfig(discovery.WithNotes(resolution.Error));
+                    return null;
+                }
+
+                return new ScenarioRunner(resolution.Scenarios, m => Log(OneLine(m)));
+            }
+            catch (Exception e)
+            {
+                FailScenarioConfig("scenario discovery threw " + e.GetType().Name + ": " + e.Message);
+                return null;
+            }
+        }
+
+        private void FailScenarioConfig(string error)
+        {
+            _configError = error;
+            Log("Invalid scenarios (config:" + OneLine(error) + "); quitting on the next tick");
+            WriteResult(RunResult.ForConfigError(error, _modules, _config.Scenarios));
         }
 
         protected override void InitializeGameStarter(Game game, IGameStarter gameStarterObject)
@@ -327,6 +389,7 @@ namespace TestRig.Harness
             HarnessPhase before = _run.Phase;
             int mapEventsBefore = _run.PlayerMapEvents;
             HarnessAction action = _run.Tick(observation);
+            RecordFinishedScenarios(action, now);
             if (_run.Phase != before)
             {
                 Log("Phase " + before + " -> " + _run.Phase + " (action " + action
@@ -400,7 +463,16 @@ namespace TestRig.Harness
                     break;
 
                 case HarnessAction.KeepRunning:
-                    KeepTimeRunning();
+                    LogTimeTransition();
+                    if (_run.TimeShouldRun)
+                    {
+                        KeepTimeRunning();
+                    }
+                    else
+                    {
+                        KeepTimeStopped();
+                    }
+
                     break;
 
                 case HarnessAction.RequestEndGame:
@@ -459,6 +531,64 @@ namespace TestRig.Harness
                     + " -> " + campaign.SpeedUpMultiplier.ToString(CultureInfo.InvariantCulture)
                     + ", timeLock=" + campaign.TimeControlModeLock
                     + ", mapScreen=" + MapScreenProbe.Describe());
+            }
+        }
+
+        // Scenario mode between Days(n) steps. Stop makes Campaign.TickMapTime advance by 0; re-asserted
+        // every tick because menus, hotkeys and behaviours set other modes. The setter is a no-op while
+        // TimeControlModeLock is set; that is only reported, the lock is not overridden.
+        private void KeepTimeStopped()
+        {
+            CloseInquiry();
+
+            Campaign campaign = Campaign.Current;
+            if (campaign == null)
+            {
+                return;
+            }
+
+            campaign.TimeControlMode = CampaignTimeControlMode.Stop;
+
+            bool stopped = campaign.TimeControlMode == CampaignTimeControlMode.Stop;
+            if (!stopped && !_timeStopBlocked && _timeStopBlockedTraced < HarnessEffectsToTrace)
+            {
+                _timeStopBlockedTraced++;
+                Log("KeepStopped: time could not be stopped, timeControl=" + campaign.TimeControlMode
+                    + ", timeLock=" + campaign.TimeControlModeLock);
+            }
+
+            _timeStopBlocked = !stopped;
+        }
+
+        // One line per change between running and stopped time, not per tick.
+        private void LogTimeTransition()
+        {
+            bool shouldRun = _run.TimeShouldRun;
+            if (_timeRunLogged.HasValue && _timeRunLogged.Value == shouldRun)
+            {
+                return;
+            }
+
+            _timeRunLogged = shouldRun;
+            Log(shouldRun
+                ? "Time: run (" + CampaignTimeControlMode.UnstoppableFastForward + ", speed "
+                    + SpeedUpMultiplier.ToString(CultureInfo.InvariantCulture) + ")"
+                : "Time: stop (" + CampaignTimeControlMode.Stop + ")");
+        }
+
+        // run-result.json after every ended scenario; the final actions write it themselves.
+        private void RecordFinishedScenarios(HarnessAction action, double now)
+        {
+            int finished = _run.ScenariosFinished;
+            if (finished == _scenariosFinishedWritten)
+            {
+                return;
+            }
+
+            _scenariosFinishedWritten = finished;
+            if (action != HarnessAction.RequestEndGame && action != HarnessAction.QuitProcess)
+            {
+                WriteResult(BuildResult(now));
             }
         }
 

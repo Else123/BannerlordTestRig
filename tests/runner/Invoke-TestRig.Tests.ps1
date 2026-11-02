@@ -232,6 +232,21 @@ Describe 'Resolve-RigExitCode' {
         Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @('Passed', 'Weird', 'Failed')) | Should Be 1
         Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScRun2 @('Passed', 'Skipped', 'Timeout')) | Should Be 0
     }
+    It 'kind scenarios + Completed: every requested id must be reported and not Skipped, else 1' {
+        function ScKind($ids, $st, $req) {
+            [pscustomobject]@{ exitClass = 'Completed'; kind = 'scenarios'; daysReached = $null; scenarioIds = @($ids); scenarioStatuses = @($st); requestedScenarios = @($req) }
+        }
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScKind 'a' 'Passed' 'a') | Should Be 0
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScKind @('a', 'b') @('Passed', 'Passed') @('a', 'b')) | Should Be 0
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScKind @() @() 'a') | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScKind 'a' 'Skipped' 'a') | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScKind 'a' 'Passed' @('a', 'b')) | Should Be 1
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @(ScKind 'a' 'Failed' 'a') | Should Be 2
+    }
+    It 'kind scenarios + not Completed keeps its exitClass code (no extra rig error)' {
+        $r = [pscustomobject]@{ exitClass = 'NotCompleted'; kind = 'scenarios'; daysReached = $null; scenarioIds = @(); scenarioStatuses = @(); requestedScenarios = @('a') }
+        Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @($r) | Should Be 2
+    }
     It 'completed with zero runs is an infrastructure error' {
         Resolve-RigExitCode -DoneStatus completed -Days 1 -Runs @() | Should Be 1
     }
@@ -247,6 +262,11 @@ Describe 'Format-RigRunLine' {
         $l | Should Match '3/3'
         $l | Should Match '12m30s'
         $l | Should Match 'out\\results\\x\\r1'
+    }
+    It 'shows - instead of reached/days for RunKind scenarios' {
+        $l = Format-RigRunLine -RunId r1 -Kind SM-x -RunKind scenarios -Status Passed -DaysReached $null -Days 1 -ExitClass Completed -Duration $null -Path 'p'
+        $l | Should Not Match '/1'
+        $l | Should Match 'Passed\s+-\s'
     }
     It 'shows ? for unknown values' {
         $l = Format-RigRunLine -RunId r1 -Kind soak -Status $null -DaysReached $null -Days 3 -ExitClass SetupError -Duration $null -Path 'p'

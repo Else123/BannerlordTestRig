@@ -76,6 +76,7 @@ namespace TestRig.Harness.Logic
             foreach (CheckResult check in result.Checks)
             {
                 json.BeginObject();
+                json.Name("scenario").String(check.Scenario);
                 json.Name("name").String(check.Name);
                 json.Name("expected").String(check.Expected);
                 json.Name("actual").String(check.Actual);

@@ -474,6 +474,32 @@ function Test-IsNumber {
     return ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal])
 }
 
+function Test-RunKindSchema {
+    # kind is 'soak' or 'scenarios'. A scenarios run needs the TestRig harness and a non-empty scenarios array of
+    # unique ids ([A-Za-z0-9._-]+: they are written to a comma-separated run.cfg line); a soak run has none.
+    param($Run)
+    $errs = @()
+    $id = "Run $($Run.runId)"
+    $hasScenarios = $Run.PSObject.Properties.Name -contains 'scenarios'
+    if ($Run.kind -isnot [string] -or $Run.kind -eq '') { return $errs }   # reported as required by the caller
+    if ($Run.kind -ceq 'soak') {
+        if ($hasScenarios) { $errs += "${id}: 'scenarios' is only allowed for kind 'scenarios'." }
+        return $errs
+    }
+    if ($Run.kind -cne 'scenarios') { return @("${id}: unknown kind '$($Run.kind)' (allowed: soak, scenarios).") }
+    if ($Run.harness -ne 'TestRig') { $errs += "${id}: kind 'scenarios' needs the TestRig harness." }
+    $list = $null
+    if ($hasScenarios) { $list = $Run.scenarios }   # not `$x = if`: that unrolls a one-element array to a scalar
+    if ($list -isnot [System.Array] -or $list.Count -eq 0) { return @($errs + "${id}: 'scenarios' must be a non-empty array of scenario ids.") }
+    $seenIds = @{}
+    foreach ($sid in $list) {
+        if ($sid -isnot [string] -or $sid -cnotmatch '\A[A-Za-z0-9._-]+\z') { $errs += "${id}: invalid scenario id '$sid' (allowed: letters, digits, '.', '_', '-')."; continue }
+        if ($seenIds.ContainsKey($sid)) { $errs += "${id}: duplicate scenario id '$sid'." }
+        $seenIds[$sid] = $true
+    }
+    return $errs
+}
+
 function Test-JobSchema {
     # Returns an array of error strings (empty = valid).
     param($Job, [string]$FolderName)
@@ -503,6 +529,7 @@ function Test-JobSchema {
         foreach ($f in @('kind', 'harness', 'mode')) {
             if ($run.$f -isnot [string] -or $run.$f -eq '') { $errors += "Run $($run.runId): '$f' is required." }
         }
+        $errors += @(Test-RunKindSchema $run)
         if (-not (Test-IsNumber $run.seed)) { $errors += "Run $($run.runId): 'seed' must be a number." }
         foreach ($f in $script:RunNumberLimits.Keys) {
             $max = $script:RunNumberLimits[$f]
@@ -928,7 +955,9 @@ function Get-HarnessDir {
 }
 
 function Get-RunCfgText {
-    # ownAssemblies is written only when given: the CoherentWarAI harness rejects unknown keys.
+    # ownAssemblies is written only when given: the CoherentWarAI harness rejects unknown keys. The same holds
+    # for scenarios: written only for the TestRig harness with kind 'scenarios' (the job schema guarantees ids
+    # without ',' or line breaks).
     param($Run, [string[]]$OwnAssemblies = @())
     $lines = @(
         ('seed=' + [System.Convert]::ToString($Run.seed, $script:Invariant)),
@@ -937,13 +966,17 @@ function Get-RunCfgText {
         ('stallMinutes=' + [System.Convert]::ToString($Run.stallMinutes, $script:Invariant)),
         ('budgetMinutes=' + [System.Convert]::ToString($Run.budgetMinutes, $script:Invariant))
     )
+    if ($Run.kind -ceq 'scenarios' -and $Run.harness -eq 'TestRig' -and @($Run.scenarios).Count -gt 0) {
+        $lines += ('scenarios=' + (@($Run.scenarios) -join ','))
+    }
     if (@($OwnAssemblies).Count -gt 0) { $lines += ('ownAssemblies=' + (@($OwnAssemblies) -join ',')) }
     return ($lines -join "`n") + "`n"
 }
 
 function Get-OwnAssemblyNames {
-    # Simple DLL names (no .dll) of every non-harness module, from its installed SubModule.xml:
-    # SubModules/SubModule/DLLName/@value. Order kept, case-insensitive de-duplication.
+    # Simple DLL names (no .dll) of every module that is neither a harness nor a scenario module, from its installed
+    # SubModule.xml: SubModules/SubModule/DLLName/@value. A scenario module is one whose SubModule.xml lists a
+    # harness module under DependedModules/DependedModule/@Id. Order kept, case-insensitive de-duplication.
     # A module whose SubModule.xml is missing or unparseable is skipped and logged.
     param([string]$ModulesDir, [string[]]$ModuleIds, [string[]]$HarnessModuleIds)
     $names = New-Object System.Collections.Generic.List[string]
@@ -955,6 +988,11 @@ function Get-OwnAssemblyNames {
             $doc = New-Object System.Xml.XmlDocument
             $doc.XmlResolver = $null
             $doc.LoadXml((Read-Utf8Text $xmlPath))
+            $dependsOnHarness = $false
+            foreach ($dep in $doc.SelectNodes('/Module/DependedModules/DependedModule/@Id')) {
+                if (@($HarnessModuleIds) -contains $dep.Value) { $dependsOnHarness = $true }
+            }
+            if ($dependsOnHarness) { continue }
             foreach ($node in $doc.SelectNodes('/Module/SubModules/SubModule/DLLName/@value')) {
                 $name = [System.Text.RegularExpressions.Regex]::Replace($node.Value.Trim(), '\.dll\z', '', 'IgnoreCase')
                 if ($name -eq '') { continue }
@@ -1473,8 +1511,10 @@ function Invoke-Run {
         }
         $ownAssemblies = @()
         if ([string]$Run.harness -eq 'TestRig') {
+            # Only package modules that this job loads (job.modules); game and workshop modules are not own code.
+            $loadedPackageModules = @($Modules | Where-Object { @($PackageModuleIds) -contains $_ })
             $ownAssemblies = @(Get-OwnAssemblyNames -ModulesDir (Get-ModulesDir $Config) `
-                -ModuleIds $PackageModuleIds -HarnessModuleIds @($script:Harnesses.Values | ForEach-Object { $_.Module }))
+                -ModuleIds $loadedPackageModules -HarnessModuleIds @($script:Harnesses.Values | ForEach-Object { $_.Module }))
         }
         $runCfgTouched = $true   # before the write: a partial file must be deleted too
         Write-Utf8Text $runCfgPath (Get-RunCfgText $Run -OwnAssemblies $ownAssemblies) $false

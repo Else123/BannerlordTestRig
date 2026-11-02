@@ -27,7 +27,7 @@ namespace TestRig.Harness.Tests
                 modules: new[] { new ModuleEntry("Native", "v1.4.8"), new ModuleEntry("SandBox", "v1.4.8") },
                 exceptions: new ExceptionSummary(7, 2, 1, new[] { new ExceptionKeyCount("k1", 3), new ExceptionKeyCount("k2", 1) }),
                 scenarios: new[] { new ScenarioResult("soak", ScenarioStatus.Passed, 25) },
-                checks: new[] { new CheckResult("daysReached", ">= 1", "1", true) });
+                checks: new[] { new CheckResult("soak", "daysReached", ">= 1", "1", true) });
         }
 
         private static void WithCulture(string name, Action action)
@@ -95,6 +95,7 @@ namespace TestRig.Harness.Tests
                 "  ],\n" +
                 "  \"checks\": [\n" +
                 "    {\n" +
+                "      \"scenario\": \"soak\",\n" +
                 "      \"name\": \"daysReached\",\n" +
                 "      \"expected\": \">= 1\",\n" +
                 "      \"actual\": \"1\",\n" +
@@ -184,6 +185,34 @@ namespace TestRig.Harness.Tests
         }
 
         [Fact]
+        public void ForConfigError_WithRequestedScenarios_ListsEachOnceAsErrorInRequestedOrder()
+        {
+            RunResult result = RunResult.ForConfigError("unknown scenario id 'b'", NoModules, new[] { "b", "a", "b" });
+
+            Assert.Equal(new[] { "b", "a" }, result.Scenarios.Select(s => s.Id));
+            Assert.All(result.Scenarios, s => Assert.Equal(ScenarioStatus.Error, s.Status));
+            Assert.All(result.Scenarios, s => Assert.Null(s.Seconds));
+            Assert.Empty(result.Checks);
+            Assert.Equal("config:unknown scenario id 'b'", result.Reason);
+        }
+
+        [Fact]
+        public void ForConfigError_WithNoRequestedScenarios_ListsTheSoakError()
+        {
+            RunResult result = RunResult.ForConfigError("x", NoModules, new string[0]);
+
+            ScenarioResult only = Assert.Single(result.Scenarios);
+            Assert.Equal(RunResult.SoakScenarioId, only.Id);
+            Assert.Equal(ScenarioStatus.Error, only.Status);
+        }
+
+        [Fact]
+        public void ForConfigError_NullRequestedScenarios_Throws()
+        {
+            Assert.Throws<ArgumentNullException>(() => RunResult.ForConfigError("x", NoModules, null));
+        }
+
+        [Fact]
         public void Write_EscapesQuoteBackslashAndControlCharacters()
         {
             string json = RunResultWriter.Write(SampleResult(reason: "a\"b\\c\nd\te\u0001f\u001f"));
@@ -208,7 +237,7 @@ namespace TestRig.Harness.Tests
                 new[] { new ModuleEntry(hostile, hostile) },
                 new ExceptionSummary(1, 0, 0, new[] { new ExceptionKeyCount(hostile, 1) }),
                 new[] { new ScenarioResult(hostile, ScenarioStatus.Error, null) },
-                new[] { new CheckResult(hostile, hostile, hostile, false) });
+                new[] { new CheckResult(hostile, hostile, hostile, hostile, false) });
 
             using (JsonDocument doc = JsonDocument.Parse(RunResultWriter.Write(result)))
             {
@@ -217,6 +246,7 @@ namespace TestRig.Harness.Tests
                 Assert.Equal(hostile, root.GetProperty("mode").GetString());
                 Assert.Equal(hostile, root.GetProperty("modules")[0].GetProperty("version").GetString());
                 Assert.Equal(hostile, root.GetProperty("exceptions").GetProperty("top")[0].GetProperty("key").GetString());
+                Assert.Equal(hostile, root.GetProperty("checks")[0].GetProperty("scenario").GetString());
                 Assert.Equal(hostile, root.GetProperty("checks")[0].GetProperty("actual").GetString());
                 Assert.Equal(JsonValueKind.False, root.GetProperty("checks")[0].GetProperty("passed").ValueKind);
             }
@@ -295,6 +325,87 @@ namespace TestRig.Harness.Tests
                 new ScenarioResult[0], new CheckResult[0]);
 
             Assert.Contains("\"status\": \"Running\",", RunResultWriter.Write(result));
+        }
+
+        // ------------------------------------------------- scenario runner fields
+
+        private static RunResult ScenarioRecord(IReadOnlyList<ScenarioResult> scenarios, IReadOnlyList<CheckResult> checks)
+        {
+            return new RunResult(
+                RunStatus.Aborted, "tainted:b", 1, "NoDlc", 1, 0, 9, 0, 0,
+                NoModules, ExceptionSummary.Empty, scenarios, checks);
+        }
+
+        [Fact]
+        public void Write_CheckFieldOrder_StartsWithScenario()
+        {
+            using (JsonDocument doc = JsonDocument.Parse(RunResultWriter.Write(SampleResult())))
+            {
+                string[] names = doc.RootElement.GetProperty("checks")[0].EnumerateObject().Select(p => p.Name).ToArray();
+
+                Assert.Equal(new[] { "scenario", "name", "expected", "actual", "passed" }, names);
+            }
+        }
+
+        [Fact]
+        public void Write_ChecksOfSeveralScenarios_CarryTheirScenarioId()
+        {
+            RunResult result = ScenarioRecord(
+                new[] { new ScenarioResult("a", ScenarioStatus.Passed, 3), new ScenarioResult("b", ScenarioStatus.Failed, 4) },
+                new[] { new CheckResult("a", "c1", "1", "1", true), new CheckResult("b", "c2", "2", "3", false) });
+
+            using (JsonDocument doc = JsonDocument.Parse(RunResultWriter.Write(result)))
+            {
+                JsonElement checks = doc.RootElement.GetProperty("checks");
+                Assert.Equal("a", checks[0].GetProperty("scenario").GetString());
+                Assert.Equal("c1", checks[0].GetProperty("name").GetString());
+                Assert.Equal("b", checks[1].GetProperty("scenario").GetString());
+                Assert.Equal(JsonValueKind.False, checks[1].GetProperty("passed").ValueKind);
+            }
+        }
+
+        [Fact]
+        public void Write_NullCheckScenario_IsJsonNull()
+        {
+            RunResult result = ScenarioRecord(new ScenarioResult[0], new[] { new CheckResult(null, "c", "e", "a", true) });
+
+            Assert.Contains("\"scenario\": null,", RunResultWriter.Write(result));
+        }
+
+        [Fact]
+        public void Write_SkippedStatus_IsSerializedByName()
+        {
+            RunResult result = ScenarioRecord(
+                new[] { new ScenarioResult("a", ScenarioStatus.Timeout, 300), new ScenarioResult("b", ScenarioStatus.Skipped, null) },
+                new CheckResult[0]);
+
+            using (JsonDocument doc = JsonDocument.Parse(RunResultWriter.Write(result)))
+            {
+                JsonElement scenarios = doc.RootElement.GetProperty("scenarios");
+                Assert.Equal("Timeout", scenarios[0].GetProperty("status").GetString());
+                Assert.Equal("Skipped", scenarios[1].GetProperty("status").GetString());
+                Assert.Equal(JsonValueKind.Null, scenarios[1].GetProperty("seconds").ValueKind);
+            }
+        }
+
+        [Fact]
+        public void CheckResult_ExposesScenarioId()
+        {
+            var check = new CheckResult("smithing.smelt-then-refine", "smelted", "> 0", "5", true);
+
+            Assert.Equal("smithing.smelt-then-refine", check.Scenario);
+            Assert.Equal("smelted", check.Name);
+            Assert.Equal("> 0", check.Expected);
+            Assert.Equal("5", check.Actual);
+            Assert.True(check.Passed);
+        }
+
+        [Fact]
+        public void ScenarioStatus_KeepsExistingValuesAndAppendsSkipped()
+        {
+            Assert.Equal(
+                new[] { "Passed", "Failed", "Timeout", "Error", "Skipped" },
+                Enum.GetNames(typeof(ScenarioStatus)));
         }
     }
 

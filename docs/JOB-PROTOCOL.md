@@ -85,6 +85,10 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
   before anything is published. `towerGamePath` not configured -> `null` and one
   `WARN towerGamePath is not configured: game version and module versions not checked.` The agent checks
   it in preflight (see "Preflight"): `null` or `""` = not checked.
+- `kind`: `soak` (default shape above) or `scenarios`. A `scenarios` run needs harness `TestRig` and the extra field
+  `runs[].scenarios`: a non-empty JSON array of unique scenario ids matching `^[A-Za-z0-9._-]+$` (also with one
+  element). A `soak` run has no `scenarios` field. Anything else -> job `rejected` (schema check). The agent writes the
+  ids to `run.cfg` (section "`run.cfg`"); the harness runs exactly these scenarios.
 - `harness`: selects the in-game harness; `run.cfg`, the result file and `harness.log` live in its folder
   below `<MyDocuments>\Mount and Blade II Bannerlord\`. Anything else -> run classified `SetupError`.
 
@@ -245,8 +249,11 @@ writes `result.txt` (`key=value` lines, e.g. `status=Completed`, `daysReached=3`
 }
 ```
 
-Unknown values are `null`. Scenario `status`: `Passed` | `Failed` | `Error` | `Timeout` | `Skipped` (`Skipped` is reserved:
-the harness does not produce it yet). `exceptions.total` counts first-chance exceptions in the game process, including
+`checks[].scenario` (optional string, scenario runs): the id of the scenario the check belongs to; checks without it
+belong to the run.
+
+Unknown values are `null`. Scenario `status`: `Passed` | `Failed` | `Error` | `Timeout` | `Skipped` (`Skipped` is produced for
+the scenarios that follow a tainted scenario; the runner treats a Skipped requested scenario as a rig error, see below). `exceptions.total` counts first-chance exceptions in the game process, including
 the harness's own (e.g. a retried file write); `top` lists the most frequent keys (`<type>: <message> @ <site>`, at most
 10000 distinct keys are tracked, later new keys never enter `top`), so its counts add up to at most `total`.
 Exception counting starts when the harness module loads (`OnSubModuleLoad`, once `run.cfg` was read and accepted), by
@@ -274,17 +281,33 @@ deletes `run-result.json`, `run-result.json.tmp`, `result.txt` and `harness.log`
 Runner output: with `run-result.json` one console line per scenario (scenario `id` in the kind column, scenario
 `status` in the status column; a result without scenarios prints one line with `soak` and the run status). With
 `result.txt` one line per run (`soak`, status from the file), unchanged. With `-Suite <name>` the kind column shows
-`<name>-<id>` (e.g. `L1-soak`), also for the fallback lines; the ids in the files stay raw.
+`<name>-<id>` (e.g. `L1-soak`), also for the fallback lines; the ids in the files stay raw. Below the row of a scenario
+the runner prints one indented line per failed check (`passed: false`) whose `checks[].scenario` is that scenario, e.g.
+`    smelted > 0: expected >0, actual 0`; passed checks are not printed. A failed `daysReached` check of a soak run is
+printed the same way (below the `soak` row). Control characters (incl. CR/LF) in `name`/`expected`/`actual` are replaced by a space
+and each field is cut at 200 characters. The kind of the run (`soak` / `scenarios`) comes
+from the suite (`-Suite SM` = `scenarios`); for a `scenarios` run the days column shows `-`. For a `scenarios` run the exit
+code ignores `daysReached`; instead a run with exit class `Completed` must report every scenario id of the run's
+`scenarios` (case-sensitive) and none of them may be `Skipped`, otherwise the exit code is `1` (rig error: nothing, or not
+everything, was checked; this includes a missing, empty or invalid `scenarios` list). A `Failed` scenario is `2`.
 
 ### Runner `-Suite`
 
-`-Suite L1` (the only suite so far) sets harness `TestRig`, mode `WarSails`, seed 1, `days` 30 and the `modules` load
+A suite defines its own mod list. `-Suite L1` sets harness `TestRig`, mode `WarSails`, seed 1, `days` 30 and the `modules` load
 order `Bannerlord.Harmony, Bannerlord.ButterLib, Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore,
 Sandbox, StoryMode, NavalDLC, CoherentWarAI, AutoTraderSpeed, SmithingSuite, CompanionManagementSuite, TestRig.Harness`
 (`NavalDLC` is dropped with `-Mode NoDlc`). Explicit `-Days`, `-Seed`, `-Mode` win over the suite defaults; an explicit
 `-Harness` other than `TestRig` is a usage error (runner exit 1, nothing built or published). `job.json` keeps its
 schema: the suite only shapes `modules` and `runs[0]`, there is no suite key (the agent never sees it). The suite name
 appears in `job-result.json` as job-level `suite` (`"L1"`, `null` without `-Suite`); `scenarios[].id` stays `soak`.
+
+`-Suite SM` (SmithingSuite scenarios) sets harness `TestRig`, mode `WarSails`, seed 1, `days` 1, `kind` `scenarios`,
+`scenarios` `["smithing.smelt-then-refine"]` and the `modules` load order `Bannerlord.Harmony, Bannerlord.ButterLib,
+Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore, Sandbox, StoryMode, NavalDLC, SmithingSuite,
+TestRig.Harness, SmithingSuite.Scenarios` (no CoherentWarAI; the scenario module loads after the harness it references).
+With `-PackageFrom` the package must contain `SmithingSuite`, `TestRig.Harness` and `SmithingSuite.Scenarios`. The
+default build mode builds all seven projects for every job (also for L1), including
+`BannerlordSmithingSuite\tests\InGame\SmithingSuite.Scenarios`.
 
 ### Version warnings (runner)
 
@@ -316,6 +339,10 @@ installed `SubModule.xml`, in order, de-duplicated case-insensitively. A module 
 `SubModule.xml` is skipped (logged); a name that does not match `[A-Za-z0-9_.-]+` (after stripping `.dll`) is skipped
 (logged); no names = no line. The `CoherentWarAI` harness never gets this key (its parser rejects unknown keys).
 
+`scenarios=<comma-separated scenario ids>` - only for harness `TestRig` with run `kind` `scenarios`, taken from
+`runs[].scenarios` (ids contain no `,` or line breaks, see the schema check); soak runs and the `CoherentWarAI`
+harness never get this key. Written after the numeric keys and before `ownAssemblies`.
+
 ## `results\<jobId>\done.json`
 
 ```json
@@ -336,15 +363,16 @@ runs are skipped because the game could not be stopped).
 
 ## Runner exit codes
 
-`0` every run `Completed` and `daysReached >= days` - `1` rig or infrastructure error
+`0` every run `Completed` and `daysReached >= days` (kind `scenarios`: every requested scenario reported and none
+`Skipped`) - `1` rig or infrastructure error
 (`blocked`, `rejected`, `failed`, `SetupError`, `LaunchFailed`, `CleanupFailed`, transport error,
-open job, a scenario with status `Error`) - `2` test failure (`NotCompleted`, `Crashed`, `Completed` with too few days,
+open job, a scenario with status `Error`, a `Completed` scenarios run with a missing or `Skipped` requested scenario) - `2` test failure (`NotCompleted`, `Crashed`, `Completed` with too few days,
 a scenario with status `Failed`) -
 `3` time limit or agent not responding (`HardTimeout`, `Aborted`, done status `aborted`, claim
 timeout, stale heartbeat, overall deadline; the runner aborts at its deadline and, best effort,
 on a stale heartbeat). Precedence:
 1 > 3 > 2 > 0. An unknown `exitClass` or `status` maps to `1`. Scenario statuses (case-insensitive): `Passed`,
-`Timeout` and `Skipped` do not change the code by themselves, `Failed` gives `2`, `Error` and any other value (unknown
+`Timeout` and `Skipped` do not change the code by themselves (except the requested-scenario rule above), `Failed` gives `2`, `Error` and any other value (unknown
 string, empty, `null`, non-string) give `1`.
 
 ## Agent restart

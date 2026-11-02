@@ -32,7 +32,7 @@ param(
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
     [ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode = 'WarSails',
     [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
-    [ValidateSet('L1')][string]$Suite,
+    [ValidateSet('L1', 'SM')][string]$Suite,
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
     [ValidateRange(1, [int]::MaxValue)][int]$BudgetMinutes = 60,
     [ValidateRange(1, [int]::MaxValue)][int]$HardTimeoutMinutes = 20,
@@ -53,15 +53,31 @@ $script:RigHarnessModules = [ordered]@{
     TestRig       = 'TestRig.Harness'
 }
 # Suite id -> fixed settings. Harness is fixed (an explicit conflicting -Harness is a usage error); Mode, Seed
-# and Days are defaults that an explicit parameter overrides. ExtraModules load between CoherentWarAI and the
-# harness module.
+# and Days are defaults that an explicit parameter overrides. A suite defines its own mod list: base modules,
+# CoherentWarAI (only when WithCoherentWarAI), ExtraModules, the harness module, then TailModules (scenario
+# modules, which reference the harness and so load after it). Kind is the run kind: 'soak' or 'scenarios'
+# (then Scenarios = the scenario ids to run).
 $script:RigSuites = @{
     L1 = @{
-        Harness      = 'TestRig'
-        Mode         = 'WarSails'
-        Seed         = 1
-        Days         = 30
-        ExtraModules = @('AutoTraderSpeed', 'SmithingSuite', 'CompanionManagementSuite')
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 30
+        Kind              = 'soak'
+        WithCoherentWarAI = $true
+        ExtraModules      = @('AutoTraderSpeed', 'SmithingSuite', 'CompanionManagementSuite')
+        TailModules       = @()
+    }
+    SM = @{
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 1
+        Kind              = 'scenarios'
+        Scenarios         = @('smithing.smelt-then-refine')
+        WithCoherentWarAI = $false
+        ExtraModules      = @('SmithingSuite')
+        TailModules       = @('SmithingSuite.Scenarios')
     }
 }
 $script:DefaultMsBuildPath = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
@@ -109,9 +125,16 @@ function Get-RigModules {
     )
     $modules = @('Bannerlord.Harmony', 'Bannerlord.ButterLib', 'Bannerlord.UIExtenderEx', 'Bannerlord.MBOptionScreen', 'Native', 'SandBoxCore', 'Sandbox', 'StoryMode')
     if ($Mode -ne 'NoDlc') { $modules += 'NavalDLC' }
-    $extra = @()
-    if ($Suite) { $extra = @($script:RigSuites[$Suite].ExtraModules) }
-    $modules + @('CoherentWarAI') + $extra + @($script:RigHarnessModules[$Harness])
+    if (-not $Suite) { return ($modules + @('CoherentWarAI') + @($script:RigHarnessModules[$Harness])) }
+    $s = $script:RigSuites[$Suite]
+    $core = if ($s.WithCoherentWarAI) { @('CoherentWarAI') } else { @() }
+    $modules + $core + @($s.ExtraModules) + @($script:RigHarnessModules[$Harness]) + @($s.TailModules)
+}
+
+# Run kind of a suite ('soak' without a suite).
+function Get-RigSuiteKind {
+    param([string]$Suite)
+    if ($Suite) { $script:RigSuites[$Suite].Kind } else { 'soak' }
 }
 
 # Applies -Suite to the parameter values. $BoundParameters = names of the parameters given explicitly
@@ -193,6 +216,18 @@ function New-RigJobManifest {
         [string]$Suite,
         [AllowNull()][AllowEmptyString()][string]$ExpectedGameVersion   # tower game version; $null/empty = not checked
     )
+    $run = [ordered]@{
+        runId              = 'r1'
+        kind               = (Get-RigSuiteKind -Suite $Suite)
+        harness            = $Harness
+        seed               = $Seed
+        days               = $Days
+        mode               = $Mode
+        stallMinutes       = $StallMinutes
+        budgetMinutes      = $BudgetMinutes
+        hardTimeoutMinutes = $HardTimeoutMinutes
+    }
+    if ($run.kind -eq 'scenarios') { $run.scenarios = @($script:RigSuites[$Suite].Scenarios) }
     [ordered]@{
         schema              = 1
         jobId               = $JobId
@@ -201,19 +236,7 @@ function New-RigJobManifest {
         package             = [ordered]@{ file = 'package.zip'; sha256 = $PackageSha256 }
         repos               = @($Repos)
         modules             = @(Get-RigModules -Mode $Mode -Harness $Harness -Suite $Suite)
-        runs                = @(
-            [ordered]@{
-                runId              = 'r1'
-                kind               = 'soak'
-                harness            = $Harness
-                seed               = $Seed
-                days               = $Days
-                mode               = $Mode
-                stallMinutes       = $StallMinutes
-                budgetMinutes      = $BudgetMinutes
-                hardTimeoutMinutes = $HardTimeoutMinutes
-            }
-        )
+        runs                = @($run)
     }
 }
 
@@ -244,10 +267,11 @@ function ConvertFrom-RigResultText {
 # Reads the harness result of one run folder: run-result.json (TestRig harness) if present, else
 # result.txt (CoherentWarAI harness). Invalid or unreadable run-result.json = no result (no fallback),
 # so a half-written file is never mixed with an older result.txt.
-# Returns Status, DaysReached, Scenarios (@{ Id; Status } per scenario, JSON only) and Result (for job-result.json).
+# Returns Status, DaysReached, Scenarios (@{ Id; Status } per scenario, JSON only), FailedChecks (@{ Name; Expected;
+# Actual; Scenario } per check with passed=false, JSON only) and Result (for job-result.json).
 function Read-RigRunResult {
     param([Parameter(Mandatory)][string]$RunDir)
-    $info = [ordered]@{ Status = $null; DaysReached = $null; Scenarios = @(); Result = [ordered]@{} }
+    $info = [ordered]@{ Status = $null; DaysReached = $null; Scenarios = @(); FailedChecks = @(); Result = [ordered]@{} }
     $jsonFile = Join-Path $RunDir 'run-result.json'
     $txtFile = Join-Path $RunDir 'result.txt'
     if (Test-Path -LiteralPath $jsonFile) {
@@ -264,6 +288,9 @@ function Read-RigRunResult {
         if ($null -ne $json.daysReached -and [int]::TryParse([string]$json.daysReached, [ref]$parsed)) { $info.DaysReached = $parsed }
         $info.Scenarios = @($json.scenarios | Where-Object { $null -ne $_ } | ForEach-Object {
                 [pscustomobject]@{ Id = [string]$_.id; Status = [string]$_.status }
+            })
+        $info.FailedChecks = @($json.checks | Where-Object { $null -ne $_ -and $_.passed -eq $false } | ForEach-Object {
+                [pscustomobject]@{ Name = [string]$_.name; Expected = [string]$_.expected; Actual = [string]$_.actual; Scenario = [string]$_.scenario }
             })
         return $info
     }
@@ -419,8 +446,26 @@ function Get-RigVersionWarnings {
     $warnings.ToArray()   # callers wrap in @(): zero or one warning must not collapse
 }
 
-# Exit code of one finished job. Per run: the exitClass maps to 0/1/2/3 (see below); additionally a scenario
-# (run-result.json) with status Failed counts as 2; Passed/Timeout/Skipped add nothing; Error and any
+# True when a finished scenario run reported every requested scenario id (case-sensitive) and none is Skipped.
+# Run: scenarioIds / scenarioStatuses (parallel, as reported) and requestedScenarios (from the suite).
+function Test-RigScenariosChecked {
+    param([Parameter(Mandatory)]$Run)
+    $ids = @(if ($null -ne $Run.scenarioIds) { $Run.scenarioIds })
+    $statuses = @(if ($null -ne $Run.scenarioStatuses) { $Run.scenarioStatuses })
+    if ($ids.Count -eq 0) { return $false }
+    foreach ($wanted in @(if ($null -ne $Run.requestedScenarios) { $Run.requestedScenarios })) {
+        $found = $false
+        for ($i = 0; $i -lt $ids.Count; $i++) {
+            if ($ids[$i] -ceq $wanted -and $statuses[$i] -ne 'Skipped') { $found = $true; break }
+        }
+        if (-not $found) { return $false }
+    }
+    $true
+}
+
+# Exit code of one finished job. A run with kind 'scenarios' skips the daysReached rule below; instead a Completed
+# one must report every requested scenario without Skipped (Test-RigScenariosChecked), else 1. Per run: the exitClass maps to 0/1/2/3 (see below); additionally a scenario
+# (run-result.json) with status Failed counts as 2; Passed/Timeout/Skipped add nothing here; Error and any
 # unknown or non-string status count as 1.
 # Across everything: 1 > 3 > 2 > 0, so an Error scenario wins over any other code, and Failed (2) is the weakest.
 function Resolve-RigExitCode {
@@ -440,7 +485,11 @@ function Resolve-RigExitCode {
     foreach ($r in $runList) {
         switch ($r.exitClass) {
             'Completed' {
-                if ($null -eq $r.daysReached -or [int]$r.daysReached -lt $Days) { $codes.Add(2) }
+                # A scenario run ends by its scenarios, not by a day count (its scenarios decide below).
+                if ($r.kind -ne 'scenarios') {
+                    if ($null -eq $r.daysReached -or [int]$r.daysReached -lt $Days) { $codes.Add(2) }
+                }
+                elseif (-not (Test-RigScenariosChecked -Run $r)) { $codes.Add(1) }   # nothing (or not everything) was checked
             }
             { $_ -in 'NotCompleted', 'Crashed' } { $codes.Add(2) }
             { $_ -in 'HardTimeout', 'Aborted' } { $codes.Add(3) }
@@ -460,16 +509,26 @@ function Resolve-RigExitCode {
     0
 }
 
+# Control characters (incl. CR/LF) become a space, the text is capped: run-result.json comes from the tower's game process.
+function Format-RigCheckField {
+    param([string]$Text, [int]$MaxLength = 200)
+    $clean = [regex]::Replace($Text, '\p{Cc}', ' ')
+    if ($clean.Length -gt $MaxLength) { $clean = $clean.Substring(0, $MaxLength) }
+    $clean
+}
+
 function Format-RigRunLine {
     param(
         [string]$RunId, [string]$Kind, [string]$Status,
         $DaysReached, [int]$Days, [string]$ExitClass,
-        $Duration, [string]$Path
+        $Duration, [string]$Path,
+        [string]$RunKind   # 'scenarios': days are not part of the verdict, the column shows -
     )
     $st = if ($Status) { $Status } else { '?' }
     $reached = if ($null -ne $DaysReached) { [string]$DaysReached } else { '?' }
+    $daysCell = if ($RunKind -eq 'scenarios') { '-' } else { "$reached/$Days" }
     $dur = if ($null -ne $Duration) { '{0}m{1:00}s' -f [int][math]::Floor($Duration.TotalMinutes), $Duration.Seconds } else { '?' }
-    '{0,-6} {1,-6} {2,-12} {3,-7} {4,-13} {5,-8} {6}' -f $RunId, $Kind, $st, "$reached/$Days", $ExitClass, $dur, $Path
+    '{0,-6} {1,-6} {2,-12} {3,-7} {4,-13} {5,-8} {6}' -f $RunId, $Kind, $st, $daysCell, $ExitClass, $dur, $Path
 }
 
 # Runs $Action, retrying on any error (transient transport problems). Backoff: DelaySeconds * attempt.
@@ -585,6 +644,8 @@ function Publish-RigResult {
 
     $runs = @()
     $lines = @()
+    $runKind = Get-RigSuiteKind -Suite $Suite   # the job's run kind follows from its suite (jobs carry one suite)
+    $requestedScenarios = @(if ($runKind -eq 'scenarios') { $script:RigSuites[$Suite].Scenarios })
     foreach ($dr in $doneRuns) {
         $runId = [string]$dr.runId
         if ($runId -cnotmatch '^[A-Za-z0-9_-]+\z') { throw "Invalid runId in done.json: '$runId'" }
@@ -610,16 +671,22 @@ function Publish-RigResult {
         if ($arProps -contains 'moduleVersions' -and $null -ne $ar.moduleVersions) { $moduleVersions = @($ar.moduleVersions) }
 
         $runs += [pscustomobject]@{
-            runId = $runId; kind = 'soak'; exitClass = [string]$dr.exitClass; daysReached = $daysReached; result = $rr.Result
+            runId = $runId; kind = $runKind; exitClass = [string]$dr.exitClass; daysReached = $daysReached; result = $rr.Result
             scenarioStatuses = @($rr.Scenarios | ForEach-Object { $_.Status })
+            scenarioIds = @($rr.Scenarios | ForEach-Object { $_.Id })
+            requestedScenarios = $requestedScenarios
             gameVersion = $gameVersion; moduleVersions = $moduleVersions
         }
-        # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario
+        # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario, each followed by
+        # one indented line per failed check of that scenario
         $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } else { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) }
         foreach ($sc in $lineSources) {
             $kind = if ($Suite) { "$Suite-$($sc.Id)" } else { $sc.Id }
             $lines += Format-RigRunLine -RunId $runId -Kind $kind -Status $sc.Status -DaysReached $daysReached -Days $Days `
-                -ExitClass ([string]$dr.exitClass) -Duration $duration -Path $runDir
+                -ExitClass ([string]$dr.exitClass) -Duration $duration -Path $runDir -RunKind $runKind
+            foreach ($check in @($rr.FailedChecks | Where-Object { $_.Scenario -ceq $sc.Id })) {
+                $lines += '    {0}: expected {1}, actual {2}' -f (Format-RigCheckField $check.Name), (Format-RigCheckField $check.Expected), (Format-RigCheckField $check.Actual)
+            }
         }
     }
     $lines | ForEach-Object { Write-RigMessage $_ }
@@ -677,7 +744,7 @@ function Start-TestRigJob {
                 throw "Package source '$PackageFrom' has no Modules\$harnessModule (needed by -Harness $Harness)."
             }
             if ($Suite) {
-                foreach ($suiteModule in $script:RigSuites[$Suite].ExtraModules) {
+                foreach ($suiteModule in @($script:RigSuites[$Suite].ExtraModules) + @($script:RigSuites[$Suite].TailModules)) {
                     if (-not (Test-Path -LiteralPath (Join-Path $PackageFrom "Modules\$suiteModule") -PathType Container)) {
                         throw "Package source '$PackageFrom' has no Modules\$suiteModule (needed by -Suite $Suite)."
                     }

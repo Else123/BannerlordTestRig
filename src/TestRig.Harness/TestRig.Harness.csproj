@@ -88,6 +88,9 @@
     <Compile Include="Logic\OwnClassificationCache.cs" />
     <Compile Include="Logic\RunResult.cs" />
     <Compile Include="Logic\RunResultWriter.cs" />
+    <Compile Include="Logic\Scenario.cs" />
+    <Compile Include="Logic\ScenarioDiscovery.cs" />
+    <Compile Include="Logic\ScenarioRunner.cs" />
     <Compile Include="HarnessSubModule.cs" />
     <Compile Include="SeededSandBoxGameManager.cs" />
     <Compile Include="CharacterCreationDriver.cs" />

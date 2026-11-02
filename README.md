@@ -20,7 +20,7 @@ not implemented yet; the layout below is the plan.
 
 ```powershell
 copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key, towerGamePath
-runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the six projects, packs them, publishes the job
+runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects, packs them, publishes the job
 runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait   # diagnosis: skip the build
 ```
 
@@ -33,7 +33,13 @@ SmithingSuite, CompanionManagementSuite, TestRig.Harness. Without an explicit `-
 `TestRig` is a usage error (exit 1 before anything is built or published). With `-PackageFrom` the package must contain
 all suite modules. The result rows show `<Suite>-<scenario id>` (e.g. `L1-soak Passed 3/3`). Without `-Suite` nothing changes.
 
-The build (default mode) compiles the six projects with MSBuild into `out\stage\<jobId>\Modules`
+`-Suite SM` runs the SmithingSuite scenario `smithing.smelt-then-refine` (`kind` `scenarios`): harness `TestRig`,
+mode `WarSails`, seed 1, 1 day, and only the base modules, SmithingSuite, TestRig.Harness and SmithingSuite.Scenarios
+(no CoherentWarAI). With `-PackageFrom` the package must contain those three modules. Failed checks are printed below
+the scenario row; the exit code is 0 (the scenario Passed), 2 (Failed) or 1 (rig error: the scenario is missing from the
+result or Skipped) regardless of days reached.
+
+The build (default mode) compiles the seven projects with MSBuild into `out\stage\<jobId>\Modules`
 (not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
 repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder
 (`towerGamePath`) changed during the build. `msbuildPath` is optional (default: VS 2026 Build Tools).

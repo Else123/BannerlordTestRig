@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace TestRig.Harness.Logic
 {
     /// <summary>Outcome of one scenario in run-result.json.</summary>
-    public enum ScenarioStatus { Passed, Failed, Timeout, Error }
+    public enum ScenarioStatus { Passed, Failed, Timeout, Error, Skipped }
 
     /// <summary>One loaded module, in load order.</summary>
     public sealed class ModuleEntry
@@ -76,13 +76,17 @@ namespace TestRig.Harness.Logic
 
     public sealed class CheckResult
     {
-        public CheckResult(string name, string expected, string actual, bool passed)
+        public CheckResult(string scenario, string name, string expected, string actual, bool passed)
         {
+            Scenario = scenario;
             Name = name;
             Expected = expected;
             Actual = actual;
             Passed = passed;
         }
+
+        /// <summary>Id of the scenario the check belongs to ("soak" for the soak check); null when unknown.</summary>
+        public string Scenario { get; }
 
         public string Name { get; }
 
@@ -101,7 +105,7 @@ namespace TestRig.Harness.Logic
     {
         public const int Schema = 1;
 
-        /// <summary>Id of the one scenario the harness runs today.</summary>
+        /// <summary>Id of the scenario of a soak run (run.cfg without <c>scenarios=</c>).</summary>
         public const string SoakScenarioId = "soak";
 
         public RunResult(
@@ -169,6 +173,36 @@ namespace TestRig.Harness.Logic
         /// </summary>
         public static RunResult ForConfigError(string error, IReadOnlyList<ModuleEntry> modules)
         {
+            return ForConfigError(error, modules, new string[0]);
+        }
+
+        /// <summary>
+        /// Like <see cref="ForConfigError(string, IReadOnlyList{ModuleEntry})"/> for a run.cfg whose
+        /// requested scenarios could not be resolved: each requested id (once, in requested order)
+        /// is an Error instead of the soak scenario. No requested ids gives the soak Error.
+        /// </summary>
+        public static RunResult ForConfigError(string error, IReadOnlyList<ModuleEntry> modules, IReadOnlyList<string> requestedScenarios)
+        {
+            if (requestedScenarios == null)
+            {
+                throw new ArgumentNullException(nameof(requestedScenarios));
+            }
+
+            var scenarios = new List<ScenarioResult>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string id in requestedScenarios)
+            {
+                if (id != null && seen.Add(id))
+                {
+                    scenarios.Add(new ScenarioResult(id, ScenarioStatus.Error, null));
+                }
+            }
+
+            if (scenarios.Count == 0)
+            {
+                scenarios.Add(new ScenarioResult(SoakScenarioId, ScenarioStatus.Error, null));
+            }
+
             string oneLine = (error ?? string.Empty).Replace("\r", " ").Replace("\n", " ");
             return new RunResult(
                 RunStatus.Aborted,
@@ -182,7 +216,7 @@ namespace TestRig.Harness.Logic
                 null,
                 modules,
                 ExceptionSummary.Empty,
-                new[] { new ScenarioResult(SoakScenarioId, ScenarioStatus.Error, null) },
+                scenarios,
                 new CheckResult[0]);
         }
     }

@@ -68,8 +68,14 @@ namespace TestRig.Harness.Logic
         /// </summary>
         public IReadOnlyList<string> OwnAssemblies { get; }
 
+        /// <summary>
+        /// Ids of the scenarios to run, trimmed and in requested order; empty when the key is absent,
+        /// which makes the run a soak. With scenarios, <see cref="Days"/> is still required but not evaluated.
+        /// </summary>
+        public IReadOnlyList<string> Scenarios { get; }
+
         private RunConfig(int seed, int days, HarnessMode mode, double stallMinutes, double budgetMinutes,
-            IReadOnlyList<string> ownAssemblies)
+            IReadOnlyList<string> ownAssemblies, IReadOnlyList<string> scenarios)
         {
             Seed = seed;
             Days = days;
@@ -77,6 +83,7 @@ namespace TestRig.Harness.Logic
             StallMinutes = stallMinutes;
             BudgetMinutes = budgetMinutes;
             OwnAssemblies = ownAssemblies;
+            Scenarios = scenarios;
         }
 
         /// <summary>
@@ -96,6 +103,7 @@ namespace TestRig.Harness.Logic
             double? stallMinutes = null;
             double? budgetMinutes = null;
             string[] ownAssemblies = null;
+            string[] scenarios = null;
             bool anyLine = false;
 
             foreach (string rawLine in text.Split('\n'))
@@ -141,6 +149,10 @@ namespace TestRig.Harness.Logic
                 {
                     error = ReadNameList("ownAssemblies", value, ref ownAssemblies);
                 }
+                else if (string.Equals(key, "scenarios", StringComparison.OrdinalIgnoreCase))
+                {
+                    error = ReadScenarioIds(value, ref scenarios);
+                }
                 else
                 {
                     error = "unknown key '" + key + "'";
@@ -178,7 +190,8 @@ namespace TestRig.Harness.Logic
                 mode.Value,
                 stallMinutes ?? DefaultStallMinutes,
                 budgetMinutes ?? DefaultBudgetMinutes,
-                ownAssemblies ?? new string[0]));
+                ownAssemblies ?? new string[0],
+                scenarios ?? new string[0]));
         }
 
         // Each Read* helper stores into the slot and returns null, or returns an error text.
@@ -252,6 +265,32 @@ namespace TestRig.Harness.Logic
             return null;
         }
 
+        // Like ReadNameList, but at least one id and no id twice (ordinal): a present key means scenario mode.
+        private static string ReadScenarioIds(string value, ref string[] slot)
+        {
+            string error = ReadNameList("scenarios", value, ref slot);
+            if (error != null)
+            {
+                return error;
+            }
+
+            if (slot.Length == 0)
+            {
+                return "invalid value for 'scenarios' (expected at least one scenario id): " + value;
+            }
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string id in slot)
+            {
+                if (!seen.Add(id))
+                {
+                    return "duplicate scenario id in 'scenarios': " + id;
+                }
+            }
+
+            return null;
+        }
+
         // Enum names only: Enum.TryParse would also accept numbers ("1") and comma lists.
         private static string ReadMode(string value, ref HarnessMode? slot)
         {
@@ -312,29 +351,61 @@ namespace TestRig.Harness.Logic
     /// creation -> map -> N in-game days -> end game -> quit. A watchdog aborts the run
     /// on a total time budget or when no progress (phase change, new day) is made for
     /// too long, so a hung game never blocks a soak loop.
+    /// In scenario mode the Running phase drives a <see cref="ScenarioRunner"/> instead of
+    /// counting days: the run completes after the last scenario and is aborted with reason
+    /// "tainted:&lt;id&gt;" when a scenario taints it.
     /// </summary>
     public sealed class HarnessRun
     {
         private readonly RunConfig _config;
         private readonly double _startRealSeconds;
 
+        // Null in soak mode.
+        private readonly ScenarioRunner _runner;
+
         private double _lastProgressSeconds;
         private double _endingSinceSeconds;
         private int _maxDaysSeen;
         private bool _wasInMapEvent;
+        private int _runnerProgressSeen;
 
         // Real time of the last change to a final Status/Reason (completion, abort, end-stall).
         private double _finalRealSeconds;
 
+        /// <summary>Soak run; <paramref name="config"/> must not request scenarios.</summary>
         public HarnessRun(RunConfig config, double startRealSeconds)
+            : this(config, startRealSeconds, null, false)
+        {
+        }
+
+        /// <summary>Scenario run; <paramref name="config"/> must request scenarios.</summary>
+        public HarnessRun(RunConfig config, double startRealSeconds, ScenarioRunner runner)
+            : this(config, startRealSeconds, runner, true)
+        {
+        }
+
+        private HarnessRun(RunConfig config, double startRealSeconds, ScenarioRunner runner, bool scenarioMode)
         {
             if (config == null)
             {
                 throw new ArgumentNullException("config");
             }
 
+            if (scenarioMode && runner == null)
+            {
+                throw new ArgumentNullException("runner");
+            }
+
+            if (scenarioMode != config.Scenarios.Count > 0)
+            {
+                throw new ArgumentException(scenarioMode
+                    ? "a scenario run needs a config with scenarios"
+                    : "a config with scenarios needs a scenario runner", "config");
+            }
+
             _config = config;
             _startRealSeconds = startRealSeconds;
+            _runner = runner;
             _lastProgressSeconds = startRealSeconds;
             Phase = HarnessPhase.Armed;
             Status = RunStatus.Running;
@@ -344,7 +415,7 @@ namespace TestRig.Harness.Logic
 
         public RunStatus Status { get; private set; }
 
-        /// <summary>Null while Running / Completed; otherwise "timeout:&lt;phase&gt;", "stall:&lt;phase&gt;" or "end-stall".</summary>
+        /// <summary>Null while Running / Completed; otherwise "timeout:&lt;phase&gt;", "stall:&lt;phase&gt;", "tainted:&lt;scenario id&gt;" or "end-stall".</summary>
         public string Reason { get; private set; }
 
         /// <summary>Highest in-game day count observed in any phase before Quit.</summary>
@@ -352,6 +423,21 @@ namespace TestRig.Harness.Logic
 
         /// <summary>Number of map events the player entered (false -> true edges of PlayerInMapEvent).</summary>
         public int PlayerMapEvents { get; private set; }
+
+        /// <summary>
+        /// Whether game time should run: in phase Running, and in scenario mode only while the
+        /// current scenario waits on <see cref="ScenarioStep.Days"/>.
+        /// </summary>
+        public bool TimeShouldRun
+        {
+            get { return Phase == HarnessPhase.Running && (_runner == null || _runner.TimeShouldRun); }
+        }
+
+        /// <summary>Number of scenarios with a result (0 in soak mode); a change means run-result.json should be rewritten.</summary>
+        public int ScenariosFinished
+        {
+            get { return _runner == null ? 0 : _runner.Results.Count; }
+        }
 
         public HarnessAction Tick(HarnessObservation o)
         {
@@ -366,6 +452,13 @@ namespace TestRig.Harness.Logic
             if (Phase == HarnessPhase.Ending)
             {
                 return TickEnding(o);
+            }
+
+            // In scenario mode a running scenario is bounded by its own limits (see ScenarioRunner), so
+            // it counts as progress; the budget below still applies.
+            if (Phase == HarnessPhase.Running && _runner != null && _runner.HasCurrentScenario)
+            {
+                _lastProgressSeconds = o.RealSeconds;
             }
 
             HarnessAction abort = CheckWatchdog(o);
@@ -386,42 +479,59 @@ namespace TestRig.Harness.Logic
         }
 
         /// <summary>
-        /// Result record of this run at <paramref name="realSeconds"/>: one soak scenario and one
-        /// daysReached check. realSeconds is rounded to whole seconds and the rate to two decimals.
+        /// Result record of this run at <paramref name="realSeconds"/>: in soak mode one soak scenario
+        /// and one daysReached check; in scenario mode the scenarios with a result so far and their
+        /// checks. realSeconds is rounded to whole seconds and the rate to two decimals.
         /// </summary>
         public RunResult ToResult(double realSeconds, IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions)
         {
-            return ToResult(Status, Reason, realSeconds, modules, exceptions);
+            return ToResult(Status, Reason, realSeconds, modules, exceptions, false);
         }
 
         /// <summary>
         /// Result record for an unhandled exception that terminates the process. A run without a
-        /// final status yet (Running) becomes Aborted with reason "unhandled:&lt;phase&gt;" (scenario
-        /// Failed) as of <paramref name="realSeconds"/>. A run that already has a final status keeps
+        /// final status yet (Running) becomes Aborted with reason "unhandled:&lt;phase&gt;" as of
+        /// <paramref name="realSeconds"/>: the soak scenario Failed, or in scenario mode the current
+        /// scenario Error and the remaining ones Skipped. A run that already has a final status keeps
         /// it and its timing as of the final transition (realSeconds, rate, scenario seconds), so the
         /// crash only updates the exception counts. The run itself is not changed.
         /// </summary>
         public RunResult ToUnhandledResult(double realSeconds, IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions)
         {
             return Status == RunStatus.Running
-                ? ToResult(RunStatus.Aborted, "unhandled:" + Phase, realSeconds, modules, exceptions)
-                : ToResult(Status, Reason, _finalRealSeconds, modules, exceptions);
+                ? ToResult(RunStatus.Aborted, "unhandled:" + Phase, realSeconds, modules, exceptions, true)
+                : ToResult(Status, Reason, _finalRealSeconds, modules, exceptions, false);
         }
 
         private RunResult ToResult(RunStatus status, string reason, double realSeconds,
-            IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions)
+            IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions, bool crashed)
         {
             double elapsed = Math.Max(0, realSeconds - _startRealSeconds);
             double rate = elapsed > 0 ? DaysReached / (elapsed / 60.0) : 0;
             int seconds = (int)Math.Round(elapsed, MidpointRounding.AwayFromZero);
-            bool daysPassed = DaysReached >= _config.Days;
 
-            var check = new CheckResult(
-                "daysReached",
-                ">= " + _config.Days.ToString(CultureInfo.InvariantCulture),
-                DaysReached.ToString(CultureInfo.InvariantCulture),
-                daysPassed);
-            var soak = new ScenarioResult(RunResult.SoakScenarioId, ClassifySoak(status, reason, daysPassed), seconds);
+            IReadOnlyList<ScenarioResult> scenarios;
+            IReadOnlyList<CheckResult> checks;
+            if (_runner == null)
+            {
+                bool daysPassed = DaysReached >= _config.Days;
+                checks = new[]
+                {
+                    new CheckResult(
+                        RunResult.SoakScenarioId,
+                        "daysReached",
+                        ">= " + _config.Days.ToString(CultureInfo.InvariantCulture),
+                        DaysReached.ToString(CultureInfo.InvariantCulture),
+                        daysPassed),
+                };
+                scenarios = new[] { new ScenarioResult(RunResult.SoakScenarioId, ClassifySoak(status, reason, daysPassed), seconds) };
+            }
+            else
+            {
+                // Copies: the runner's lists keep growing after this record is taken.
+                scenarios = crashed ? _runner.ResultsAfterCrash(realSeconds) : new List<ScenarioResult>(_runner.Results);
+                checks = new List<CheckResult>(_runner.Checks);
+            }
 
             return new RunResult(
                 status,
@@ -435,8 +545,8 @@ namespace TestRig.Harness.Logic
                 PlayerMapEvents,
                 modules,
                 exceptions,
-                new[] { soak },
-                new[] { check });
+                scenarios,
+                checks);
         }
 
         /// <summary>
@@ -552,6 +662,11 @@ namespace TestRig.Harness.Logic
             Status = RunStatus.Aborted;
             Reason = kind + ":" + Phase;
             _finalRealSeconds = realSeconds;
+            if (_runner != null)
+            {
+                _runner.Abort(realSeconds);
+            }
+
             EnterPhase(HarnessPhase.Ending, realSeconds);
             return HarnessAction.RequestEndGame;
         }
@@ -609,15 +724,47 @@ namespace TestRig.Harness.Logic
 
         private HarnessAction TickRunning(HarnessObservation o)
         {
+            if (_runner != null)
+            {
+                return TickScenarios(o);
+            }
+
             if (o.DaysElapsed >= _config.Days)
             {
-                Status = RunStatus.Completed;
+                return Complete(o.RealSeconds);
+            }
+
+            return HarnessAction.KeepRunning;
+        }
+
+        // Scenario mode: the days key is ignored; every runner step is progress for the stall watchdog.
+        private HarnessAction TickScenarios(HarnessObservation o)
+        {
+            _runner.Tick(o.RealSeconds, o.DaysElapsed);
+            if (_runner.Progress != _runnerProgressSeen)
+            {
+                _runnerProgressSeen = _runner.Progress;
+                _lastProgressSeconds = o.RealSeconds;
+            }
+
+            if (_runner.IsTainted)
+            {
+                Status = RunStatus.Aborted;
+                Reason = "tainted:" + _runner.TaintedBy;
                 _finalRealSeconds = o.RealSeconds;
                 EnterPhase(HarnessPhase.Ending, o.RealSeconds);
                 return HarnessAction.RequestEndGame;
             }
 
-            return HarnessAction.KeepRunning;
+            return _runner.IsFinished ? Complete(o.RealSeconds) : HarnessAction.KeepRunning;
+        }
+
+        private HarnessAction Complete(double realSeconds)
+        {
+            Status = RunStatus.Completed;
+            _finalRealSeconds = realSeconds;
+            EnterPhase(HarnessPhase.Ending, realSeconds);
+            return HarnessAction.RequestEndGame;
         }
 
         // Every phase change is progress; entering Ending also starts the end-stall clock.

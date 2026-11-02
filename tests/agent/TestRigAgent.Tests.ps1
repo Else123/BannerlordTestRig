@@ -139,18 +139,24 @@ function New-TestJob {
 function Set-JobPackageWithValidXml {
     # Rewrites the job's package.zip with valid SubModule.xml files (CoherentWarAI with two DLLs, plus the
     # harness module) and updates the sha256 in job.json.
-    param([string]$JobDir, [string]$HarnessModuleId = 'TestRig.Harness')
+    # -UnlistedModuleId: an extra package module that job.modules does not name. -ScenarioModuleId: a module
+    # (in the package and, like the harness, expected in job.modules by the caller) that depends on the harness.
+    param([string]$JobDir, [string]$HarnessModuleId = 'TestRig.Harness', [string]$UnlistedModuleId = '', [string]$ScenarioModuleId = '')
     $xml = {
-        param($id, $dlls)
-        '<Module><Name value="' + $id + '"/><SubModules>' + (($dlls | ForEach-Object { '<SubModule><Name>n</Name><DLLName value="' + $_ + '"/></SubModule>' }) -join '') + '</SubModules></Module>'
+        param($id, $dlls, $dependsOn = '')
+        $dep = if ($dependsOn) { '<DependedModules><DependedModule Id="' + $dependsOn + '"/></DependedModules>' } else { '' }
+        '<Module><Name value="' + $id + '"/>' + $dep + '<SubModules>' + (($dlls | ForEach-Object { '<SubModule><Name>n</Name><DLLName value="' + $_ + '"/></SubModule>' }) -join '') + '</SubModules></Module>'
     }
+    $entries = @(
+        @{ n = 'Modules/CoherentWarAI/SubModule.xml'; t = (& $xml 'CoherentWarAI' @('CoherentWarAI.dll', 'Extra.dll')) },
+        @{ n = "Modules/$HarnessModuleId/SubModule.xml"; t = (& $xml $HarnessModuleId @("$HarnessModuleId.dll")) })
+    if ($UnlistedModuleId) { $entries += @{ n = "Modules/$UnlistedModuleId/SubModule.xml"; t = (& $xml $UnlistedModuleId @("$UnlistedModuleId.dll")) } }
+    if ($ScenarioModuleId) { $entries += @{ n = "Modules/$ScenarioModuleId/SubModule.xml"; t = (& $xml $ScenarioModuleId @("$ScenarioModuleId.dll") $HarnessModuleId) } }
     $zipPath = Join-Path $JobDir 'package.zip'
     Remove-Item -LiteralPath $zipPath -Force
     $z = [System.IO.Compression.ZipFile]::Open($zipPath, 'Create')
     try {
-        foreach ($e in @(
-                @{ n = 'Modules/CoherentWarAI/SubModule.xml'; t = (& $xml 'CoherentWarAI' @('CoherentWarAI.dll', 'Extra.dll')) },
-                @{ n = "Modules/$HarnessModuleId/SubModule.xml"; t = (& $xml $HarnessModuleId @("$HarnessModuleId.dll")) })) {
+        foreach ($e in $entries) {
             $entry = $z.CreateEntry($e.n)
             $w = New-Object System.IO.StreamWriter($entry.Open(), $utf8NoBom)
             $w.Write($e.t); $w.Dispose()
@@ -329,6 +335,93 @@ Describe 'Test-JobSchema' {
     It 'rejects a package file with a path' {
         $j = Get-ValidJob; $j.package.file = '..\package.zip'
         @(Test-JobSchema $j '20261031-120000-aaaa').Count | Should BeGreaterThan 0
+    }
+}
+
+Describe 'Test-JobSchema: kind and scenarios (S4)' {
+    # $ScenariosJson (raw JSON text) is spliced into the run object when given; $Harness defaults to TestRig.
+    function New-KindJob([string]$Kind, $ScenariosJson = $null, [string]$Harness = 'TestRig') {
+        $extra = if ($null -ne $ScenariosJson) { ',"scenarios":' + $ScenariosJson } else { '' }
+        return ('{"schema":1,"jobId":"20261101-120000-aaaa","createdUtc":"x","package":{"file":"package.zip","sha256":"' + ('A' * 64) + '"},"modules":["Native"],"runs":[{"runId":"r1","kind":"' + $Kind + '","harness":"' + $Harness + '","seed":1,"days":1,"mode":"WarSails","stallMinutes":5,"budgetMinutes":60,"hardTimeoutMinutes":20' + $extra + '}]}') | ConvertFrom-Json
+    }
+    function Get-SchemaErrors($Job) { @(Test-JobSchema $Job '20261101-120000-aaaa') }
+
+    It 'accepts kind soak without scenarios (both harnesses)' {
+        (Get-SchemaErrors (New-KindJob 'soak')).Count | Should Be 0
+        (Get-SchemaErrors (New-KindJob 'soak' $null 'CoherentWarAI')).Count | Should Be 0
+    }
+    It 'accepts kind scenarios with the TestRig harness and valid ids' {
+        (Get-SchemaErrors (New-KindJob 'scenarios' '["smithing.smelt-then-refine"]')).Count | Should Be 0
+        (Get-SchemaErrors (New-KindJob 'scenarios' '["a.b-c_1","Z9"]')).Count | Should Be 0
+    }
+    It 'rejects an unknown kind' {
+        (Get-SchemaErrors (New-KindJob 'bogus')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects kind scenarios without a scenarios field' {
+        (Get-SchemaErrors (New-KindJob 'scenarios')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects kind scenarios with an empty scenarios array' {
+        (Get-SchemaErrors (New-KindJob 'scenarios' '[]')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects scenarios that is not an array of strings' {
+        (Get-SchemaErrors (New-KindJob 'scenarios' '"smithing.smelt-then-refine"')).Count | Should BeGreaterThan 0
+        (Get-SchemaErrors (New-KindJob 'scenarios' '[1]')).Count | Should BeGreaterThan 0
+        (Get-SchemaErrors (New-KindJob 'scenarios' '[null]')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects an empty scenario id' {
+        (Get-SchemaErrors (New-KindJob 'scenarios' '[""]')).Count | Should BeGreaterThan 0
+        (Get-SchemaErrors (New-KindJob 'scenarios' '["a",""]')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects ids outside ^[A-Za-z0-9._-]+$ (separators, spaces, line breaks, commas)' {
+        foreach ($bad in '"a,b"', '"a b"', '"a\nb=1"', '"a/b"', '"a\\b"', '"a*"', '"a\u00e4"') {
+            (Get-SchemaErrors (New-KindJob 'scenarios' "[$bad]")).Count | Should BeGreaterThan 0
+        }
+    }
+    It 'rejects duplicate ids' {
+        (Get-SchemaErrors (New-KindJob 'scenarios' '["a","b","a"]')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects scenarios on a soak run' {
+        (Get-SchemaErrors (New-KindJob 'soak' '["smithing.smelt-then-refine"]')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects kind scenarios with the CoherentWarAI harness' {
+        (Get-SchemaErrors (New-KindJob 'scenarios' '["smithing.smelt-then-refine"]' 'CoherentWarAI')).Count | Should BeGreaterThan 0
+    }
+}
+
+Describe 'run.cfg scenarios line (S4)' {
+    $base = "seed=7`ndays=3`nmode=NoDlc`nstallMinutes=5`nbudgetMinutes=60`n"
+    function New-CfgRun([string]$Harness, [string]$Kind, $Scenarios) {
+        $r = [pscustomobject]@{ runId = 'r1'; seed = 7; days = 3; mode = 'NoDlc'; stallMinutes = 5; budgetMinutes = 60; hardTimeoutMinutes = 20 }
+        if ($Harness) { $r | Add-Member -NotePropertyName harness -NotePropertyValue $Harness }
+        if ($Kind) { $r | Add-Member -NotePropertyName kind -NotePropertyValue $Kind }
+        if ($null -ne $Scenarios) { $r | Add-Member -NotePropertyName scenarios -NotePropertyValue $Scenarios }
+        return $r
+    }
+    It 'writes scenarios=<id>,<id> for TestRig + kind scenarios (LF, one line)' {
+        $run = New-CfgRun 'TestRig' 'scenarios' @('a.one', 'b-two')
+        Get-RunCfgText $run | Should Be ($base + "scenarios=a.one,b-two`n")
+    }
+    It 'writes a single scenario id without a comma' {
+        $run = New-CfgRun 'TestRig' 'scenarios' @('smithing.smelt-then-refine')
+        Get-RunCfgText $run | Should Be ($base + "scenarios=smithing.smelt-then-refine`n")
+    }
+    It 'keeps the ownAssemblies line next to the scenarios line' {
+        $run = New-CfgRun 'TestRig' 'scenarios' @('a.one')
+        $lines = @((Get-RunCfgText $run -OwnAssemblies @('A', 'B')) -split "`n" | Where-Object { $_ -ne '' })
+        ($lines -contains 'scenarios=a.one') | Should Be $true
+        ($lines -contains 'ownAssemblies=A,B') | Should Be $true
+        $lines.Count | Should Be 7
+    }
+    It 'soak run.cfg stays byte-identical (TestRig and CoherentWarAI, with and without harness/kind fields)' {
+        Get-RunCfgText (New-CfgRun 'TestRig' 'soak' $null) | Should Be $base
+        Get-RunCfgText (New-CfgRun 'CoherentWarAI' 'soak' $null) | Should Be $base
+        Get-RunCfgText (New-CfgRun $null $null $null) | Should Be $base
+    }
+    It 'never writes scenarios for the CoherentWarAI harness (its parser rejects unknown keys)' {
+        Get-RunCfgText (New-CfgRun 'CoherentWarAI' 'scenarios' @('a.one')) | Should Be $base
+    }
+    It 'never writes scenarios for a soak run' {
+        Get-RunCfgText (New-CfgRun 'TestRig' 'soak' @('a.one')) | Should Be $base
     }
 }
 
@@ -764,6 +857,12 @@ Describe 'ownAssemblies for run.cfg' {
         New-ModuleXml $script:mods 'CoherentWarAI.TestHarness' @('CoherentWarAI.TestHarness.dll')
         (Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A', 'TestRig.Harness', 'CoherentWarAI.TestHarness') -HarnessModuleIds @('CoherentWarAI.TestHarness', 'TestRig.Harness')) -join ',' | Should Be 'Alpha'
     }
+    It 'excludes a module that depends on a harness module (scenario module), by its SubModule.xml' {
+        New-ModuleXml $script:mods 'A' @('Alpha.dll')
+        $dep = '<Module><Name value="S"/><DependedModules><DependedModule Id="Native"/><DependedModule Id="TestRig.Harness"/></DependedModules><SubModules><SubModule><Name>n</Name><DLLName value="S.dll"/></SubModule></SubModules></Module>'
+        New-ModuleXml $script:mods 'S' @() $dep
+        (Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A', 'S') -HarnessModuleIds @('TestRig.Harness')) -join ',' | Should Be 'Alpha'
+    }
     It 'skips a module with missing or unparseable SubModule.xml and logs it' {
         New-ModuleXml $script:mods 'Bad' @() '<Module><unclosed>'
         New-ModuleXml $script:mods 'Good' @('Good.dll')
@@ -860,6 +959,18 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
         $env:FAKEGAME_HARNESS = 'TestRig'
         $jobDir = New-TestRigHarnessJob $rig
         Set-JobPackageWithValidXml $jobDir
+
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-ownassemblies.txt')).Trim() | Should Be 'ownAssemblies=CoherentWarAI,Extra'
+    }
+    It 'lists only modules of job.modules and no scenario module (depends on the harness) in ownAssemblies' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $jobDir = New-TestRigHarnessJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml', 'Modules/AutoTraderSpeed/SubModule.xml', 'Modules/Sc.Scenarios/SubModule.xml') `
+            -Modules @('Native', 'CoherentWarAI', 'TestRig.Harness', 'Sc.Scenarios')
+        Set-JobPackageWithValidXml $jobDir -UnlistedModuleId 'AutoTraderSpeed' -ScenarioModuleId 'Sc.Scenarios'
 
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
