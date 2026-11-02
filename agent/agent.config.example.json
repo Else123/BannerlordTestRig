@@ -17,6 +17,7 @@
     "SmithingSuite",
     "CompanionManagementSuite",
     "TestRig.Harness",
+    "TestRig.SelfTest",
     "*.Scenarios"
   ]
 }

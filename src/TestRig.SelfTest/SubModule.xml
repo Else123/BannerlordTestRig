@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Module>
+	<Name value="TestRig Self-Test (crashes on purpose, test rig only)"/>
+	<Id value="TestRig.SelfTest"/>
+	<Version value="v1.4.8"/>
+	<DefaultModule value="false"/>
+	<ModuleCategory value="Singleplayer"/>
+	<ModuleType value="Community"/>
+	<SingleplayerModule value="true"/>
+	<MultiplayerModule value="false"/>
+	<Official value="false"/>
+	<DependedModules>
+		<DependedModule Id="Native" DependentVersion="v1.4.8" Optional="false"/>
+		<DependedModule Id="SandBoxCore" DependentVersion="v1.4.8" Optional="false"/>
+		<DependedModule Id="Sandbox" DependentVersion="v1.4.8" Optional="false"/>
+		<DependedModule Id="StoryMode" DependentVersion="v1.4.8" Optional="false"/>
+		<DependedModule Id="TestRig.Harness" Optional="false"/>
+	</DependedModules>
+	<SubModules>
+		<SubModule>
+			<Name value="TestRig.SelfTest"/>
+			<DLLName value="TestRig.SelfTest.dll"/>
+			<SubModuleClassType value="TestRig.SelfTest.SelfTestSubModule"/>
+			<Tags>
+				<Tag key="DedicatedServerType" value="none"/>
+				<Tag key="IsNoRenderModeElement" value="false"/>
+			</Tags>
+		</SubModule>
+	</SubModules>
+	<Xmls/>
+</Module>

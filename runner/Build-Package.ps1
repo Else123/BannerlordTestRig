@@ -1,10 +1,13 @@
-# Build step of the test rig runner: builds the seven mod projects into a staging folder, guards the
+# Build step of the test rig runner: builds the mod projects (seven; eight with -Suite RIG) into a staging folder, guards the
 # tower (the game's own Modules folder) against changes and writes manifest.json.
 # Functions only; dot-sourced by Invoke-TestRig.ps1 (and by tests\runner\Build-Package.Tests.ps1).
 
-# The seven projects, relative to the workspace root (the folder that contains the repo folders).
+# The seven projects (eight with -Suite RIG), relative to the workspace root (the folder that contains the repo folders).
 function Get-RigBuildProjects {
-    param([Parameter(Mandatory)][string]$WorkspaceRoot)
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceRoot,
+        [string]$Suite   # RIG adds the self-test module (it holds deliberately crashing code: no other suite ships it)
+    )
     $table = @(
         @('BannerlordCoherentWarAI', 'src\CoherentWarAI\CoherentWarAI.csproj', 'CoherentWarAI'),
         @('BannerlordCoherentWarAI', 'tools\TestHarness\CoherentWarAI.TestHarness.csproj', 'CoherentWarAI.TestHarness'),
@@ -14,6 +17,7 @@ function Get-RigBuildProjects {
         @('BannerlordTestRig', 'src\TestRig.Harness\TestRig.Harness.csproj', 'TestRig.Harness'),
         @('BannerlordSmithingSuite', 'tests\InGame\SmithingSuite.Scenarios\SmithingSuite.Scenarios.csproj', 'SmithingSuite.Scenarios')
     )
+    if ($Suite -eq 'RIG') { $table += , @('BannerlordTestRig', 'src\TestRig.SelfTest\TestRig.SelfTest.csproj', 'TestRig.SelfTest') }   # after the harness it references
     foreach ($row in $table) {
         [pscustomobject]@{
             Repo        = $row[0]
@@ -31,7 +35,7 @@ function ConvertTo-RigMsBuildValue {
 
 # Builds one project with the build landing in $ModulesPath (BannerlordModulesPath overrides the
 # game-folder default of the projects' Directory.Build.props; BannerlordPath pins the game install the
-# projects resolve their references against). None of the seven projects uses PackageReference or
+# projects resolve their references against). None of the projects uses PackageReference or
 # packages.config, so no /restore is needed. The output is appended to $LogPath when given and is
 # otherwise not printed; on failure the exception message carries the output tail.
 function Invoke-RigMsBuild {
@@ -178,7 +182,7 @@ function New-RigBuildManifest {
     $path
 }
 
-# Builds all seven projects into <StageDir>\Modules against the game install at $TowerGamePath, verifies
+# Builds all projects (seven; eight with -Suite RIG) into <StageDir>\Modules against the game install at $TowerGamePath, verifies
 # that <TowerGamePath>\Modules is untouched and that every module landed in the stage, then writes the
 # manifest. Throws on a missing prerequisite, a failed build, an incomplete stage or a tower change (no
 # manifest is written then). The MSBuild output goes to <StageDir>\build.log.
@@ -189,7 +193,8 @@ function Invoke-RigBuildPackage {
         [Parameter(Mandatory)][string]$StageDir,
         [Parameter(Mandatory)][string]$TowerGamePath,
         [Parameter(Mandatory)][string]$MsBuildPath,
-        [string]$Configuration = 'Debug'
+        [string]$Configuration = 'Debug',
+        [string]$Suite
     )
     $towerGame = $TowerGamePath.TrimEnd('\', '/')   # a trailing '\' would escape the closing quote in the MSBuild argument
     $towerModules = Join-Path $towerGame 'Modules'
@@ -200,7 +205,7 @@ function Invoke-RigBuildPackage {
         throw "MSBuild not found: $MsBuildPath"
     }
 
-    $projects = @(Get-RigBuildProjects -WorkspaceRoot $WorkspaceRoot)
+    $projects = @(Get-RigBuildProjects -WorkspaceRoot $WorkspaceRoot -Suite $Suite)
     # State of the sources as built (taken before the build, so build output cannot show up as dirty).
     $repos = @($projects | ForEach-Object { $_.Repo } | Select-Object -Unique | ForEach-Object {
             Get-RigRepoState -RepoPath (Join-Path $WorkspaceRoot $_)

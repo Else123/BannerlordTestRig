@@ -49,12 +49,27 @@ $script:LaunchFailedSeconds = 30
 $script:AbortCheckSeconds = 3
 $script:DialogCheckSeconds = 1
 $script:CrashCheckSeconds = 1   # how often the supervision looks for "Crash occurred" in the watchdog log
-$script:FinalCrashCheckSeconds = 2   # after the game exited on its own, the watchdog may still write "Crash occurred"
+$script:HarnessLogCheckSeconds = 1   # how often the supervision reads the growth of harness.log
+# TestRig harness only: no new "<seconds> Alive: ..." line in harness.log for longer than this = Hung. The harness writes
+# one every 10 s from the main thread (largest gap measured in a real run: 14.5 s).
+$script:SilenceSeconds = 60
+$script:SilenceStatusRetries = 2   # passes a result that cannot be read (being replaced) is re-checked before Hung
+# After an UnhandledException line the harness still writes its final run-result.json (unhandled:<phase>, exception
+# counts, also a rewrite of a result that was final already); the agent waits at most this long for that result (or the
+# exit) before it kills the game.
+$script:UnhandledResultGraceSeconds = 5
+$script:HarnessLogReadMaxBytes = 1048576   # most one growth read takes in; an unterminated chunk this large is dropped as one line
+$script:MessageLineMaxChars = 200   # harness.log lines quoted in a run message are cut to this
+$script:FinalCrashCheckSeconds = 2  # after the game exited on its own, the watchdog may still write "Crash occurred"
 $script:DialogStillOpenSeconds = 5   # a dialog still open this long after OK was sent is logged once
 $script:GameWindowsInitError = $null   # set when compiling the Win32 helper failed; rethrown instead of recompiling
 # Game dialogs the agent confirms with OK (exact, case-sensitive title). The engine shows this one on the
 # first start after the active module list changed; unattended it blocks the run until HardTimeout.
 $script:ConfirmableDialogTitles = @('Mod change detected')
+# Game dialogs the agent answers with No (exact, case-sensitive title). The engine asks this on the start after a run
+# it did not end itself ("Game shut down unexpectedly on previous session. Would you like to enable safe mode?").
+# Reset-EngineSafelyExited normally prevents it; this is the fallback.
+$script:DeclinedDialogTitles = @('Safe Mode')
 $script:StopSliceMilliseconds = 5000   # Stop-ProcessTree waits in slices of at most this, with a heartbeat between
 # Upper bounds per numeric run field (also keeps DateTime.AddMinutes from overflowing).
 $script:RunNumberLimits = [ordered]@{ days = 3650; stallMinutes = 1440; budgetMinutes = 1440; hardTimeoutMinutes = 1440 }
@@ -380,7 +395,7 @@ function Get-AgentConfig {
         pollSeconds         = 10
         heartbeatSeconds    = 10
         moduleAllowlist     = @('CoherentWarAI', 'CoherentWarAI.TestHarness', 'AutoTraderSpeed', 'SmithingSuite',
-            'CompanionManagementSuite', 'TestRig.Harness', '*.Scenarios')
+            'CompanionManagementSuite', 'TestRig.Harness', 'TestRig.SelfTest', '*.Scenarios')
     }
     if ([string]::IsNullOrWhiteSpace($cfg.gameExecutable)) {
         $cfg.gameExecutable = Join-Path $cfg.gamePath 'bin\Win64_Shipping_Client\Bannerlord.exe'
@@ -1015,8 +1030,9 @@ function Get-GameArguments {
 }
 
 function Get-LastLogLine {
-    # Last non-empty line of a log the game may still be writing. Returns $null if the
-    # file is missing or unreadable. Reads only the tail.
+    # Last non-empty line of a log the game may still be writing, skipping the harness's "Alive:" beat lines (the
+    # last Alive line only if the tail holds nothing else). Returns $null if the file is missing or unreadable.
+    # Reads only the tail.
     param([string]$Path)
     try {
         $fs = New-Object System.IO.FileStream($Path, 'Open', 'Read', 'ReadWrite,Delete')
@@ -1028,11 +1044,139 @@ function Get-LastLogLine {
             $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)
         }
         finally { $fs.Dispose() }
-        $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
+        $lines = @($text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
         if ($lines.Count -eq 0) { return $null }
-        return $lines[$lines.Count - 1].Trim()
+        $progress = @($lines | Where-Object { -not (Test-AliveLine $_) })
+        if ($progress.Count -gt 0) { return $progress[$progress.Count - 1] }
+        return $lines[$lines.Count - 1]
     }
     catch { return $null }
+}
+
+function Test-AliveLine {
+    # A harness.log line is "<seconds> <text>"; the TestRig harness's main-thread beat has text starting with "Alive:".
+    param([string]$Line)
+    return $Line -cmatch '\A\d+(\.\d+)? Alive:'
+}
+
+function Read-HarnessLogGrowth {
+    # The complete lines a log gained since the last call; $State.Position (bytes) is advanced past them. Never
+    # reads the file from the start again. A partial last line stays unread until its line break arrives (so a
+    # multi-byte character is never split either). A file that does not exist yet, is locked or got shorter
+    # yields no lines (shorter: reading starts over). Never throws.
+    param([string]$Path, [hashtable]$State)
+    $lines = New-Object System.Collections.Generic.List[string]
+    try {
+        $fs = New-Object System.IO.FileStream($Path, 'Open', 'Read', 'ReadWrite,Delete')
+        try {
+            if ($fs.Length -lt $State.Position) { $State.Position = [long]0 }
+            $count = [int][Math]::Min($fs.Length - $State.Position, [long]$script:HarnessLogReadMaxBytes)
+            if ($count -gt 0) {
+                $null = $fs.Seek($State.Position, 'Begin')
+                $buffer = New-Object byte[] $count
+                $read = 0
+                while ($read -lt $count) {
+                    $n = $fs.Read($buffer, $read, $count - $read)
+                    if ($n -le 0) { break }
+                    $read += $n
+                }
+                $end = -1   # index of the last line break; -1: none
+                if ($read -gt 0) { $end = [Array]::LastIndexOf($buffer, [byte]10, $read - 1) }
+                if ($end -lt 0 -and $read -eq $script:HarnessLogReadMaxBytes) { $end = $read - 1 }   # no line break in a full chunk
+                if ($end -ge 0) {
+                    $State.Position += $end + 1
+                    $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $end + 1)
+                    foreach ($line in ($text -split "`r?`n")) {
+                        if ($line -ne '') { $lines.Add($line) }
+                    }
+                }
+            }
+        }
+        finally { $fs.Dispose() }
+    }
+    catch { }
+    return $lines.ToArray()
+}
+
+function Test-UnhandledExceptionLine {
+    # A harness.log line is "<seconds> <text>"; only text that starts with UnhandledException counts. A FirstChance
+    # line that merely mentions the word does not.
+    param([string]$Line)
+    return $Line -cmatch '\A\d+(\.\d+)? UnhandledException(\W|\z)'
+}
+
+function Find-UnhandledExceptionLine {
+    # The first UnhandledException line of $Lines, ready for a run message (Format-LogLineForMessage); $null if none.
+    param([string[]]$Lines)
+    foreach ($line in @($Lines)) {
+        if (Test-UnhandledExceptionLine $line) { return (Format-LogLineForMessage $line) }
+    }
+    return $null
+}
+
+function Read-StreamBytes {
+    # Every byte of $Stream from its current position to the end, as one byte[] (also when empty).
+    param([System.IO.Stream]$Stream)
+    $bytes = New-Object byte[] ([int]($Stream.Length - $Stream.Position))
+    $read = 0
+    while ($read -lt $bytes.Length) {
+        $n = $Stream.Read($bytes, $read, $bytes.Length - $read)
+        if ($n -le 0) { break }
+        $read += $n
+    }
+    if ($read -lt $bytes.Length) { [Array]::Resize([ref]$bytes, $read) }
+    return , $bytes
+}
+
+function Find-SafelyExitedZero {
+    # The "safely_exited = 0" lines of engine_config.txt bytes; group 1 of each match is the 0, its Index the byte offset
+    # (Latin-1 maps every byte to exactly one char, so a char index is the byte index for any ASCII-compatible file).
+    param([byte[]]$Bytes)
+    $text = [System.Text.Encoding]::GetEncoding(28591).GetString($Bytes)
+    return , [regex]::Matches($text, '(?m)^(?:\xEF\xBB\xBF)?[ \t]*safely_exited[ \t]*=[ \t]*(0)[ \t]*\r?$')
+}
+
+function Reset-EngineSafelyExited {
+    # The engine writes "safely_exited = 0" into engine_config.txt when it starts and 1 only on a clean exit. After a
+    # run the agent had to kill, the 0 stays and the next start blocks on the native "Safe Mode" question. Sets exactly
+    # that digit to 1: one byte is written in place, every other byte (encoding, BOM, line endings) stays as it is. A
+    # missing file or no such line: nothing happens. While a Bannerlord process runs the file is the game's: the reset
+    # is skipped (logged). A shared read-only look comes first, so a file without a 0 (also a read-only one) is never
+    # opened for writing. Only on a 0 the file is opened exclusively and read again: the write is decided on those
+    # bytes, so nothing changes the file in between. Never throws: a failure is logged and the launch goes on.
+    param([string]$Path)
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+        if (@(Get-BannerlordProcess | Where-Object { $null -ne $_ }).Count -gt 0) {
+            Write-AgentLog "Bannerlord is running: safely_exited in $Path is left as it is."
+            return
+        }
+        $probe = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try { $probeMatches = Find-SafelyExitedZero (Read-StreamBytes $probe) }
+        finally { $probe.Dispose() }
+        if ($probeMatches.Count -eq 0) { return }
+        $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            $found = Find-SafelyExitedZero (Read-StreamBytes $fs)
+            if ($found.Count -eq 0) { return }
+            foreach ($m in $found) {
+                $null = $fs.Seek($m.Groups[1].Index, [System.IO.SeekOrigin]::Begin)
+                $fs.WriteByte([byte][char]'1')
+            }
+            $fs.Flush($true)
+        }
+        finally { $fs.Dispose() }
+        Write-AgentLog "engine_config.txt: safely_exited was 0 (previous run did not exit cleanly) - set to 1, so the game does not ask for Safe Mode."
+    }
+    catch { Write-AgentLog "Could not reset safely_exited in $Path (launching anyway): $($_.Exception.Message)" }
+}
+
+function Format-LogLineForMessage {
+    # One printable-ASCII line of bounded length, for run messages and agent.log.
+    param([string]$Line)
+    $text = ($Line -replace '[^\x20-\x7E]', ' ' -replace ' {2,}', ' ').Trim()
+    if ($text.Length -gt $script:MessageLineMaxChars) { $text = $text.Substring(0, $script:MessageLineMaxChars - 3) + '...' }
+    return $text
 }
 
 # --- Watchdog crash detection (ported from BannerlordCoherentWarAI tools\Run-SoakTest.ps1) ---
@@ -1272,6 +1416,7 @@ namespace BannerlordTestRig
 
         private const string DialogClass = "#32770";
         private const int IDOK = 1;
+        private const int IDNO = 7;
         private const uint WM_COMMAND = 0x0111;
         private const int BN_CLICKED = 0;
         private const int GWL_STYLE = -16;
@@ -1353,8 +1498,21 @@ namespace BannerlordTestRig
             int controlId;
             IntPtr okButton = FindOkButton(dialog, out controlId);
             if (okButton == IntPtr.Zero) { return "no OK button"; }
+            return PostClick(dialog, okButton, controlId);
+        }
+
+        // The same for the No button of a Yes/No message box: the IDNO control, whatever its caption's language.
+        public static string ClickNo(IntPtr dialog)
+        {
+            IntPtr noButton = GetDlgItem(dialog, IDNO);
+            if (noButton == IntPtr.Zero || !IsWindowVisible(noButton) || !IsWindowEnabled(noButton)) { return "no No button"; }
+            return PostClick(dialog, noButton, IDNO);
+        }
+
+        private static string PostClick(IntPtr dialog, IntPtr button, int controlId)
+        {
             IntPtr wParam = new IntPtr((BN_CLICKED << 16) | (controlId & 0xFFFF));
-            if (!PostMessage(dialog, WM_COMMAND, wParam, okButton))
+            if (!PostMessage(dialog, WM_COMMAND, wParam, button))
             {
                 return "PostMessage failed (error " + Marshal.GetLastWin32Error() + ")";
             }
@@ -1387,46 +1545,64 @@ function Get-GameDialogs {
 }
 
 function Confirm-KnownGameDialog {
-    # Sends OK to the dialog. Returns $null when OK was sent, else the reason it was not.
-    param($Dialog)
+    # Sends OK (or, with -Answer No, No) to the dialog. Returns $null when it was sent, else the reason it was not.
+    param($Dialog, [ValidateSet('OK', 'No')][string]$Answer = 'OK')
     Initialize-GameWindows
+    if ($Answer -eq 'No') { return [BannerlordTestRig.GameWindows]::ClickNo($Dialog.Handle) }
     return [BannerlordTestRig.GameWindows]::ClickOk($Dialog.Handle)
 }
 
 function Invoke-GameDialogCheck {
-    # One look at the game's dialogs: sends OK to the known titles (once per dialog window), logs any
-    # other title once per run, and logs once if a dialog is still open DialogStillOpenSeconds after OK.
-    # Never throws: a failing check must not end the supervision.
-    # $State is per run: @{ Handled = @{}; Seen = @{}; FailureLogged = $false }.
+    # One look at the game's dialogs: sends OK (ConfirmableDialogTitles) or No (DeclinedDialogTitles) to the known
+    # titles (once per dialog window), logs any other title once per run, and logs once if a dialog is still open
+    # DialogStillOpenSeconds after the answer. $State.Open is set to the dialogs this look found that block the game:
+    # @{ Title; Status = 'not answered' | 'answer failed' | 'still open after answer' } (Get-OpenDialogSummary).
+    # Never throws: a failing check must not end the supervision (and leaves $State.Open as the last look found it).
+    # $State is per run: @{ Handled = @{}; Seen = @{}; Open = @(); FailureLogged = $false }.
     param([int]$ProcessId, [hashtable]$State, $Record)
     try {
+        $open = @()
         foreach ($dialog in @(Get-GameDialogs -ProcessId $ProcessId)) {
             $handleKey = [string]$dialog.Handle
             $handled = $State.Handled[$handleKey]
             if ($null -ne $handled) {   # OK was sent (or could not be) already; never a second time
-                if ($null -ne $handled.OkSentUtc -and -not $handled.StillOpenLogged -and
-                    ([DateTime]::UtcNow - $handled.OkSentUtc).TotalSeconds -ge $script:DialogStillOpenSeconds) {
-                    $handled.StillOpenLogged = $true
-                    Write-AgentLog "Dialog '$($dialog.Title)' still open after confirm"
+                if ($null -eq $handled.OkSentUtc) { $open += @{ Title = $dialog.Title; Status = 'answer failed' } }
+                elseif (([DateTime]::UtcNow - $handled.OkSentUtc).TotalSeconds -ge $script:DialogStillOpenSeconds) {
+                    $open += @{ Title = $dialog.Title; Status = 'still open after answer' }
+                    if (-not $handled.StillOpenLogged) {
+                        $handled.StillOpenLogged = $true
+                        Write-AgentLog "Dialog '$($dialog.Title)' still open after confirm"
+                    }
                 }
                 continue
             }
-            if ($script:ConfirmableDialogTitles -ccontains $dialog.Title) {
-                $handled = @{ OkSentUtc = $null; StillOpenLogged = $false }
+            $answer = $null
+            if ($script:ConfirmableDialogTitles -ccontains $dialog.Title) { $answer = 'OK' }
+            elseif ($script:DeclinedDialogTitles -ccontains $dialog.Title) { $answer = 'No' }
+            if ($null -ne $answer) {
+                $handled = @{ Title = $dialog.Title; OkSentUtc = $null; StillOpenLogged = $false }
                 $State.Handled[$handleKey] = $handled
-                $failure = Confirm-KnownGameDialog -Dialog $dialog
+                $failure = Confirm-KnownGameDialog -Dialog $dialog -Answer $answer
                 if ($null -eq $failure) {
                     $handled.OkSentUtc = [DateTime]::UtcNow
-                    Write-AgentLog "Dismissed dialog '$($dialog.Title)' (pid $ProcessId)."
+                    $with = if ($answer -eq 'OK') { '' } else { " with $answer" }
+                    Write-AgentLog "Dismissed dialog '$($dialog.Title)'$with (pid $ProcessId)."
                     $Record.dismissedDialogs = @($Record.dismissedDialogs) + $dialog.Title
                 }
-                else { Write-AgentLog "Could not confirm dialog '$($dialog.Title)': $failure" }
+                else {
+                    Write-AgentLog "Could not confirm dialog '$($dialog.Title)': $failure"
+                    $open += @{ Title = $dialog.Title; Status = 'answer failed' }
+                }
             }
-            elseif (-not $State.Seen.ContainsKey($dialog.Title)) {
-                $State.Seen[$dialog.Title] = $true
-                Write-AgentLog "Game dialog seen: '$($dialog.Title)'"
+            else {
+                $open += @{ Title = $dialog.Title; Status = 'not answered' }
+                if (-not $State.Seen.ContainsKey($dialog.Title)) {
+                    $State.Seen[$dialog.Title] = $true
+                    Write-AgentLog "Game dialog seen: '$($dialog.Title)'"
+                }
             }
         }
+        $State.Open = $open
     }
     catch {
         if (-not $State.FailureLogged) {
@@ -1434,6 +1610,42 @@ function Invoke-GameDialogCheck {
             Write-AgentLog "Dialog check failed (supervision continues): $($_.Exception.Message)"
         }
     }
+}
+
+function Get-OpenDialogSummary {
+    # The dialogs the last successful look of Invoke-GameDialogCheck found open and blocking, one entry each (sorted,
+    # distinct), e.g. "'Safe Mode' (answer failed)". A dialog answered less than DialogStillOpenSeconds before that look
+    # is not listed (it may be closing). $State as there.
+    param([hashtable]$State)
+    $entries = @($State.Open | Where-Object { $null -ne $_ } |
+        ForEach-Object { "'$(Format-LogLineForMessage $_.Title)' ($($_.Status))" })
+    return @($entries | Sort-Object -Unique)
+}
+
+function Wait-HarnessFinalResult {
+    # After an UnhandledException line: waits up to $Seconds until $Process exited or the harness result in $HarnessDir
+    # was written after $SinceUtc (the moment the line was read) and has a final status (other than Running), so the
+    # result the harness writes after that line is not lost to the kill. A final result from before the line (a run that
+    # completed, then crashed while shutting down) does not end the wait: the harness rewrites it with the updated
+    # exception counts. Tradeoff (deliberate): the harness rewrites the result milliseconds after the UnhandledException
+    # line, i.e. usually before the agent's read ($SinceUtc), so in practice the wait ends on process exit or after the
+    # full grace. That is the safe direction: never an early kill, at most $Seconds (5 s) of waiting. Never throws.
+    param($Process, [string]$HarnessDir, [double]$Seconds, [DateTime]$SinceUtc)
+    try {
+        $jsonPath = Join-Path $HarnessDir 'run-result.json'
+        $txtPath = Join-Path $HarnessDir 'result.txt'
+        $until = [DateTime]::UtcNow.AddSeconds($Seconds)
+        while ([DateTime]::UtcNow -lt $until) {
+            if ($Process.WaitForExit(250)) { return }
+            # The file Get-ResultStatus reads: run-result.json if present, else result.txt (CoherentWarAI harness).
+            $result = Get-Item -LiteralPath $jsonPath -ErrorAction SilentlyContinue
+            if ($null -eq $result) { $result = Get-Item -LiteralPath $txtPath -ErrorAction SilentlyContinue }
+            if ($null -eq $result -or $result.LastWriteTimeUtc -le $SinceUtc) { continue }
+            $status = Get-ResultStatus $HarnessDir
+            if ($null -ne $status -and $status -ne 'Running') { return }
+        }
+    }
+    catch { Write-AgentLog "Waiting for the harness result failed: $($_.Exception.Message)" }
 }
 
 function Invoke-Run {
@@ -1476,6 +1688,10 @@ function Invoke-Run {
     $timedOut = $false
     $crashed = $false
     $crashLog = $null
+    $crashLine = $null   # the harness.log UnhandledException line (sanitized) that ended the run
+    $hung = $false
+    $silentSeconds = 0
+    $lastHarnessLine = $null   # the last harness.log line read that is not an Alive line
     $killFailed = $false
     $superviseError = $null
     $deadline = $null
@@ -1527,6 +1743,8 @@ function Invoke-Run {
         if (-not (Test-Path -LiteralPath $engineLogDir -PathType Container)) {
             Write-AgentLog "engineLogDir $engineLogDir does not exist: crash detection sees no watchdog log in this run unless the game creates the folder."
         }
+        # The engine asks for Safe Mode on the start after a run it did not end itself (a run the agent killed).
+        Reset-EngineSafelyExited -Path (Join-Path $configsDir 'engine_config.txt')
         $watchdogSnapshot = Get-WatchdogLogSnapshot -LogsDir $engineLogDir   # only what is written after this counts
         Write-AgentLog "Launching: $($Config.gameExecutable) $arguments"
         $startedAt = [DateTime]::UtcNow
@@ -1547,7 +1765,14 @@ function Invoke-Run {
         $nextBeat = $startedAt
         $nextDialogCheck = $startedAt
         $nextCrashCheck = $startedAt
-        $dialogState = @{ Handled = @{}; Seen = @{}; FailureLogged = $false }
+        $nextLogCheck = $startedAt
+        $logState = @{ Position = [long]0 }   # harness.log was deleted before the launch: every line in it is from this run
+        $lastAliveAt = $null   # the silence watchdog is armed by the first Alive line (main thread), not by any line
+        $unreadableStatusPasses = 0   # silence passes in a row that found no readable result
+        $resultFinal = $false   # the harness wrote its final result: silence is no longer a hang
+        $watchSilence = ([string]$Run.harness -eq 'TestRig')   # the CoherentWarAI harness writes no beat
+        $dialogState = @{ Handled = @{}; Seen = @{}; Open = @(); FailureLogged = $false }
+        $lastLogReadUtc = $startedAt   # when harness.log was last read (an UnhandledException line in it: Wait-HarnessFinalResult)
         try {
             $null = $process.Handle   # keep the handle so ExitCode stays readable
             $record.pid = $process.Id
@@ -1562,6 +1787,41 @@ function Invoke-Run {
                     $crashLog = Find-CrashedWatchdogLog -LogsDir $engineLogDir -ProcessId $process.Id -Snapshot $watchdogSnapshot
                     if ($null -ne $crashLog) { $crashed = $true; break }
                     $nextCrashCheck = $now.AddSeconds($script:CrashCheckSeconds)
+                }
+                if ($now -ge $nextLogCheck) {
+                    # Early signals from harness.log, before the hard timeout: an UnhandledException line, or silence.
+                    $nextLogCheck = $now.AddSeconds($script:HarnessLogCheckSeconds)
+                    $newLines = @(Read-HarnessLogGrowth -Path $harnessLogPath -State $logState)
+                    $lastLogReadUtc = [DateTime]::UtcNow   # a result written after this is newer than any line read here
+                    foreach ($line in $newLines) {
+                        if (Test-AliveLine $line) { $lastAliveAt = $now; $unreadableStatusPasses = 0 }
+                        else { $lastHarnessLine = $line }
+                    }
+                    $crashLine = Find-UnhandledExceptionLine $newLines
+                    if ($null -ne $crashLine) { $crashed = $true; break }
+                    # Only Alive lines count: lines of background threads (FirstChance) go on while the main thread hangs.
+                    if ($watchSilence -and -not $resultFinal -and $null -ne $lastAliveAt -and ($now - $lastAliveAt).TotalSeconds -gt $script:SilenceSeconds) {
+                        # run-result.json is rewritten after every scenario (status Running); only a final status ends the watch.
+                        $resultStatus = Get-ResultStatus $harnessDir
+                        if ($null -ne $resultStatus -and $resultStatus -ne 'Running') { $resultFinal = $true }
+                        elseif ($null -eq $resultStatus -and $unreadableStatusPasses -lt $script:SilenceStatusRetries) {
+                            $unreadableStatusPasses++   # the file may be being replaced: look again on the next pass
+                        }
+                        else {
+                            $silentSeconds = [int][Math]::Floor(($now - $lastAliveAt).TotalSeconds)
+                            # A crash also silences the beat: one last look at both crash signals before calling it a hang.
+                            $crashLog = Find-CrashedWatchdogLog -LogsDir $engineLogDir -ProcessId $process.Id -Snapshot $watchdogSnapshot
+                            if ($null -eq $crashLog) {
+                                $lastLines = @(Read-HarnessLogGrowth -Path $harnessLogPath -State $logState)
+                                $lastLogReadUtc = [DateTime]::UtcNow
+                                foreach ($line in $lastLines) { if (-not (Test-AliveLine $line)) { $lastHarnessLine = $line } }
+                                $crashLine = Find-UnhandledExceptionLine $lastLines
+                            }
+                            $crashed = ($null -ne $crashLog -or $null -ne $crashLine)
+                            $hung = -not $crashed
+                            break
+                        }
+                    }
                 }
                 if ($now -ge $nextDialogCheck) {
                     Invoke-GameDialogCheck -ProcessId $process.Id -State $dialogState -Record $record
@@ -1582,11 +1842,17 @@ function Invoke-Run {
         }
         finally {
             # Whatever happened above, the game must not outlive this block.
+            if ($null -ne $crashLine -and -not $aborted) {
+                # The harness writes its final result right after the UnhandledException line: give it a moment.
+                Wait-HarnessFinalResult -Process $process -HarnessDir $harnessDir -Seconds $script:UnhandledResultGraceSeconds -SinceUtc $lastLogReadUtc
+            }
             $stillRunning = $true
             try { $stillRunning = -not $process.HasExited } catch { }
             if ($stillRunning) {
                 if ($aborted) { Write-AgentLog "Abort requested - killing the game (process tree)." }
+                elseif ($null -ne $crashLine) { Write-AgentLog "Game crashed (UnhandledException in harness.log: $crashLine) - killing the game (process tree)." }
                 elseif ($crashed) { Write-AgentLog "Game crashed ($($crashLog.Name): 'Crash occurred') - killing the game (process tree)." }
+                elseif ($hung) { Write-AgentLog "Game hung (no Alive line in harness.log for $silentSeconds s, limit $($script:SilenceSeconds) s) - killing the game (process tree)." }
                 elseif ($timedOut) { Write-AgentLog "Hard timeout after $($Run.hardTimeoutMinutes) min - killing the game (process tree)." }
                 $stopBeat = {
                     Write-JobState -Context $Context -State 'running' -RunId $runId -RunIndex $RunIndex -Message 'stopping game'
@@ -1594,7 +1860,20 @@ function Invoke-Run {
                 if (-not (Stop-ProcessTree $process -Heartbeat $stopBeat)) { $killFailed = $true }
             }
         }
-        if (-not $crashed -and -not $aborted -and -not $timedOut -and $null -eq $superviseError) {
+        if (-not $aborted -and $null -eq $superviseError -and $null -eq $crashLine) {
+            # An UnhandledException line written right before the game exited (or was killed) is still unread: the loop
+            # stopped on the exit before its next read. After a watchdog crash only the last line is updated (message).
+            $finalLines = @(Read-HarnessLogGrowth -Path $harnessLogPath -State $logState)
+            foreach ($line in $finalLines) { if (-not (Test-AliveLine $line)) { $lastHarnessLine = $line } }
+            if (-not $crashed) {
+                $crashLine = Find-UnhandledExceptionLine $finalLines
+                if ($null -ne $crashLine) {
+                    $crashed = $true
+                    Write-AgentLog "Game crashed (UnhandledException in harness.log: $crashLine)."
+                }
+            }
+        }
+        if (-not $crashed -and -not $hung -and -not $aborted -and -not $timedOut -and $null -eq $superviseError) {
             # A crash in the last moment before the game exited on its own; the watchdog may write it a moment
             # after the exit, hence a few re-checks.
             $finalUntil = [DateTime]::UtcNow.AddSeconds($script:FinalCrashCheckSeconds)
@@ -1626,13 +1905,21 @@ function Invoke-Run {
     if ($null -ne $process) {
         $elapsedSeconds = ([DateTime]::UtcNow - $startedAt).TotalSeconds
         $status = if ($harnessDir) { Get-ResultStatus $harnessDir } else { $null }
+        $shownLastLine = if ($null -ne $lastHarnessLine) { Format-LogLineForMessage $lastHarnessLine } else { '(none)' }
         if ($killFailed -or -not $runCfgRemoved) {
             $record.exitClass = 'CleanupFailed'
             $record.message = 'The game could not be stopped or run.cfg could not be removed.'
         }
         elseif ($aborted) { $record.exitClass = 'Aborted' }
         elseif ($null -ne $superviseError) { $record.exitClass = 'SetupError'; $record.message = $superviseError }
-        elseif ($crashed) { $record.exitClass = 'Crashed'; $record.message = "Crash occurred ($($crashLog.Name))." }
+        elseif ($null -ne $crashLine) { $record.exitClass = 'Crashed'; $record.message = "Harness reported: $crashLine" }
+        elseif ($crashed) { $record.exitClass = 'Crashed'; $record.message = "Crash occurred ($($crashLog.Name)); last line: $shownLastLine" }
+        elseif ($hung) {
+            $record.exitClass = 'Hung'
+            $record.message = "No Alive line in harness.log for $silentSeconds s (limit $($script:SilenceSeconds) s); last line: $shownLastLine"
+            $openDialogs = @(Get-OpenDialogSummary $dialogState)
+            if ($openDialogs.Count -gt 0) { $record.message += '; open dialogs: ' + ($openDialogs -join ', ') }
+        }
         elseif ($timedOut) { $record.exitClass = 'HardTimeout' }
         elseif ($status -eq 'Completed') { $record.exitClass = 'Completed' }
         elseif ($elapsedSeconds -lt $script:LaunchFailedSeconds -and -not (Test-Path -LiteralPath $harnessLogPath)) {

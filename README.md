@@ -20,7 +20,7 @@ not implemented yet; the layout below is the plan.
 
 ```powershell
 copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key, towerGamePath
-runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects, packs them, publishes the job
+runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects (eight with -Suite RIG), packs them, publishes the job
 runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait   # diagnosis: skip the build
 ```
 
@@ -39,7 +39,20 @@ mode `WarSails`, seed 1, 1 day, and only the base modules, SmithingSuite, TestRi
 the scenario row; the exit code is 0 (the scenario Passed), 2 (Failed) or 1 (rig error: the scenario is missing from the
 result or Skipped) regardless of days reached.
 
-The build (default mode) compiles the seven projects with MSBuild into `out\stage\<jobId>\Modules`
+`-Suite RIG` is the rig self-test: one job with three runs, each judged against an expected outcome. r1
+`rig.selftest-throw` must end `Crashed`, r2 `rig.selftest-hang` must end `Hung`, r3 `rig.selftest-pass` must end
+`Completed` with its scenario Passed (hard timeout 5 minutes each); for r1 and r2 the agent's run message must also
+show the cause (r1: the exception `System.InvalidOperationException: rig.selftest-throw` itself, not just a harness line
+naming the scenario, r2: the missing `Alive:` line; see `docs/JOB-PROTOCOL.md`). Modules: base modules, TestRig.Harness and
+TestRig.SelfTest (built and packaged only for this suite; it contains deliberately crashing code). Exit code: 0 if every
+run meets its expectation, 2 if one does not, 1 if the job is not completed or a run is missing, except 3 if the agent
+aborted the job or the runner deadline hit. If the job is not completed, the runner prints `job status: <status> -
+<message>` (e.g. the agent's rejection reason). The result table shows expected and actual per run. The hard timeout is
+fixed per run, so `-HardTimeoutMinutes` is a usage error with this suite. The overall deadline is, per run, its hard
+timeout plus 2 minutes (baseline restore, cleanup, artifact copy), plus the claim wait (`-ClaimTimeoutSeconds`, rounded
+up to minutes) plus 5 minutes (28 minutes with the defaults), unless `-TimeoutMinutes` is given. With `-PackageFrom` the package must contain TestRig.Harness and TestRig.SelfTest.
+
+The build (default mode) compiles the seven projects (eight with `-Suite RIG`) with MSBuild into `out\stage\<jobId>\Modules`
 (not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
 repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder
 (`towerGamePath`) changed during the build. `msbuildPath` is optional (default: VS 2026 Build Tools).
@@ -64,6 +77,14 @@ game's `Modules` folder; to build elsewhere, override `/p:BannerlordModulesPath=
 ```powershell
 & "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe" src\TestRig.Harness\TestRig.Harness.csproj /p:Configuration=Debug /p:Platform=x64 /p:BannerlordModulesPath=<folder>\Modules
 ```
+
+The harness writes `Alive: phase=<phase>` to `harness.log` every 10 s of real time from the main thread
+(the first one comes about 10 s after the first harness line, from the game tick). The agent measures silence on
+`Alive:` lines only, armed by the first one, so a silent log means a blocked or dead game.
+
+Self-test module (`src/TestRig.SelfTest`, build it after the harness with the same `BannerlordModulesPath`):
+scenarios `rig.selftest-throw` (module tick throws, the game must crash), `rig.selftest-hang` (main thread
+blocks forever) and `rig.selftest-pass` (control). It crashes on purpose, so it is only for the rig's own tests.
 
 Unit tests (xUnit on the host .NET SDK, no game needed):
 `dotnet test tests\TestRig.Harness.Tests\TestRig.Harness.Tests.csproj`

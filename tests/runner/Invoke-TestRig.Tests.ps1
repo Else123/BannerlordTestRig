@@ -186,6 +186,7 @@ Describe 'Resolve-RigExitCode' {
         @{ s = 'completed'; c = 'Crashed'; d = 1; e = 2 },
         @{ s = 'completed'; c = 'HardTimeout'; d = $null; e = 3 },
         @{ s = 'completed'; c = 'Aborted'; d = $null; e = 3 },
+        @{ s = 'completed'; c = 'Hung'; d = $null; e = 3 },
         @{ s = 'completed'; c = 'SetupError'; d = $null; e = 1 },
         @{ s = 'completed'; c = 'LaunchFailed'; d = $null; e = 1 },
         @{ s = 'completed'; c = 'CleanupFailed'; d = $null; e = 1 },

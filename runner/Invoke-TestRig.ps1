@@ -17,7 +17,11 @@
     Exit codes: 0 all runs Completed with enough days; 1 rig/infrastructure error (blocked, rejected,
     failed, SetupError, LaunchFailed, CleanupFailed, transport error, open job); 2 test failure
     (NotCompleted, Crashed, too few days); 3 time limit or agent not responding (HardTimeout,
-    Aborted, claim timeout, stale heartbeat, overall deadline). Precedence: 1 > 3 > 2 > 0.
+    Hung, Aborted, claim timeout, stale heartbeat, overall deadline). Precedence: 1 > 3 > 2 > 0.
+    If the job is not completed, the done status and the agent's message are printed.
+    -Suite RIG (self-test, one job with three runs) is judged differently: each run must end with its
+    expected exitClass (r1, r2: and a run message showing the cause); exit 0 if all do, 2 if one does not, 1 if the job is not completed (except
+    aborted or the runner deadline: 3) or a run is missing. -HardTimeoutMinutes conflicts with -Suite RIG.
 
 .EXAMPLE
     .\runner\Invoke-TestRig.ps1 -Days 3 -Wait
@@ -32,7 +36,7 @@ param(
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
     [ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode = 'WarSails',
     [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
-    [ValidateSet('L1', 'SM')][string]$Suite,
+    [ValidateSet('L1', 'SM', 'RIG')][string]$Suite,
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
     [ValidateRange(1, [int]::MaxValue)][int]$BudgetMinutes = 60,
     [ValidateRange(1, [int]::MaxValue)][int]$HardTimeoutMinutes = 20,
@@ -56,7 +60,9 @@ $script:RigHarnessModules = [ordered]@{
 # and Days are defaults that an explicit parameter overrides. A suite defines its own mod list: base modules,
 # CoherentWarAI (only when WithCoherentWarAI), ExtraModules, the harness module, then TailModules (scenario
 # modules, which reference the harness and so load after it). Kind is the run kind: 'soak' or 'scenarios'
-# (then Scenarios = the scenario ids to run).
+# (then Scenarios = the scenario ids to run). A suite may instead define Runs: one job with several runs, each with
+# RunId, Scenarios, HardTimeoutMinutes and ExpectedExitClass (the verdict then compares every run with it), and
+# optionally ExpectedMessagePattern: a case-sensitive regex the run's agent message (agent-run.json) must match.
 $script:RigSuites = @{
     L1 = @{
         Harness           = 'TestRig'
@@ -78,6 +84,27 @@ $script:RigSuites = @{
         WithCoherentWarAI = $false
         ExtraModules      = @('SmithingSuite')
         TailModules       = @('SmithingSuite.Scenarios')
+    }
+    RIG = @{
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 1
+        Kind              = 'scenarios'
+        WithCoherentWarAI = $false
+        ExtraModules      = @()
+        TailModules       = @('TestRig.SelfTest')
+        Runs              = @(
+            # The crash must come from the self-test throw: the harness's UnhandledException line, or (the throw escapes
+            # to native, measured 2026-11-02) the watchdog crash with the FirstChance line of the throw as last line. The
+            # exception with its full type name, so a harness line that merely names the scenario does not count.
+            @{ RunId = 'r1'; Scenarios = @('rig.selftest-throw'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Crashed'
+                ExpectedMessagePattern = '^(Harness reported: |Crash occurred \(watchdog_log_\d+\.txt\); last line: ).*System\.InvalidOperationException: rig\.selftest-throw' },
+            # Hung by the silence watch, not by another cause.
+            @{ RunId = 'r2'; Scenarios = @('rig.selftest-hang'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Hung'
+                ExpectedMessagePattern = '^No Alive line in harness\.log for \d+ s' },
+            @{ RunId = 'r3'; Scenarios = @('rig.selftest-pass'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' }
+        )
     }
 }
 $script:DefaultMsBuildPath = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
@@ -137,6 +164,36 @@ function Get-RigSuiteKind {
     if ($Suite) { $script:RigSuites[$Suite].Kind } else { 'soak' }
 }
 
+# The runs a suite defines (RunId, Scenarios, HardTimeoutMinutes, ExpectedExitClass, ExpectedMessagePattern = $null
+# when the run has none); none for suites without Runs.
+# Callers wrap the result in @().
+function Get-RigSuiteRuns {
+    param([string]$Suite)
+    if (-not $Suite -or -not $script:RigSuites[$Suite].ContainsKey('Runs')) { return }
+    foreach ($r in $script:RigSuites[$Suite].Runs) {
+        [pscustomobject]@{
+            RunId = [string]$r.RunId; Scenarios = @($r.Scenarios)
+            HardTimeoutMinutes = [int]$r.HardTimeoutMinutes; ExpectedExitClass = [string]$r.ExpectedExitClass
+            ExpectedMessagePattern = if ($r.ContainsKey('ExpectedMessagePattern')) { [string]$r.ExpectedMessagePattern } else { $null }
+        }
+    }
+}
+
+# Overall runner deadline of a suite with Runs, in minutes; $null without Runs. Formula: per run its hard timeout
+# + 2 min (baseline restore, kill, stray sweep, artifact copy), plus the claim wait (rounded up to whole minutes;
+# install/preflight happen after the claim) plus 5 min slack. Never below the sum of hard timeouts + 10 (the
+# default of a single-run job: HardTimeoutMinutes + 10).
+function Get-RigSuiteTimeoutMinutes {
+    param([string]$Suite, [double]$ClaimTimeoutSeconds = 120)
+    $suiteRuns = @(Get-RigSuiteRuns -Suite $Suite)
+    if ($suiteRuns.Count -eq 0) { return $null }
+    $hardSum = 0
+    foreach ($r in $suiteRuns) { $hardSum += $r.HardTimeoutMinutes }
+    $claimMinutes = [int][math]::Ceiling($ClaimTimeoutSeconds / 60)
+    $formula = $hardSum + (2 * $suiteRuns.Count) + $claimMinutes + 5
+    [math]::Max($formula, $hardSum + 10)
+}
+
 # Applies -Suite to the parameter values. $BoundParameters = names of the parameters given explicitly
 # (keys of $PSBoundParameters). Harness is fixed by the suite: an explicit different one throws. Mode and
 # Seed keep an explicit value; Days defaults to the suite's value only when not given. Without a suite the
@@ -154,6 +211,9 @@ function Resolve-RigSuiteSettings {
         $s = $script:RigSuites[$Suite]
         if ($BoundParameters -contains 'Harness' -and $Harness -ne $s.Harness) {
             throw "-Suite $Suite fixes -Harness $($s.Harness); -Harness $Harness conflicts with it (omit -Harness)."
+        }
+        if ($BoundParameters -contains 'HardTimeoutMinutes' -and @(Get-RigSuiteRuns -Suite $Suite).Count -gt 0) {
+            throw "-Suite $Suite fixes the hard timeout of each run; -HardTimeoutMinutes conflicts with it (omit -HardTimeoutMinutes)."
         }
         $Harness = $s.Harness
         if ($BoundParameters -notcontains 'Mode') { $Mode = $s.Mode }
@@ -216,18 +276,30 @@ function New-RigJobManifest {
         [string]$Suite,
         [AllowNull()][AllowEmptyString()][string]$ExpectedGameVersion   # tower game version; $null/empty = not checked
     )
-    $run = [ordered]@{
-        runId              = 'r1'
-        kind               = (Get-RigSuiteKind -Suite $Suite)
-        harness            = $Harness
-        seed               = $Seed
-        days               = $Days
-        mode               = $Mode
-        stallMinutes       = $StallMinutes
-        budgetMinutes      = $BudgetMinutes
-        hardTimeoutMinutes = $HardTimeoutMinutes
+    $kind = Get-RigSuiteKind -Suite $Suite
+    $newRun = {
+        param([string]$RunId, [int]$RunHardTimeoutMinutes, $RunScenarios)
+        $run = [ordered]@{
+            runId              = $RunId
+            kind               = $kind
+            harness            = $Harness
+            seed               = $Seed
+            days               = $Days
+            mode               = $Mode
+            stallMinutes       = $StallMinutes
+            budgetMinutes      = $BudgetMinutes
+            hardTimeoutMinutes = $RunHardTimeoutMinutes
+        }
+        if ($kind -eq 'scenarios') { $run.scenarios = @($RunScenarios) }
+        $run
     }
-    if ($run.kind -eq 'scenarios') { $run.scenarios = @($script:RigSuites[$Suite].Scenarios) }
+    $suiteRuns = @(Get-RigSuiteRuns -Suite $Suite)
+    # Outer @(): a one-run list must stay a JSON array (an assignment from `if` unrolls a single element).
+    $runs = @(if ($suiteRuns.Count -gt 0) {
+            $suiteRuns | ForEach-Object { & $newRun $_.RunId $_.HardTimeoutMinutes $_.Scenarios }
+        } else {
+            & $newRun 'r1' $HardTimeoutMinutes $(if ($kind -eq 'scenarios') { $script:RigSuites[$Suite].Scenarios })
+        })
     [ordered]@{
         schema              = 1
         jobId               = $JobId
@@ -236,7 +308,7 @@ function New-RigJobManifest {
         package             = [ordered]@{ file = 'package.zip'; sha256 = $PackageSha256 }
         repos               = @($Repos)
         modules             = @(Get-RigModules -Mode $Mode -Harness $Harness -Suite $Suite)
-        runs                = @($run)
+        runs                = $runs
     }
 }
 
@@ -463,25 +535,81 @@ function Test-RigScenariosChecked {
     $true
 }
 
+# Judges one run of a suite with expectations. Expectation: RunId, Scenarios, ExpectedExitClass, optional
+# ExpectedMessagePattern. $Run = the run as collected from done.json and agent-run.json (runId, exitClass, message,
+# scenarioIds/scenarioStatuses), $null when done.json has no such run.
+# Returns 'Met', 'Mismatch' (a test failure), 'RigError' (the run failed in the rig itself: SetupError, LaunchFailed,
+# CleanupFailed that was not expected) or 'Missing'. With an ExpectedMessagePattern the run's message must match it
+# (case-sensitive; a missing message does not). An expected Completed also needs every scenario of the
+# expectation to be reported Passed; other expected classes (Crashed, Hung) have no scenario results by design.
+function Get-RigExpectationOutcome {
+    param(
+        [Parameter(Mandatory)]$Expectation,
+        $Run
+    )
+    if ($null -eq $Run) { return 'Missing' }
+    $actual = [string]$Run.exitClass
+    if ($actual -cne $Expectation.ExpectedExitClass) {
+        if ($actual -in 'SetupError', 'LaunchFailed', 'CleanupFailed') { return 'RigError' }
+        return 'Mismatch'
+    }
+    if (-not (Test-RigExpectedMessage -Expectation $Expectation -Run $Run)) { return 'Mismatch' }
+    if ($actual -ne 'Completed') { return 'Met' }
+    $ids = @(if ($null -ne $Run.scenarioIds) { $Run.scenarioIds })
+    $statuses = @(if ($null -ne $Run.scenarioStatuses) { $Run.scenarioStatuses })
+    foreach ($wanted in @($Expectation.Scenarios)) {
+        $passed = $false
+        for ($i = 0; $i -lt $ids.Count; $i++) {
+            if ($ids[$i] -ceq $wanted -and $statuses[$i] -ceq 'Passed') { $passed = $true; break }
+        }
+        if (-not $passed) { return 'Mismatch' }
+    }
+    'Met'
+}
+
+# True if the run's message matches the expectation's ExpectedMessagePattern, or the expectation has none.
+function Test-RigExpectedMessage {
+    param([Parameter(Mandatory)]$Expectation, [Parameter(Mandatory)]$Run)
+    $pattern = [string]$Expectation.ExpectedMessagePattern
+    if ($pattern -eq '') { return $true }
+    $message = $Run.message
+    return ($message -is [string] -and $message -cmatch $pattern)
+}
+
 # Exit code of one finished job. A run with kind 'scenarios' skips the daysReached rule below; instead a Completed
 # one must report every requested scenario without Skipped (Test-RigScenariosChecked), else 1. Per run: the exitClass maps to 0/1/2/3 (see below); additionally a scenario
 # (run-result.json) with status Failed counts as 2; Passed/Timeout/Skipped add nothing here; Error and any
 # unknown or non-string status count as 1.
 # Across everything: 1 > 3 > 2 > 0, so an Error scenario wins over any other code, and Failed (2) is the weakest.
+# With -Expectations (a suite with Runs) the per-run rules above do not apply; instead every expectation is judged by
+# Get-RigExpectationOutcome: Met = 0, Mismatch = 2, RigError or a run missing from a completed job = 1. The job status
+# and -ForceTimeout rules stay.
 function Resolve-RigExitCode {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$DoneStatus,
         [object[]]$Runs,
         [Parameter(Mandatory)][int]$Days,
+        [object[]]$Expectations,
         [switch]$ForceTimeout   # the runner itself hit a time limit (e.g. overall deadline)
     )
     $runList = @($Runs)
+    $expectationList = @($Expectations | Where-Object { $null -ne $_ })
     $codes = New-Object System.Collections.Generic.List[int]
     switch ($DoneStatus) {
         'completed' { if ($runList.Count -eq 0) { $codes.Add(1) } }
         'aborted' { $codes.Add(3) }
         default { $codes.Add(1) }   # blocked, rejected, failed and anything unknown
     }
+    foreach ($e in $expectationList) {
+        $run = $runList | Where-Object { $_.runId -ceq $e.RunId } | Select-Object -First 1
+        if ($null -eq $run -and $DoneStatus -ne 'completed') { continue }   # the job status already decided
+        switch (Get-RigExpectationOutcome -Expectation $e -Run $run) {
+            'Met' { }
+            'Mismatch' { $codes.Add(2) }
+            default { $codes.Add(1) }   # RigError, Missing
+        }
+    }
+    if ($expectationList.Count -gt 0) { $runList = @() }   # judged above, not by the per-run rules
     foreach ($r in $runList) {
         switch ($r.exitClass) {
             'Completed' {
@@ -492,7 +620,7 @@ function Resolve-RigExitCode {
                 elseif (-not (Test-RigScenariosChecked -Run $r)) { $codes.Add(1) }   # nothing (or not everything) was checked
             }
             { $_ -in 'NotCompleted', 'Crashed' } { $codes.Add(2) }
-            { $_ -in 'HardTimeout', 'Aborted' } { $codes.Add(3) }
+            { $_ -in 'HardTimeout', 'Hung', 'Aborted' } { $codes.Add(3) }
             default { $codes.Add(1) }   # SetupError, LaunchFailed, CleanupFailed, unknown
         }
         # No scenarioStatuses property (or $null) = no scenarios; a $null element inside the array is an unknown status.
@@ -529,6 +657,26 @@ function Format-RigRunLine {
     $daysCell = if ($RunKind -eq 'scenarios') { '-' } else { "$reached/$Days" }
     $dur = if ($null -ne $Duration) { '{0}m{1:00}s' -f [int][math]::Floor($Duration.TotalMinutes), $Duration.Seconds } else { '?' }
     '{0,-6} {1,-6} {2,-12} {3,-7} {4,-13} {5,-8} {6}' -f $RunId, $Kind, $st, $daysCell, $ExitClass, $dur, $Path
+}
+
+# Console row of a suite run with an expectation: the expected and the actual exitClass and whether they agree
+# (met / MISMATCH / ERROR for a rig error / missing). The actual class comes from the tower: sanitized like the check fields.
+function Format-RigExpectationLine {
+    param(
+        [Parameter(Mandatory)]$Expectation,
+        $Run,   # $null = the run is missing from done.json
+        [Parameter(Mandatory)][string]$Suite,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $verdict = switch (Get-RigExpectationOutcome -Expectation $Expectation -Run $Run) {
+        'Met' { 'met' }
+        'Mismatch' { 'MISMATCH' }
+        'RigError' { 'ERROR' }
+        default { 'missing' }
+    }
+    $actual = if ($null -eq $Run) { '-' } else { Format-RigCheckField ([string]$Run.exitClass) 40 }
+    '{0,-6} {1,-6} expected {2,-10} actual {3,-12} {4,-8} {5}' -f $Expectation.RunId, "$Suite-$(@($Expectation.Scenarios) -join '+')", `
+        $Expectation.ExpectedExitClass, $actual, $verdict, $Path
 }
 
 # Runs $Action, retrying on any error (transient transport problems). Backoff: DelaySeconds * attempt.
@@ -645,7 +793,8 @@ function Publish-RigResult {
     $runs = @()
     $lines = @()
     $runKind = Get-RigSuiteKind -Suite $Suite   # the job's run kind follows from its suite (jobs carry one suite)
-    $requestedScenarios = @(if ($runKind -eq 'scenarios') { $script:RigSuites[$Suite].Scenarios })
+    $expectations = @(Get-RigSuiteRuns -Suite $Suite)   # suites with Runs: one expectation per run
+    $requestedScenarios = @(if ($runKind -eq 'scenarios' -and $expectations.Count -eq 0) { $script:RigSuites[$Suite].Scenarios })
     foreach ($dr in $doneRuns) {
         $runId = [string]$dr.runId
         if ($runId -cnotmatch '^[A-Za-z0-9_-]+\z') { throw "Invalid runId in done.json: '$runId'" }
@@ -666,6 +815,7 @@ function Publish-RigResult {
         # .20 versions (agent >= version-reporting): absent in older agents = $null
         $arProps = if ($ar -is [System.Management.Automation.PSCustomObject]) { $ar.PSObject.Properties.Name } else { @() }
         $gameVersion = if ($arProps -contains 'gameVersion') { $ar.gameVersion } else { $null }
+        $runMessage = if ($arProps -contains 'message') { $ar.message } else { $null }   # judged by ExpectedMessagePattern
         # Explicit assignment: `$x = if (...) { @(...) }` would unroll 0 elements to $null and 1 to a scalar (not a JSON array).
         $moduleVersions = $null
         if ($arProps -contains 'moduleVersions' -and $null -ne $ar.moduleVersions) { $moduleVersions = @($ar.moduleVersions) }
@@ -675,11 +825,12 @@ function Publish-RigResult {
             scenarioStatuses = @($rr.Scenarios | ForEach-Object { $_.Status })
             scenarioIds = @($rr.Scenarios | ForEach-Object { $_.Id })
             requestedScenarios = $requestedScenarios
-            gameVersion = $gameVersion; moduleVersions = $moduleVersions
+            gameVersion = $gameVersion; moduleVersions = $moduleVersions; message = $runMessage
         }
         # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario, each followed by
         # one indented line per failed check of that scenario
-        $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } else { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) }
+        # (with expectations, a run without scenario results, e.g. a crashed one, gets only its expectation row)
+        $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } elseif ($expectations.Count -eq 0) { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) } else { @() }
         foreach ($sc in $lineSources) {
             $kind = if ($Suite) { "$Suite-$($sc.Id)" } else { $sc.Id }
             $lines += Format-RigRunLine -RunId $runId -Kind $kind -Status $sc.Status -DaysReached $daysReached -Days $Days `
@@ -689,7 +840,26 @@ function Publish-RigResult {
             }
         }
     }
+    if ($expectations.Count -gt 0) {
+        $expectationLines = foreach ($e in $expectations) {
+            $run = $runs | Where-Object { $_.runId -ceq $e.RunId } | Select-Object -First 1
+            $dir = Join-Path $ResultDir $e.RunId
+            Format-RigExpectationLine -Expectation $e -Run $run -Suite $Suite -Path $dir
+            if ($null -ne $run -and [string]$run.exitClass -ceq $e.ExpectedExitClass -and -not (Test-RigExpectedMessage -Expectation $e -Run $run)) {
+                $shownMessage = if ($run.message -is [string]) { Format-RigCheckField $run.message 400 } else { '(none)' }
+                '    message does not match {0}: {1}' -f $e.ExpectedMessagePattern, $shownMessage
+            }
+        }
+        $lines = @($expectationLines) + @($lines)
+    }
     $lines | ForEach-Object { Write-RigMessage $_ }
+
+    # The reason the agent gave when it did not complete the job (rejected, blocked, failed, aborted ...).
+    if ($doneStatus -cne 'completed') {
+        $shownStatus = if ($doneStatus) { Format-RigCheckField $doneStatus 40 } else { '?' }
+        $doneMessage = if ($done.PSObject.Properties.Name -contains 'message') { Format-RigCheckField ([string]$done.message) 400 } else { '' }
+        Write-RigMessage $(if ([string]::IsNullOrWhiteSpace($doneMessage)) { "job status: $shownStatus" } else { "job status: $shownStatus - $doneMessage" })
+    }
 
     $versionWarnings = @()
     if (-not [string]::IsNullOrWhiteSpace($TowerGamePath)) {
@@ -699,17 +869,28 @@ function Publish-RigResult {
     }
     $versionWarnings | ForEach-Object { Write-RigMessage $_ }
 
-    $code = Resolve-RigExitCode -DoneStatus $doneStatus -Runs $runs -Days $Days -ForceTimeout:$ForceTimeout
+    $code = Resolve-RigExitCode -DoneStatus $doneStatus -Runs $runs -Days $Days -Expectations $expectations -ForceTimeout:$ForceTimeout
     Write-RigJsonFile -Path (Join-Path $ResultDir 'job-result.json') -InputObject ([ordered]@{
             jobId    = $JobId
             suite    = if ($Suite) { $Suite } else { $null }
             status   = if ($doneStatus) { $doneStatus } else { $null }
             exitCode = $code
             runs     = @($runs | ForEach-Object {
-                    [ordered]@{
+                    $entry = [ordered]@{
                         runId = $_.runId; exitClass = $_.exitClass; result = $_.result
                         gameVersion = $_.gameVersion; moduleVersions = $_.moduleVersions
                     }
+                    if ($expectations.Count -gt 0) {   # suites with Runs: what the run was judged against, and the verdict
+                        $judgedRunId = $_.runId
+                        $judgedBy = $expectations | Where-Object { $_.RunId -ceq $judgedRunId } | Select-Object -First 1
+                        $entry.expected = $null   # a run the suite does not define is not judged
+                        $entry.verdict = $null
+                        if ($null -ne $judgedBy) {
+                            $entry.expected = [ordered]@{ exitClass = $judgedBy.ExpectedExitClass; messagePattern = $judgedBy.ExpectedMessagePattern }
+                            $entry.verdict = Get-RigExpectationOutcome -Expectation $judgedBy -Run $_
+                        }
+                    }
+                    $entry
                 })
             versionWarnings = $versionWarnings
         })
@@ -781,7 +962,7 @@ function Start-TestRigJob {
         if ($buildMode) {
             $stageDir = Join-Path (Join-Path $OutRoot 'stage') $jobId
             $build = Invoke-RigBuildPackage -WorkspaceRoot $WorkspaceRoot -StageDir $stageDir `
-                -TowerGamePath ([string]$target.towerGamePath) -MsBuildPath $msbuildPath
+                -TowerGamePath ([string]$target.towerGamePath) -MsBuildPath $msbuildPath -Suite $Suite
             Write-RigMessage "build: staged in $stageDir; tower Modules unchanged"
             Copy-Item -LiteralPath $build.ManifestPath -Destination (Join-Path $jobDir 'manifest.json') -ErrorAction Stop
             $repos = @($build.Repos)
@@ -834,6 +1015,11 @@ if ($MyInvocation.InvocationName -ne '.') {
     } catch {
         Write-RigMessage "ERROR: $($_.Exception.Message)"
         exit 1
+    }
+    # A suite with Runs sets its own overall deadline (see Get-RigSuiteTimeoutMinutes) unless -TimeoutMinutes is given.
+    if (@($PSBoundParameters.Keys) -notcontains 'TimeoutMinutes') {
+        $suiteTimeout = Get-RigSuiteTimeoutMinutes -Suite $Suite -ClaimTimeoutSeconds $ClaimTimeoutSeconds
+        if ($null -ne $suiteTimeout) { $TimeoutMinutes = $suiteTimeout }
     }
     $code = Start-TestRigJob -PackageFrom $PackageFrom -Seed $settings.Seed -Days $settings.Days -Mode $settings.Mode `
         -StallMinutes $StallMinutes -BudgetMinutes $BudgetMinutes -HardTimeoutMinutes $HardTimeoutMinutes -Harness $settings.Harness -Suite $Suite `

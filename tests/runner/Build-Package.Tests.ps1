@@ -76,7 +76,7 @@ if ($env:RIG_FAKE_FAIL -and $name -eq $env:RIG_FAKE_FAIL) { Write-Output "error 
 $ids = @{
     'CoherentWarAI.csproj' = 'CoherentWarAI'; 'CoherentWarAI.TestHarness.csproj' = 'CoherentWarAI.TestHarness'; 'TestRig.Harness.csproj' = 'TestRig.Harness'
     'AutoTrader.csproj' = 'AutoTraderSpeed'; 'SmithingSuite.csproj' = 'SmithingSuite'; 'CompanionSuite.csproj' = 'CompanionManagementSuite'
-    'SmithingSuite.Scenarios.csproj' = 'SmithingSuite.Scenarios'
+    'SmithingSuite.Scenarios.csproj' = 'SmithingSuite.Scenarios'; 'TestRig.SelfTest.csproj' = 'TestRig.SelfTest'
 }
 $id = $ids[$name]
 if (-not $id -or -not $modules) { Write-Output "fake msbuild: bad arguments: $argLine"; exit 2 }
@@ -119,6 +119,20 @@ Describe 'Get-RigBuildProjects' {
         $iScen | Should BeGreaterThan -1
         $iScen | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
         $iScen | Should BeGreaterThan ([array]::IndexOf($ids, 'SmithingSuite'))
+    }
+    It 'adds TestRig.SelfTest (repo BannerlordTestRig) after the harness only for -Suite RIG' {
+        foreach ($s in @($null, '', 'L1', 'SM')) {
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s).Count | Should Be 7
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' }).Count | Should Be 0
+        }
+        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite RIG)
+        $r.Count | Should Be 8
+        $hit = @($r | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' })
+        $hit.Count | Should Be 1
+        $hit[0].Repo | Should Be 'BannerlordTestRig'
+        $hit[0].ProjectPath | Should Be (Join-Path 'C:\ws\BannerlordTestRig' 'src\TestRig.SelfTest\TestRig.SelfTest.csproj')
+        $ids = @($r | ForEach-Object { $_.ModuleId })
+        [array]::IndexOf($ids, 'TestRig.SelfTest') | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
     }
 }
 
@@ -399,6 +413,35 @@ Describe 'Invoke-RigBuildPackage' {
         $iS = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match 'SmithingSuite\.Scenarios\.csproj') }), $true)
         $iH | Should BeGreaterThan -1
         $iS | Should BeGreaterThan $iH
+    }
+
+    It 'builds TestRig.SelfTest after the harness and stages it only for -Suite RIG' {
+        $r = Build @{ Suite = 'RIG' }
+        $lines = @(Get-Content -LiteralPath $script:log)
+        $lines.Count | Should Be 8
+        $iH = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match 'TestRig\.Harness\.csproj') }), $true)
+        $iT = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match 'TestRig\.SelfTest\.csproj') }), $true)
+        $iH | Should BeGreaterThan -1
+        $iT | Should BeGreaterThan $iH
+        Test-Path -LiteralPath (Join-Path $script:stage 'Modules\TestRig.SelfTest\SubModule.xml') | Should Be $true
+        @($r.Repos).Count | Should Be 5
+    }
+
+    It 'does not build or stage TestRig.SelfTest for other suites or without a suite' {
+        foreach ($s in @(@{}, @{ Suite = 'SM' }, @{ Suite = 'L1' })) {
+            if (Test-Path -LiteralPath $script:stage) { Remove-Item -LiteralPath $script:stage -Recurse -Force }
+            Set-Content -LiteralPath $script:log -Value ''
+            Build $s | Out-Null
+            ((Get-Content -LiteralPath $script:log) -join "`n").Contains('TestRig.SelfTest') | Should Be $false
+            Test-Path -LiteralPath (Join-Path $script:stage 'Modules\TestRig.SelfTest') | Should Be $false
+        }
+    }
+
+    It 'throws naming TestRig.SelfTest when its build exits 0 but wrote nothing (-Suite RIG)' {
+        $env:RIG_FAKE_SKIP = 'TestRig.SelfTest.csproj'
+        $msg = $null
+        try { Build @{ Suite = 'RIG' } | Out-Null } catch { $msg = $_.Exception.Message }
+        $msg | Should Match 'TestRig\.SelfTest'
     }
 
     It 'keeps the MSBuild output of every project in <StageDir>\build.log' {

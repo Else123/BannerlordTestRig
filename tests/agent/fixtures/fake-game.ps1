@@ -23,8 +23,31 @@
 #                      | crashfirst (first start: like crashexit, marker crashfirst-done.txt in FAKEGAME_DOCS; later starts:
 #                      appends a line without a crash to every other watchdog log, like the watchdog of the earlier game
 #                      still writing, then completes)
+#                      | unhandled (appends a harness.log line '<s> UnhandledException (terminating=True): ...', then hangs)
+#                      | unhandledexit (appends the same line, then exits at once without a result)
+#                      | unhandledthenresult (TestRig only: appends the same line, 2 s later the final run-result.json
+#                      (status Aborted, reason unhandled:Campaign), then hangs)
+#                      | completedthenunhandled (TestRig only: final run-result.json (status Completed, unhandled 0), then
+#                      the same line, 3.5 s later the result rewritten with unhandled 1 (like the harness after a crash
+#                      during shutdown), then hangs)
+#                      | unhandledlate (appends the same line after 3 s, then hangs)
+#                      | nolog (writes no harness.log at all, then hangs)
+#                      | alivesleep (appends one '<s> Alive: phase=...' line, then hangs)
+#                      | firstchancehang (appends one Alive line, then a FirstChance line every second, like a background
+#                      thread while the main thread is blocked)
+#                      | crashafter (no Alive line; 'Crash occurred' reaches the watchdog log after 6 s, then hangs)
+#                      | alivecrash (appends one Alive line, 'Crash occurred' in the watchdog log at once, then hangs)
+#                      | safemode (blocking Yes/No message box titled 'Safe Mode'; writes the answer (Yes|No) to
+#                      fake-safemode-answer.txt in FAKEGAME_DOCS, then completes)
+#                      | safemodeok (blocking message box titled 'Safe Mode' with only OK, completes after it is closed)
+#                      | firstchance (appends a FirstChance line that merely contains the word UnhandledException, then
+#                      completes after 3 s)
+#                      | partial (appends the UnhandledException line in two pieces 3 s apart, the first without a line
+#                      break, then hangs)
+#                      | runningsleep (TestRig only: one Alive line, run-result.json with status Running, then hangs)
+#                      | resultthenslow (one Alive line, writes the final result, then needs 6 s to exit)
 #   FAKEGAME_ENGINELOGS the engineLogDir the agent uses: if set, watchdog_log_<pid>.txt is written there
-#                      (needed by crash, crashexit, crashlate, relaunch, crashforeign and crashfirst)
+#                      (needed by crash, crashexit, crashlate, relaunch, crashforeign, crashfirst, crashafter and alivecrash)
 # Snapshots for the tests (in FAKEGAME_DOCS): fake-bannerlordconfig.txt and fake-mcm.json (the configs as the game saw
 # them, if present) and fake-mcm-files.txt (every file below Configs\ModSettings\Global, relative, one per line).
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GameArguments)
@@ -50,7 +73,9 @@ if (-not $env:FAKEGAME_NOMODLOG) {
     New-Item -ItemType Directory -Path $modDir -Force | Out-Null   # the mod log folder exists independently of the harness folder
     [System.IO.File]::WriteAllText((Join-Path $modDir 'CoherentWarAI.log'), "fake mod log`r`n", $utf8)
 }
-[System.IO.File]::WriteAllText((Join-Path $harnessDir 'harness.log'), "harness started`r`nharness day 1 reached`r`n", $utf8)
+if ($env:FAKEGAME_BEHAVIOR -ne 'nolog') {
+    [System.IO.File]::WriteAllText((Join-Path $harnessDir 'harness.log'), "harness started`r`nharness day 1 reached`r`n", $utf8)
+}
 
 $configsDir = Join-Path $docs 'Configs'
 $bannerlordConfig = Join-Path $configsDir 'BannerlordConfig.txt'
@@ -129,6 +154,95 @@ if ($behavior -eq 'relaunch') {
     [System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_ENGINELOGS "watchdog_log_$strayPid.txt"), "watchdog started`r`nCrash occurred`r`n", $utf8)
     exit 0
 }
+function Add-HarnessLog {
+    param([string]$Text)
+    [System.IO.File]::AppendAllText((Join-Path $harnessDir 'harness.log'), $Text, $utf8)
+}
+function Add-WatchdogCrash {
+    [System.IO.File]::AppendAllText((Join-Path $env:FAKEGAME_ENGINELOGS "watchdog_log_$PID.txt"), "Crash occurred`r`n", $utf8)
+}
+$aliveLine = "10.0 Alive: phase=Campaign`n"
+if ($behavior -eq 'unhandled') {
+    Add-HarnessLog "5.0 UnhandledException (terminating=True): System.InvalidOperationException: boom`n"
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'unhandledthenresult') {
+    Add-HarnessLog "5.0 UnhandledException (terminating=True): System.InvalidOperationException: then-result`n"
+    Start-Sleep -Seconds 2
+    $tmp = Join-Path $harnessDir 'run-result.json.tmp'
+    [System.IO.File]::WriteAllText($tmp, '{"schema":1,"status":"Aborted","reason":"unhandled:Campaign","exceptions":{"total":1,"own":0,"unhandled":1,"top":[]},"scenarios":[]}', $utf8)
+    Move-Item -LiteralPath $tmp -Destination (Join-Path $harnessDir 'run-result.json') -Force
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'completedthenunhandled') {
+    $tmp = Join-Path $harnessDir 'run-result.json.tmp'
+    $resultPath = Join-Path $harnessDir 'run-result.json'
+    [System.IO.File]::WriteAllText($tmp, '{"schema":1,"status":"Completed","exceptions":{"total":0,"own":0,"unhandled":0,"top":[]},"scenarios":[]}', $utf8)
+    Move-Item -LiteralPath $tmp -Destination $resultPath -Force
+    Add-HarnessLog "5.0 UnhandledException (terminating=True): System.InvalidOperationException: during-shutdown`n"
+    Start-Sleep -Milliseconds 3500
+    [System.IO.File]::WriteAllText($tmp, '{"schema":1,"status":"Completed","exceptions":{"total":1,"own":0,"unhandled":1,"top":[]},"scenarios":[]}', $utf8)
+    Move-Item -LiteralPath $tmp -Destination $resultPath -Force
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'unhandledlate') {
+    Start-Sleep -Seconds 3
+    Add-HarnessLog "5.0 UnhandledException (terminating=True): System.InvalidOperationException: late`n"
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'unhandledexit') {
+    Add-HarnessLog "5.0 UnhandledException (terminating=True): System.InvalidOperationException: last-words`n"
+    exit 0
+}
+if ($behavior -eq 'nolog' -or $behavior -eq 'alivesleep') {
+    if ($behavior -eq 'alivesleep') { Add-HarnessLog $aliveLine }
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'firstchancehang') {
+    Add-HarnessLog $aliveLine
+    for ($i = 1; $i -le 120; $i++) {
+        Start-Sleep -Seconds 1
+        Add-HarnessLog "$(10 + $i).0 FirstChance #$i [Worker]: System.IO.IOException: background noise`n"
+    }
+    exit 0
+}
+if ($behavior -eq 'crashafter') {
+    Start-Sleep -Seconds 6
+    Add-WatchdogCrash
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'alivecrash') {
+    Add-HarnessLog $aliveLine
+    Add-WatchdogCrash
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'partial') {
+    Add-HarnessLog '5.0 UnhandledException (terminating=Tr'
+    Start-Sleep -Seconds 3
+    Add-HarnessLog "ue): System.InvalidOperationException: partial-boom`n"
+    Start-Sleep -Seconds 120
+    exit 0
+}
+if ($behavior -eq 'resultthenslow') { Add-HarnessLog $aliveLine }   # arms the silence watch before the result
+if ($behavior -eq 'firstchance') {
+    Add-HarnessLog "5.0 FirstChance #1 [Main]: System.Exception: a handler named UnhandledException saw it`n"
+    Start-Sleep -Seconds 3   # then completes normally
+}
+if ($behavior -eq 'runningsleep') {
+    Add-HarnessLog $aliveLine
+    $tmp = Join-Path $harnessDir 'run-result.json.tmp'
+    [System.IO.File]::WriteAllText($tmp, '{"schema":1,"status":"Running","scenarios":[]}', $utf8)
+    Move-Item -LiteralPath $tmp -Destination (Join-Path $harnessDir 'run-result.json') -Force
+    Start-Sleep -Seconds 120
+    exit 0
+}
 if ($behavior -eq 'sleep') {
     Start-Sleep -Seconds 120
     exit 0
@@ -146,14 +260,19 @@ $dialogs = @{
     modchangeokcancel = @{ Title = 'Mod change detected'; Buttons = 'OKCancel' }
     modchangeyesno    = @{ Title = 'Mod change detected'; Buttons = 'YesNo' }
     otherdialog       = @{ Title = 'Some other dialog'; Buttons = 'OK' }
+    safemode          = @{ Title = 'Safe Mode'; Buttons = 'YesNo' }
+    safemodeok        = @{ Title = 'Safe Mode'; Buttons = 'OK' }
 }
 if ($behavior -and $dialogs.ContainsKey($behavior)) {
     # A real #32770 dialog owned by this process, like the engine's; returns only once it is closed.
     # Engine dialog, measured 2026-11-01 on v1.4.8: #32770, one push button, confirmed via the single-button rule.
     Add-Type -AssemblyName System.Windows.Forms
     $dialog = $dialogs[$behavior]
-    $null = [System.Windows.Forms.MessageBox]::Show('A change in your active mods was detected.', $dialog.Title,
+    $answer = [System.Windows.Forms.MessageBox]::Show('A change in your active mods was detected.', $dialog.Title,
         [System.Windows.Forms.MessageBoxButtons]$dialog.Buttons)
+    if ($behavior -eq 'safemode') {
+        [System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_DOCS 'fake-safemode-answer.txt'), [string]$answer, $utf8)
+    }
 }
 if ($behavior -eq 'slow') {
     Start-Sleep -Seconds 6   # then completes normally
@@ -174,4 +293,5 @@ elseif ($behavior -ne 'noresult') {
         [System.IO.File]::WriteAllText((Join-Path $harnessDir 'result.txt'), "status=Completed`r`ndaysReached=1`r`n", $utf8)
     }
 }
+if ($behavior -eq 'resultthenslow') { Start-Sleep -Seconds 6 }
 exit 0

@@ -31,6 +31,10 @@ namespace TestRig.Harness
 
         private const string NavalDlcModuleId = "NavalDLC";
 
+        // The agent ends a game that wrote no "Alive:" line for 60 s; the largest gap between two
+        // Alive lines measured in a real run is 14.5 s, so a 10 s beat leaves a wide margin.
+        private const double AliveIntervalSeconds = 10;
+
         private const string ResultFileName = "run-result.json";
 
         // Writing the temp file or replacing the target fails with an IOException (or, for a target
@@ -101,6 +105,10 @@ namespace TestRig.Harness
         private string _lastDriverStep;
         private string _lastDriverError;
         private int _lastHeartbeatDay = -1;
+
+        // Liveness line for the agent's silence watchdog. _clock starts with the first harness line
+        // (see Log), so its zero is the start of the first window.
+        private readonly AliveClock _aliveClock = new AliveClock(AliveIntervalSeconds, 0);
 
         private double RealSeconds
         {
@@ -248,6 +256,8 @@ namespace TestRig.Harness
 
             try
             {
+                LogAliveIfDue();
+
                 if (_configError != null)
                 {
                     // Invalid config: the result is already written; do not let the runner wait for its timeout.
@@ -885,6 +895,23 @@ namespace TestRig.Harness
             TaleWorlds.Engine.Utilities.QuitGame();
         }
 
+        // Runs on the main thread from OnApplicationTick, so a blocked main thread stops the line.
+        // Inert (no run.cfg) writes nothing: it has neither a config nor a config error.
+        private void LogAliveIfDue()
+        {
+            if (_config == null && _configError == null)
+            {
+                return;
+            }
+
+            if (!_clock.IsRunning || !_aliveClock.TryBeat(RealSeconds))
+            {
+                return;
+            }
+
+            Log("Alive: phase=" + (_run == null ? "Init" : _run.Phase.ToString()));
+        }
+
         private void LogHeartbeat(int day)
         {
             if (day == _lastHeartbeatDay)
@@ -965,12 +992,14 @@ namespace TestRig.Harness
 
             try
             {
-                string line = RealSeconds.ToString("F1", CultureInfo.InvariantCulture) + " " + message + "\n";
-
                 // AppendAllText opens, writes and closes: each line reaches the OS before Log returns,
                 // so it survives a process kill right after.
                 lock (_logLock)
                 {
+                    // The first line starts the clock (a no-op once running), so the liveness beat
+                    // covers the time from the first harness line on, including module loading.
+                    _clock.Start();
+                    string line = RealSeconds.ToString("F1", CultureInfo.InvariantCulture) + " " + message + "\n";
                     Directory.CreateDirectory(_harnessDirectory);
                     File.AppendAllText(Path.Combine(_harnessDirectory, "harness.log"), line, Utf8NoBom);
                 }

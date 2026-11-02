@@ -114,6 +114,9 @@ before anything is installed. Native, NavalDLC and Workshop modules are never to
 
 `state`: `claimed` | `preflight` | `installing` | `running` | `collecting` | `finished`.
 
+`lastHarnessLine`: the last non-empty line of `harness.log` (from its last 8 KB), skipping the harness's `Alive:` beat
+lines so the last progress line stays visible; the last `Alive:` line only if the tail holds nothing else.
+
 ## Preflight (job level)
 
 Before anything is installed the agent checks, in this order; the first failure ends the job with
@@ -154,10 +157,22 @@ restored. `gameVersion`: installed game version, `string|null`. `moduleVersions`
 `job.modules`, in that order: `version` is `string|null` (module without `Version`), `source` is `package` |
 `game` | `workshop` (where the agent found the module, checked in this order).
 
-`dismissedDialogs`: titles of game dialogs the agent sent OK to during the run, empty if none.
-While the game runs, the agent checks its visible standard dialogs (`#32770`) every second. Only the
-exact title `Mod change detected` (shown by the engine on the first start after the module list
-changed) gets OK; any other dialog title is logged once per run and left alone.
+`dismissedDialogs`: titles of game dialogs the agent answered during the run, empty if none.
+While the game runs, the agent checks its visible standard dialogs (`#32770`) every second. Only two exact titles
+are answered: `Mod change detected` (shown by the engine on the first start after the module list changed) gets OK;
+`Safe Mode` (the engine's Yes/No question "Game shut down unexpectedly on previous session. Would you like to enable
+safe mode?") gets No, via the box's `IDNO` button, whatever the language of its captions. Any other dialog title is
+logged once per run and left alone.
+
+Safe Mode prevention: the engine writes `safely_exited = 0` into
+`<documentsRoot>\Mount and Blade II Bannerlord\Configs\engine_config.txt` when it starts and `1` only on a clean exit,
+so after every run the agent had to kill the next start would block on the `Safe Mode` question (measured 2026-11-02).
+Right before every launch the agent therefore sets a line `safely_exited = 0` to `1`: exactly that one byte is
+rewritten in place, everything else in the file (encoding, BOM, line endings, other values) stays as it is, and
+`agent.log` gets one line ("previous run did not exit cleanly"). Reading and writing go through one exclusive handle
+(no other handle may have the file open in between). A missing file or no such line: nothing happens. While a
+`Bannerlord` process runs the file belongs to that game: the reset is skipped and logged. If the file cannot be opened
+or written, the agent logs it and launches anyway (the dialog answer above is the fallback).
 
 `exitClass` (names for the exit codes of `Run-SoakTest.ps1` in BannerlordCoherentWarAI):
 
@@ -169,11 +184,50 @@ changed) gets OK; any other dialog title is logged once per run and left alone.
 | `HardTimeout` | `hardTimeoutMinutes` expired, game killed |
 | `NotCompleted` | game ended, but no usable result (missing, or `run-result.json` invalid JSON) or status not `Completed` |
 | `CleanupFailed` | the game could not be stopped or `run.cfg` could not be removed |
-| `Crashed` | the watchdog log reported `Crash occurred`, game killed (see "Crash watchdog") |
+| `Crashed` | the watchdog log reported `Crash occurred`, or `harness.log` gained an `UnhandledException` line; game killed (see "Crash watchdog" and "Early signals from harness.log") |
+| `Hung` | harness `TestRig` only: no new `Alive:` line in `harness.log` for more than 60 s, game killed (see "Early signals from harness.log") |
 | `Aborted` | `abort` file seen, game killed |
 
 If several apply, the first in this order wins: `CleanupFailed` > `Aborted` > `SetupError` > `Crashed` >
-`HardTimeout` > `Completed` > `LaunchFailed` > `NotCompleted`.
+`Hung` > `HardTimeout` > `Completed` > `LaunchFailed` > `NotCompleted`.
+
+### Early signals from harness.log
+
+About once per second the agent reads only what `harness.log` gained since the last read (it remembers the
+byte position; a missing, locked or half-written file is tolerated, and a partial last line waits for its
+line break). `harness.log` is deleted before the launch, so only lines of this run count. Two signals end the
+run before `hardTimeoutMinutes`; the agent then kills the process tree (after a silence at once, after an
+`UnhandledException` line after a short grace, see below). After the game has ended (on its own or killed) the agent
+reads the growth once more, so an `UnhandledException` line written right before the exit still counts (`Crashed`,
+which wins over `Hung` and `HardTimeout`).
+
+- **`UnhandledException` line** (all harnesses): a complete line whose text after the leading `<seconds> `
+  timestamp starts with `UnhandledException` gives `exitClass` `Crashed`; `message` is `Harness reported: <that line>`
+  (single line, printable ASCII, cut to 200 characters). A `FirstChance` line that merely contains the
+  word does not count. The line ends the run whatever its `terminating=` value: under the .NET Framework 4.8 default
+  policy an unhandled exception terminates the process (the game ships no `Bannerlord.exe.config` that changes it).
+  Right after the line the harness writes its final `run-result.json` (status `Aborted`, reason `unhandled:<phase>`,
+  updated exception counts; a result that was final already is rewritten with the updated counts), so the agent waits
+  up to 5 s (`UnhandledResultGraceSeconds`) until the game has exited or the harness result was written after the
+  agent read the line and has a status other than `Running`, then kills; the result is collected as an artifact.
+- **Silence** (harness `TestRig` only; the CoherentWarAI harness writes no beat): measured on the harness's beat
+  only, the lines whose text after the `<seconds> ` timestamp starts with `Alive:`. The harness writes one every
+  10 s from the main thread (`OnApplicationTick`; the largest gap measured in a real run was 14.5 s). The watch is
+  armed by the first `Alive:` line of the run, so the long gap between module load and the first tick is never a
+  hang, and a game that never writes an `Alive:` line ends by `hardTimeoutMinutes` instead. Other lines (e.g.
+  `FirstChance` lines of background threads) neither arm the watch nor keep the run alive. More than 60 s without a
+  new `Alive:` line gives `exitClass` `Hung`; `message` states the seconds of silence and the last harness line that
+  is not an `Alive:` line (`(none)` if there is none), followed by `; open dialogs: '<title>' (<state>), ...` when the
+  agent's last dialog check (once a second) found game dialogs open: `(not answered)` for other titles,
+  `(answer failed)` for a known title whose answer could not be sent (e.g. a `Safe Mode` box without a No button),
+  `(still open after answer)` for a known title still open 5 s after its answer was sent; so a blocking native dialog
+  is visible in the message. Before deciding `Hung`
+  the agent looks once more at the watchdog log and at the growth of
+  `harness.log`; a crash found there gives `Crashed` instead. The watch ends once the harness has written its final
+  result: `run-result.json` (or `result.txt`) with a status other than `Running`. `run-result.json` is rewritten
+  after every scenario with status `Running`, so its mere existence does not end the watch. A result that cannot be
+  read at that moment (e.g. while it is being replaced) is looked at again on the next two passes (about one second
+  apart) before the run counts as `Hung`.
 
 ### Crash watchdog
 
@@ -185,8 +239,9 @@ shorter counts as replaced and is read in full). An old crash log, or a log from
 therefore never counts, and neither does a mere write to an old log. If `engineLogDir` does not exist at the launch the
 agent logs that once per run (no watchdog log is seen unless the game creates the folder).
 On a hit it kills the process tree at once (the crash dialog would otherwise block the game until the hard timeout) and
-classifies the run `Crashed`. After the game exited on its own the check repeats for up to 2 s (not after an abort, a
-hard timeout or a supervision error); a crash found only then still counts as `Crashed`. After every launched run
+classifies the run `Crashed`; `message` is `Crash occurred (<watchdog log name>); last line: <last harness.log line that
+is not an Alive: line, or (none)>` (the line, read once more after the kill, shows what the game did when it crashed). After the game exited on its own the check repeats for up to 2 s (not after an abort, a
+hard timeout, a hang or a supervision error); a crash found only then still counts as `Crashed`. After every launched run
 (whatever its outcome) the agent stops every process with the name of `gameExecutable` (without `.exe`) that started at
 or after the launch, except the launched process; processes with other names are never touched. A process whose start
 time cannot be read (e.g. an elevated game) is not stopped but makes the run `CleanupFailed`, as does a process (or the
@@ -205,7 +260,9 @@ The agent keeps the game configuration of the test PC at a recorded baseline (`b
 
 Restore: delete the files in the managed folders that the baseline does not have (and empty folders the baseline lacks;
 empty folders the baseline has are kept), copy the baseline files, verify the SHA-256 of each copied file, verify that
-no extra file is left. Nothing else is touched (`engine_config.txt`, `LauncherData.xml`, `ModLogs`, other folders).
+no extra file is left. The restore touches nothing else (`engine_config.txt`, `LauncherData.xml`, `ModLogs`, other
+folders). The one write of the agent outside the managed files is not part of the restore: the `safely_exited` reset in
+`engine_config.txt` before each launch (see "Safe Mode prevention").
 Restore fails, before anything is deleted ("Nothing was changed"), when the game documents folder does not exist (it is
 never created) or when a reparse point (junction or symlink) is in the managed tree of the documents folder or of the
 baseline: `Configs`, `Configs\ModSettings`, `Configs\ModSettings\Global`, `BannerlordConfig.txt`, the managed MCM
@@ -328,7 +385,9 @@ parsed object as written by the harness (nested, typed values as above); from le
 (missing file, or invalid `run-result.json`). Per run it also holds `gameVersion` and `moduleVersions`, copied from
 `agent-run.json` (`moduleVersions` is always a JSON array when present, also with 0 or 1 entry; `null` only for an old
 agent); on job level `versionWarnings` is an array of the warning lines above and `suite` is the runner's `-Suite`
-value or `null`.
+value or `null`. Only for a suite with per-run expectations (`-Suite RIG`) every run also holds `expected`
+(`{ "exitClass": "...", "messagePattern": "<regex>" | null }`, `null` for a run the suite does not define) and
+`verdict` (`Met`, `Mismatch` or `RigError`, see the exit codes; `null` when `expected` is `null`).
 
 ### `run.cfg`
 
@@ -368,12 +427,27 @@ runs are skipped because the game could not be stopped).
 (`blocked`, `rejected`, `failed`, `SetupError`, `LaunchFailed`, `CleanupFailed`, transport error,
 open job, a scenario with status `Error`, a `Completed` scenarios run with a missing or `Skipped` requested scenario) - `2` test failure (`NotCompleted`, `Crashed`, `Completed` with too few days,
 a scenario with status `Failed`) -
-`3` time limit or agent not responding (`HardTimeout`, `Aborted`, done status `aborted`, claim
+`3` time limit, hang or agent not responding (`HardTimeout`, `Hung`, `Aborted`, done status `aborted`, claim
 timeout, stale heartbeat, overall deadline; the runner aborts at its deadline and, best effort,
 on a stale heartbeat). Precedence:
 1 > 3 > 2 > 0. An unknown `exitClass` or `status` maps to `1`. Scenario statuses (case-insensitive): `Passed`,
 `Timeout` and `Skipped` do not change the code by themselves (except the requested-scenario rule above), `Failed` gives `2`, `Error` and any other value (unknown
 string, empty, `null`, non-string) give `1`.
+
+Suites with per-run expectations (`Runs` in the suite definition, e.g. `-Suite RIG`: r1 must end `Crashed`, r2 `Hung`,
+r3 `Completed` with its scenario `Passed`) replace the per-run rules above with a verdict per run: `0` if every run
+meets its expectation (exact `exitClass`; an expected `Completed` also needs every scenario of the run reported
+`Passed`; an expectation with a message pattern also needs the run's `agent-run.json` `message` to match it,
+case-sensitive: r1
+`^(Harness reported: |Crash occurred \(watchdog_log_\d+\.txt\); last line: ).*System\.InvalidOperationException: rig\.selftest-throw`,
+so the crash is the self-test throw (the exception itself under its full type name, as the harness's `FirstChance` and
+`UnhandledException` lines write it, not a harness line that merely names the scenario),
+whether the harness reported it or the throw escaped to native and the watchdog did; r2 `^No Alive line in harness\.log for \d+ s`, so the silence watch ended it) - `2` a run that does not
+(mismatch; a pattern mismatch prints an indented `message does not match <pattern>: <message>` line below the row) -
+`1` a run missing from a `completed` job, or an unexpected
+`SetupError`, `LaunchFailed` or `CleanupFailed` - `3` job status `aborted` or the runner's deadline. The job-status
+rules (`blocked`, `rejected`, `failed` = `1`) and the precedence 1 > 3 > 2 > 0 stay. An expected `Crashed` or `Hung`
+is therefore a pass (`0`), not a test failure.
 
 ## Agent restart
 

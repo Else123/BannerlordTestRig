@@ -172,10 +172,11 @@ function Set-JobPackageWithValidXml {
 function New-TestRigHarnessJob {
     # A job for harness TestRig; its package and module list carry TestRig.Harness unless told otherwise.
     param([hashtable]$Rig, [string[]]$Entries = @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml'),
-        [string[]]$Modules = @('Native', 'CoherentWarAI', 'TestRig.Harness'))
+        [string[]]$Modules = @('Native', 'CoherentWarAI', 'TestRig.Harness'), [double]$HardTimeoutMinutes = 1)
     $mutate = {
         param($j)
         $j['runs'][0]['harness'] = 'TestRig'
+        $j['runs'][0]['hardTimeoutMinutes'] = $HardTimeoutMinutes
         $j['modules'] = $Modules
     }.GetNewClosure()
     return New-TestJob $Rig -Entries $Entries -Mutate $mutate
@@ -256,6 +257,12 @@ Describe 'Get-AgentConfig' {
         $cfg.gameArgumentsPrefix | Should Match 'singleplayer'
         $cfg.moduleAllowlist -contains 'CoherentWarAI' | Should Be $true
         $cfg.moduleAllowlist -contains '*.Scenarios' | Should Be $true
+        $cfg.moduleAllowlist -ccontains 'TestRig.SelfTest' | Should Be $true   # the RIG suite's module
+    }
+    It 'ships agent.config.example.json with the default moduleAllowlist' {
+        $rig = New-Rig
+        $example = [System.IO.File]::ReadAllText((Join-Path (Split-Path -Parent $agentScript) 'agent.config.example.json')) | ConvertFrom-Json
+        (@($example.moduleAllowlist) -join ',') | Should BeExactly (@((Get-ConfigFor $rig).moduleAllowlist) -join ',')
     }
     It 'defaults gameExecutable to the Win64_Shipping_Client path' {
         $rig = New-Rig
@@ -1468,6 +1475,19 @@ Describe 'Invoke-Run: game dialogs during supervision' {
             @((Read-AgentRun $rig).dismissedDialogs) | Should Be @('Mod change detected')
         }
 
+        It 'answers a "Safe Mode" dialog once with No and records it (mocked)' {
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig
+            Mock Write-AgentLog { }
+            Mock Get-GameDialogs { return @([pscustomobject]@{ Handle = [IntPtr]106; Title = 'Safe Mode' }) }
+            Mock Confirm-KnownGameDialog { }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            Assert-MockCalled Confirm-KnownGameDialog -Scope It -Exactly -Times 1 -ParameterFilter { $Dialog.Title -ceq 'Safe Mode' -and $Answer -eq 'No' }
+            Assert-MockCalled Confirm-KnownGameDialog -Scope It -Exactly -Times 1
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -match "^Dismissed dialog 'Safe Mode' with No \(pid \d+\)\.$" }
+            @((Read-AgentRun $rig).dismissedDialogs) | Should Be @('Safe Mode')
+        }
+
         It 'does not confirm a title that differs only in case (mocked)' {
             $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
             $null = New-TestJob $rig
@@ -1536,6 +1556,31 @@ Describe 'Invoke-Run: game dialogs during supervision' {
                 $raw = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json')
                 $raw | Should Match '"dismissedDialogs":\s*\[\s*"Mod change detected"\s*\]'
             }
+        }
+
+        It "answers a real 'Safe Mode' Yes/No message box with No and completes (end-to-end)" -Skip:$noDesktop {
+            $env:FAKEGAME_BEHAVIOR = 'safemode'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['hardTimeoutMinutes'] = 0.5 }
+            Mock Write-AgentLog { }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+            [System.IO.File]::ReadAllText((Join-Path $rig.Docs 'fake-safemode-answer.txt')) | Should BeExactly 'No'
+            @((Read-AgentRun $rig).dismissedDialogs) | Should Be @('Safe Mode')
+        }
+
+        It "leaves a real 'Safe Mode' box with only OK alone: HardTimeout, 'no No button' logged once (end-to-end)" -Skip:$noDesktop {
+            $env:FAKEGAME_BEHAVIOR = 'safemodeok'
+            $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
+            $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['hardTimeoutMinutes'] = 0.1 }
+            Mock Write-AgentLog { }
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -eq "Could not confirm dialog 'Safe Mode': no No button" }
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 0 -ParameterFilter { $Message -like 'Dismissed dialog*' }
+            $run = Read-AgentRun $rig
+            @($run.dismissedDialogs).Count | Should Be 0
+            @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
         }
 
         It 'does not press a button of a Yes/No box with the known title: HardTimeout, one failure line (end-to-end)' -Skip:$noDesktop {
@@ -2815,6 +2860,630 @@ Describe 'Restore-TestRigBaseline: reparse points on the baseline side and after
                 $r.Error | Should Not Match 'Nothing was changed'
             }
             finally { if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) } }
+        }
+    }
+}
+
+Describe 'Read-HarnessLogGrowth' {
+    function New-LogState { return @{ Position = [long]0 } }
+    BeforeEach { $script:growthLog = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8) + '.log') }
+    function Add-Raw([string]$Text) { [System.IO.File]::AppendAllText($script:growthLog, $Text, $utf8NoBom) }
+
+    It 'returns no lines for a file that does not exist yet and picks it up later' {
+        $state = New-LogState
+        @(Read-HarnessLogGrowth -Path $script:growthLog -State $state).Count | Should Be 0
+        Add-Raw "1.0 first`n"
+        $lines = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+        $lines.Count | Should Be 1
+        $lines[0] | Should Be '1.0 first'
+    }
+    It 'returns only the growth since the last read' {
+        $state = New-LogState
+        Add-Raw "1.0 a`r`n2.0 b`n"
+        @(Read-HarnessLogGrowth -Path $script:growthLog -State $state).Count | Should Be 2
+        @(Read-HarnessLogGrowth -Path $script:growthLog -State $state).Count | Should Be 0
+        Add-Raw "3.0 c`n"
+        $lines = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+        $lines.Count | Should Be 1
+        $lines[0] | Should Be '3.0 c'
+    }
+    It 'holds back a partial last line until its line break arrives' {
+        $state = New-LogState
+        Add-Raw "1.0 whole`n2.0 par"
+        $lines = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+        $lines.Count | Should Be 1
+        $lines[0] | Should Be '1.0 whole'
+        @(Read-HarnessLogGrowth -Path $script:growthLog -State $state).Count | Should Be 0
+        Add-Raw "tial`n"
+        $lines = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+        $lines.Count | Should Be 1
+        $lines[0] | Should Be '2.0 partial'
+    }
+    It 'keeps a multi-byte character intact across reads' {
+        $state = New-LogState
+        $bytes = $utf8NoBom.GetBytes("1.0 caf$([char]0x00E9)`n")
+        $fs = New-Object System.IO.FileStream($script:growthLog, 'Create', 'Write', 'ReadWrite')
+        try {
+            $fs.Write($bytes, 0, $bytes.Length - 2); $fs.Flush()
+            $null = Read-HarnessLogGrowth -Path $script:growthLog -State $state
+            $fs.Write($bytes, $bytes.Length - 2, 2); $fs.Flush()
+        }
+        finally { $fs.Dispose() }
+        $lines = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+        $lines.Count | Should Be 1
+        $lines[0] | Should Be "1.0 caf$([char]0x00E9)"
+    }
+    It 'reads a file the writer still holds open' {
+        $state = New-LogState
+        $fs = New-Object System.IO.FileStream($script:growthLog, 'Create', 'Write', 'Read')
+        try {
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes("1.0 shared`n")
+            $fs.Write($bytes, 0, $bytes.Length); $fs.Flush()
+            $lines = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+        }
+        finally { $fs.Dispose() }
+        $lines.Count | Should Be 1
+    }
+    It 'starts over when the file got shorter' {
+        $state = New-LogState
+        Add-Raw "1.0 old line one`n1.0 old line two`n"
+        $null = Read-HarnessLogGrowth -Path $script:growthLog -State $state
+        [System.IO.File]::WriteAllText($script:growthLog, "2.0 new`n", $utf8NoBom)
+        $lines = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+        $lines.Count | Should Be 1
+        $lines[0] | Should Be '2.0 new'
+    }
+    Context 'with a small read cap' {
+        BeforeEach { $script:savedReadMax = $script:HarnessLogReadMaxBytes; $script:HarnessLogReadMaxBytes = 16 }
+        AfterEach { $script:HarnessLogReadMaxBytes = $script:savedReadMax }
+
+        It 'works off a backlog larger than the cap over several reads, without losing or splitting a line' {
+            $state = New-LogState
+            Add-Raw "1.0 aaaa`n2.0 bbbb`n3.0 cccc`n4.0 dd`n"   # 34 bytes: three lines of 9 bytes, one of 7
+            $first = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+            ($first -join '|') | Should BeExactly '1.0 aaaa'   # the cap cut the second line: it waits for the next read
+            $all = @($first)
+            for ($i = 0; $i -lt 5; $i++) { $all += @(Read-HarnessLogGrowth -Path $script:growthLog -State $state) }
+            ($all -join '|') | Should BeExactly '1.0 aaaa|2.0 bbbb|3.0 cccc|4.0 dd'
+            $state.Position | Should Be 34
+        }
+        It 'returns a full chunk without a line break as one line and goes on after it' {
+            $state = New-LogState
+            Add-Raw (('x' * 20) + "`n5.0 next`n")
+            $first = @(Read-HarnessLogGrowth -Path $script:growthLog -State $state)
+            $first.Count | Should Be 1
+            $first[0] | Should BeExactly ('x' * 16)
+            $state.Position | Should Be 16
+            $rest = @()
+            for ($i = 0; $i -lt 3; $i++) { $rest += @(Read-HarnessLogGrowth -Path $script:growthLog -State $state) }
+            ($rest -join '|') | Should BeExactly 'xxxx|5.0 next'
+        }
+        It 'holds back a partial line shorter than the cap' {
+            $state = New-LogState
+            Add-Raw '1.0 no break ye'   # 15 bytes: not a full chunk, so it waits for its line break
+            @(Read-HarnessLogGrowth -Path $script:growthLog -State $state).Count | Should Be 0
+            $state.Position | Should Be 0
+        }
+    }
+}
+
+Describe 'Test-AliveLine and Get-LastLogLine' {
+    It 'matches only when the text after the timestamp starts with Alive:' {
+        Test-AliveLine '10.0 Alive: phase=Campaign' | Should Be $true
+        Test-AliveLine '12 Alive:' | Should Be $true
+        Test-AliveLine '12.5 FirstChance #1 [Main]: Alive: x' | Should Be $false
+        Test-AliveLine 'Alive: phase=Campaign' | Should Be $false
+        Test-AliveLine '12.5 alive: phase=Campaign' | Should Be $false
+        Test-AliveLine '12.5 Alive phase=Campaign' | Should Be $false
+    }
+    It 'skips Alive lines so the last progress line stays visible' {
+        $path = Join-Path $TestDrive 'lastline.log'
+        [System.IO.File]::WriteAllText($path, "1.0 Scenario rig.selftest-pass started`n10.0 Alive: phase=Campaign`r`n20.0 Alive: phase=Campaign`n", $utf8NoBom)
+        Get-LastLogLine $path | Should BeExactly '1.0 Scenario rig.selftest-pass started'
+    }
+    It 'falls back to the last Alive line when the tail holds nothing else' {
+        $path = Join-Path $TestDrive 'aliveonly.log'
+        [System.IO.File]::WriteAllText($path, "10.0 Alive: phase=Campaign`n20.0 Alive: phase=Menu`n", $utf8NoBom)
+        Get-LastLogLine $path | Should BeExactly '20.0 Alive: phase=Menu'
+    }
+}
+
+Describe 'Reset-EngineSafelyExited' {
+    Mock Get-BannerlordProcess { return $null }
+    BeforeEach { $script:engineCfg = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8) + '-engine_config.txt') }
+    function Write-EngineCfgBytes([byte[]]$Bytes) { [System.IO.File]::WriteAllBytes($script:engineCfg, $Bytes) }
+    function Get-Bytes([string]$Text, [switch]$Bom) {
+        $b = $utf8NoBom.GetBytes($Text)
+        if ($Bom) { $b = [byte[]](@(0xEF, 0xBB, 0xBF) + $b) }
+        return , $b
+    }
+
+    It 'sets safely_exited = 0 to 1 and leaves every other byte as it was (CRLF, non-ASCII, no trailing break)' {
+        $before = Get-Bytes "brightness = 1.0`r`nsafely_exited = 0`r`nlanguage = Fran$([char]0x00E7)ais`r`nlast = 0"
+        Write-EngineCfgBytes $before
+        Mock Write-AgentLog { }
+        Reset-EngineSafelyExited -Path $script:engineCfg
+        $after = [System.IO.File]::ReadAllBytes($script:engineCfg)
+        $expected = Get-Bytes "brightness = 1.0`r`nsafely_exited = 1`r`nlanguage = Fran$([char]0x00E7)ais`r`nlast = 0"
+        $after.Length | Should Be $expected.Length
+        ([BitConverter]::ToString($after)) | Should BeExactly ([BitConverter]::ToString($expected))
+        Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -like '*previous run did not exit cleanly*' }
+    }
+    It 'sets safely_exited = 0 as the last line without a trailing line break and leaves every other byte as it was' {
+        Write-EngineCfgBytes (Get-Bytes "a = 1`r`nsafely_exited = 0")
+        Mock Write-AgentLog { }
+        Reset-EngineSafelyExited -Path $script:engineCfg
+        $after = [System.IO.File]::ReadAllBytes($script:engineCfg)
+        $expected = Get-Bytes "a = 1`r`nsafely_exited = 1"
+        $after.Length | Should Be $expected.Length
+        ([BitConverter]::ToString($after)) | Should BeExactly ([BitConverter]::ToString($expected))
+    }
+    It 'handles a first line after a BOM, LF line endings and spacing variants' {
+        Write-EngineCfgBytes (Get-Bytes "safely_exited=0`nother = 0`n" -Bom)
+        Reset-EngineSafelyExited -Path $script:engineCfg
+        ([BitConverter]::ToString([System.IO.File]::ReadAllBytes($script:engineCfg))) |
+            Should BeExactly ([BitConverter]::ToString((Get-Bytes "safely_exited=1`nother = 0`n" -Bom)))
+    }
+    It 'leaves a file with safely_exited = 1 untouched and logs nothing' {
+        Write-EngineCfgBytes (Get-Bytes "safely_exited = 1`r`n")
+        $stamp = (Get-Item -LiteralPath $script:engineCfg).LastWriteTimeUtc.AddMinutes(-5)
+        (Get-Item -LiteralPath $script:engineCfg).LastWriteTimeUtc = $stamp
+        Mock Write-AgentLog { }
+        Reset-EngineSafelyExited -Path $script:engineCfg
+        (Get-Item -LiteralPath $script:engineCfg).LastWriteTimeUtc | Should Be $stamp
+        Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 0
+    }
+    It 'does not touch a value that merely starts with 0 or a key that merely contains the name' {
+        $text = "safely_exited = 01`r`nnot_safely_exited = 0`r`n"
+        Write-EngineCfgBytes (Get-Bytes $text)
+        Reset-EngineSafelyExited -Path $script:engineCfg
+        [System.IO.File]::ReadAllText($script:engineCfg) | Should BeExactly $text
+    }
+    It 'does nothing for a missing file: no throw, no log, no file created' {
+        Mock Write-AgentLog { }
+        { Reset-EngineSafelyExited -Path $script:engineCfg } | Should Not Throw
+        Test-Path -LiteralPath $script:engineCfg | Should Be $false
+        Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 0
+    }
+    It 'leaves a read-only file with safely_exited = 1 as it is and logs nothing (never opened for writing)' {
+        Write-EngineCfgBytes (Get-Bytes "a = 0`r`nsafely_exited = 1`r`n")
+        Set-ItemProperty -LiteralPath $script:engineCfg -Name IsReadOnly -Value $true
+        try {
+            Mock Write-AgentLog { }
+            { Reset-EngineSafelyExited -Path $script:engineCfg } | Should Not Throw
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 0
+        }
+        finally { Set-ItemProperty -LiteralPath $script:engineCfg -Name IsReadOnly -Value $false }
+        [System.IO.File]::ReadAllText($script:engineCfg) | Should BeExactly "a = 0`r`nsafely_exited = 1`r`n"
+    }
+    It 'logs a failed write of a read-only file with safely_exited = 0 once, leaves it as it is and does not throw' {
+        Write-EngineCfgBytes (Get-Bytes "safely_exited = 0`r`n")
+        Set-ItemProperty -LiteralPath $script:engineCfg -Name IsReadOnly -Value $true
+        try {
+            Mock Write-AgentLog { }
+            { Reset-EngineSafelyExited -Path $script:engineCfg } | Should Not Throw
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -like 'Could not reset safely_exited*launching anyway*' }
+        }
+        finally { Set-ItemProperty -LiteralPath $script:engineCfg -Name IsReadOnly -Value $false }
+        [System.IO.File]::ReadAllText($script:engineCfg) | Should BeExactly "safely_exited = 0`r`n"
+    }
+    It 'reads and writes through one exclusive handle: a file another handle holds open is logged and left as it is' {
+        Write-EngineCfgBytes (Get-Bytes "safely_exited = 0`r`n")
+        $other = New-Object System.IO.FileStream($script:engineCfg, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            Mock Write-AgentLog { }
+            { Reset-EngineSafelyExited -Path $script:engineCfg } | Should Not Throw
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -like 'Could not reset safely_exited*launching anyway*' }
+        }
+        finally { $other.Dispose() }
+        [System.IO.File]::ReadAllText($script:engineCfg) | Should BeExactly "safely_exited = 0`r`n"
+    }
+    # Own Context: in Pester 3.4 a Mock made in an It stays active until its block ends.
+    Context 'with a Bannerlord process running' {
+        Mock Get-BannerlordProcess { return [pscustomobject]@{ Id = 4242 } }
+        It 'leaves the file untouched and logs the skip' {
+            Write-EngineCfgBytes (Get-Bytes "safely_exited = 0`r`n")
+            Mock Write-AgentLog { }
+            { Reset-EngineSafelyExited -Path $script:engineCfg } | Should Not Throw
+            [System.IO.File]::ReadAllText($script:engineCfg) | Should BeExactly "safely_exited = 0`r`n"
+            Assert-MockCalled Write-AgentLog -Scope It -Exactly -Times 1 -ParameterFilter { $Message -like 'Bannerlord is running: safely_exited*left as it is.' }
+        }
+    }
+}
+
+Describe 'Invoke-Run: engine_config.txt safely_exited before the launch' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    AfterEach {
+        $script:AgentLogPath = $null
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+    }
+    function Start-EngineCfgRig([string]$Text) {
+        $env:FAKEGAME_BEHAVIOR = 'complete'
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $script:AgentLogPath = Join-Path $rig.Work 'agent.log'
+        $rig.EngineCfg = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\Configs\engine_config.txt'
+        Write-RigFile $rig.EngineCfg $Text
+        $null = New-TestJob $rig
+        return $rig
+    }
+
+    It 'resets safely_exited = 0 to 1 before the launch and logs it once' {
+        $rig = Start-EngineCfgRig "a = 1`r`nsafely_exited = 0`r`n"
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        [System.IO.File]::ReadAllText($rig.EngineCfg) | Should BeExactly "a = 1`r`nsafely_exited = 1`r`n"
+        @((Get-Content -LiteralPath $script:AgentLogPath) | Where-Object { $_ -like '*previous run did not exit cleanly*' }).Count | Should Be 1
+    }
+    It 'launches anyway when the reset cannot be written' {
+        $rig = Start-EngineCfgRig "safely_exited = 0`r`n"
+        Set-ItemProperty -LiteralPath $rig.EngineCfg -Name IsReadOnly -Value $true
+        try { $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig) }
+        finally { Set-ItemProperty -LiteralPath $rig.EngineCfg -Name IsReadOnly -Value $false }
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        (Get-Content -Raw -LiteralPath $script:AgentLogPath) | Should Match 'Could not reset safely_exited'
+    }
+}
+
+Describe 'Test-UnhandledExceptionLine and Format-LogLineForMessage' {
+    It 'matches only when the text after the timestamp starts with UnhandledException' {
+        Test-UnhandledExceptionLine '12.5 UnhandledException (terminating=True): x' | Should Be $true
+        Test-UnhandledExceptionLine '0.0 UnhandledException' | Should Be $true
+        Test-UnhandledExceptionLine '12.5 FirstChance #1 [Main]: UnhandledException' | Should Be $false
+        Test-UnhandledExceptionLine 'UnhandledException (terminating=True)' | Should Be $false
+        Test-UnhandledExceptionLine '12.5 unhandledexception x' | Should Be $false
+        Test-UnhandledExceptionLine '12.5 UnhandledExceptionHandler armed' | Should Be $false
+    }
+    It 'makes a single printable-ASCII line and truncates it' {
+        $text = Format-LogLineForMessage ("a`tb`r`nc$([char]0x00E9)" + ('x' * 400))
+        $text.Length | Should Be $script:MessageLineMaxChars   # cut to exactly the limit, '...' included
+        $text | Should Match '^[\x20-\x7E]+$'
+        $text | Should Match '\.\.\.$'
+        (Format-LogLineForMessage '  short line  ') | Should Be 'short line'
+    }
+}
+
+Describe 'Get-OpenDialogSummary' {
+    Mock Write-AgentLog { }
+    # 'Safe Mode' cannot be answered, 'Mod change detected' can.
+    Mock Confirm-KnownGameDialog { if ($Dialog.Title -ceq 'Safe Mode') { return 'no No button' }; return $null }
+    function New-DialogState { return @{ Handled = @{}; Seen = @{}; Open = @(); FailureLogged = $false } }
+    function New-Dialog([int]$Handle, [string]$Title) { return [pscustomobject]@{ Handle = [IntPtr]$Handle; Title = $Title } }
+
+    It 'lists the open dialogs with their state; a dialog answered just now is not listed' {
+        $state = New-DialogState
+        $script:dialogs = @((New-Dialog 1 'Some other dialog'), (New-Dialog 2 'Safe Mode'), (New-Dialog 3 'Mod change detected'))
+        Mock Get-GameDialogs { return $script:dialogs }
+        Invoke-GameDialogCheck -ProcessId 1 -State $state -Record @{ dismissedDialogs = @() }
+        (@(Get-OpenDialogSummary $state) -join ' | ') | Should BeExactly "'Safe Mode' (answer failed) | 'Some other dialog' (not answered)"
+        # Next look: still open, the answer to 'Mod change detected' is older than DialogStillOpenSeconds now.
+        $state.Handled['3'].OkSentUtc = [DateTime]::UtcNow.AddSeconds(-($script:DialogStillOpenSeconds + 1))
+        Invoke-GameDialogCheck -ProcessId 1 -State $state -Record @{ dismissedDialogs = @() }
+        (@(Get-OpenDialogSummary $state) -join ' | ') |
+            Should BeExactly "'Mod change detected' (still open after answer) | 'Safe Mode' (answer failed) | 'Some other dialog' (not answered)"
+    }
+    It 'does not list a dialog that is no longer open, and keeps the last look when a check fails' {
+        $state = New-DialogState
+        $script:dialogs = @((New-Dialog 4 'Some other dialog'))
+        Mock Get-GameDialogs { return $script:dialogs }
+        Invoke-GameDialogCheck -ProcessId 1 -State $state -Record @{ dismissedDialogs = @() }
+        (@(Get-OpenDialogSummary $state) -join ' | ') | Should BeExactly "'Some other dialog' (not answered)"
+        $script:dialogs = @()
+        Invoke-GameDialogCheck -ProcessId 1 -State $state -Record @{ dismissedDialogs = @() }
+        @(Get-OpenDialogSummary $state).Count | Should Be 0
+        $script:dialogs = @((New-Dialog 4 'Some other dialog'))
+        Invoke-GameDialogCheck -ProcessId 1 -State $state -Record @{ dismissedDialogs = @() }
+        Mock Get-GameDialogs { throw 'enum failed' }
+        Invoke-GameDialogCheck -ProcessId 1 -State $state -Record @{ dismissedDialogs = @() }
+        (@(Get-OpenDialogSummary $state) -join ' | ') | Should BeExactly "'Some other dialog' (not answered)"
+    }
+}
+
+Describe 'Invoke-Run: early detection from harness.log' {
+    Mock Get-BannerlordProcess { return $null }
+    Mock Get-SteamProcess { return [pscustomobject]@{ Id = 1 } }
+    BeforeEach { $script:savedSilenceSeconds = $script:SilenceSeconds; $script:SilenceSeconds = 3 }
+    AfterEach {
+        $script:SilenceSeconds = $script:savedSilenceSeconds
+        $script:AgentLogPath = $null
+        Stop-FakeGameLeftovers
+        Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_HARNESS -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_ENGINELOGS -ErrorAction SilentlyContinue
+    }
+    function Start-EarlyRig([string]$Behavior, [string]$Harness = 'TestRig', [double]$HardTimeoutMinutes = 1) {
+        $env:FAKEGAME_BEHAVIOR = $Behavior
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = $Harness
+        $env:FAKEGAME_ENGINELOGS = $rig.EngineLogs
+        $script:AgentLogPath = Join-Path $rig.Work 'agent.log'
+        if ($Harness -eq 'TestRig') { $rig.JobDir = New-TestRigHarnessJob $rig -HardTimeoutMinutes $HardTimeoutMinutes }
+        else { $rig.JobDir = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['hardTimeoutMinutes'] = $HardTimeoutMinutes }.GetNewClosure() }
+        return $rig
+    }
+    function Get-AgentLogText($rig) { return (Get-Content -Raw (Join-Path $rig.Work 'agent.log')) }
+    $script:unmockedWait = (Get-Command Wait-HarnessFinalResult -CommandType Function).ScriptBlock   # before any Mock of it
+
+    It 'kills early (after the short result grace) on an UnhandledException line and classifies Crashed with the line in the message' {
+        $rig = Start-EarlyRig 'unhandled'
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $watch.Elapsed.TotalSeconds | Should BeLessThan 30
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        $run = Read-RunRecord $rig
+        $run.message | Should Match 'UnhandledException \(terminating=True\): System\.InvalidOperationException: boom'
+        $run.message | Should Not Match "[\r\n]"
+        @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
+        Get-AgentLogText $rig | Should Match 'UnhandledException in harness\.log: .*killing the game'
+    }
+    It 'also detects an UnhandledException line for the CoherentWarAI harness' {
+        $rig = Start-EarlyRig 'unhandled' 'CoherentWarAI'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+    }
+    It 'does not trigger on a FirstChance line that merely contains the word' {
+        $script:SilenceSeconds = 30
+        $rig = Start-EarlyRig 'firstchance'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+    }
+    It 'waits for the line break of a partial UnhandledException line and names the whole line' {
+        $script:SilenceSeconds = 30
+        $rig = Start-EarlyRig 'partial'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        (Read-RunRecord $rig).message | Should Match 'terminating=True\): System\.InvalidOperationException: partial-boom'
+    }
+    It 'kills a TestRig game that writes no Alive line for longer than SilenceSeconds and classifies Hung' {
+        $rig = Start-EarlyRig 'alivesleep'
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $watch.Elapsed.TotalSeconds | Should BeLessThan 30
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Hung'
+        $run = Read-RunRecord $rig
+        $run.message | Should Match 'No Alive line in harness\.log for \d+ s'
+        $run.message | Should Match 'last line: harness day 1 reached$'   # the last progress line, not the Alive line
+        @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
+        Get-AgentLogText $rig | Should Match 'no Alive line in harness\.log for \d+ s.*killing the game'
+    }
+    It 'catches an UnhandledException line written right before the game exits' {
+        $script:SilenceSeconds = 30
+        $rig = Start-EarlyRig 'unhandledexit'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        (Read-RunRecord $rig).message | Should Match 'System\.InvalidOperationException: last-words'
+    }
+    It 'ends a game that never writes a harness.log line with HardTimeout, not Hung' {
+        $script:SilenceSeconds = 2
+        $rig = Start-EarlyRig 'nolog' -HardTimeoutMinutes 0.12
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+    }
+    It 'does not arm the silence watch on lines other than Alive (long gap before the first tick): HardTimeout, not Hung' {
+        $script:SilenceSeconds = 2
+        $rig = Start-EarlyRig 'sleep' -HardTimeoutMinutes 0.12
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+    }
+    It 'is not kept alive by FirstChance lines of a background thread while no Alive line comes' {
+        $rig = Start-EarlyRig 'firstchancehang' -HardTimeoutMinutes 0.4
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $watch.Elapsed.TotalSeconds | Should BeLessThan 20
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Hung'
+        (Read-RunRecord $rig).message | Should Match 'last line: \d+\.0 FirstChance #\d+'
+    }
+    It 'classifies a watchdog crash that comes later than SilenceSeconds, without any Alive line, as Crashed (silence watch not armed)' {
+        $script:SilenceSeconds = 2
+        $rig = Start-EarlyRig 'crashafter'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+    }
+    It 'looks at the watchdog log once more before calling a run Hung: Crashed wins' {
+        $saved = $script:CrashCheckSeconds
+        $script:CrashCheckSeconds = 3600   # only the check at the launch runs periodically; the crash comes after it
+        try {
+            $rig = Start-EarlyRig 'alivecrash'
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        }
+        finally { $script:CrashCheckSeconds = $saved }
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        (Read-RunRecord $rig).message | Should Match '^Crash occurred \(watchdog_log_\d+\.txt\); last line: harness day 1 reached$'
+        Get-AgentLogText $rig | Should Not Match 'Game hung'
+    }
+    It 'classifies an abort during the silence as Aborted' {
+        $script:SilenceSeconds = 30
+        $rig = Start-EarlyRig 'alivesleep'
+        $watcher = Start-AbortWatcher -Rig $rig -JobDir $rig.JobDir
+        try { $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig) }
+        finally { Remove-Job $watcher -Force }
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Aborted'
+    }
+    # Own Contexts: in Pester 3.4 a Mock made in an It stays active until its block ends.
+    Context 'with a result that is unreadable once' {
+        It 're-checks a result that cannot be read at the moment instead of calling the run Hung at once' {
+            $script:SilenceSeconds = 2
+            $script:resultStatusCalls = 0
+            # First call: the file is being replaced ($null); then the final result is there.
+            Mock Get-ResultStatus { $script:resultStatusCalls++; if ($script:resultStatusCalls -eq 1) { return $null }; return 'Completed' }
+            $rig = Start-EarlyRig 'alivesleep' -HardTimeoutMinutes 0.4
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            # Hung without the re-check; with it the final result ends the silence watch and the sleeping game runs
+            # into the hard timeout.
+            (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+            Get-AgentLogText $rig | Should Not Match 'Game hung'
+        }
+    }
+    Context 'with a result that stays unreadable' {
+        It 'still calls the run Hung when the result stays unreadable' {
+            $script:SilenceSeconds = 2
+            Mock Get-ResultStatus { return $null }
+            $rig = Start-EarlyRig 'alivesleep' -HardTimeoutMinutes 0.4
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Hung'
+        }
+    }
+    It 'also classifies Hung when the only result so far is a run-result.json with status Running' {
+        $rig = Start-EarlyRig 'runningsleep'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Hung'
+    }
+    It 'does not start the silence watchdog for the CoherentWarAI harness (an Alive line, then silence: HardTimeout)' {
+        $script:SilenceSeconds = 2
+        $rig = Start-EarlyRig 'alivesleep' 'CoherentWarAI' -HardTimeoutMinutes 0.12
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+    }
+    It 'does not call a game Hung that already wrote its final result and is still shutting down' {
+        $script:SilenceSeconds = 2
+        $rig = Start-EarlyRig 'resultthenslow'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+    }
+    It 'ignores a stale harness.log of an earlier run (the game writes none: HardTimeout, not Crashed)' {
+        $script:SilenceSeconds = 30
+        $rig = Start-EarlyRig 'nolog' -HardTimeoutMinutes 0.12
+        $trDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness'
+        Write-RigFile (Join-Path $trDir 'harness.log') "1.0 old run`n2.0 UnhandledException (terminating=True): stale`n"
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
+    }
+    It 'waits for the final result the harness writes after an UnhandledException line, then kills: Crashed, result collected' {
+        $rig = Start-EarlyRig 'unhandledthenresult'
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $watch.Elapsed.TotalSeconds | Should BeLessThan 30
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        $run = Read-RunRecord $rig
+        $run.message | Should Match 'UnhandledException \(terminating=True\): System\.InvalidOperationException: then-result'
+        @($run.artifacts) -contains 'run-result.json' | Should Be $true
+        $result = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\run-result.json') | ConvertFrom-Json
+        $result.status | Should Be 'Aborted'
+        $result.reason | Should Be 'unhandled:Campaign'
+        @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
+    }
+    Context 'with the result grace timed' {
+        It 'kills after the grace period when no final result comes after the UnhandledException line' {
+            $savedGrace = $script:UnhandledResultGraceSeconds
+            $script:UnhandledResultGraceSeconds = 2   # short, but long enough to tell a wait from none
+            $script:waitSeconds = $null
+            # Times the real wait: a wrapper around the original function, so a missing or skipped wait shows.
+            $script:realWait = (Get-Command Wait-HarnessFinalResult -CommandType Function).ScriptBlock
+            Mock Wait-HarnessFinalResult {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                & $script:realWait -Process $Process -HarnessDir $HarnessDir -Seconds $Seconds -SinceUtc $SinceUtc
+                $script:waitSeconds = $watch.Elapsed.TotalSeconds
+            }
+            try {
+                $rig = Start-EarlyRig 'unhandled'
+                $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            }
+            finally { $script:UnhandledResultGraceSeconds = $savedGrace }
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+            @((Read-RunRecord $rig).artifacts) -contains 'run-result.json' | Should Be $false
+            $script:waitSeconds | Should Not BeNullOrEmpty
+            $script:waitSeconds | Should BeGreaterThan 1   # grace - 1 s
+            $script:waitSeconds | Should BeLessThan 5
+        }
+    }
+    # Own Context: in Pester 3.4 a Mock made in an It stays active until its block ends.
+    Context 'with the wait for the rewrite observed' {
+    It 'waits for the rewrite of a result that was final before the UnhandledException line, then kills: updated counts collected' {
+        # Timing-independent proof: the wrapper records the SinceUtc the agent passes and the write time of the first
+        # (Completed, unhandled = 0) result still in place at the call. The wait must only accept files newer than that.
+        $script:SilenceSeconds = 30   # the fixture is silent for 3.5 s; no Alive line, so the silence watch must not fire
+        $script:sinceUtcSeen = $null
+        $script:firstResultUtc = $null
+        $script:realWait = $script:unmockedWait   # not Get-Command here: a Mock of an earlier Context may still shadow the function
+        Mock Wait-HarnessFinalResult {
+            $path = Join-Path $HarnessDir 'run-result.json'
+            try {
+                $item = Get-Item -LiteralPath $path -ErrorAction Stop
+                if ((Get-Content -Raw -LiteralPath $path) -match '"unhandled":0') { $script:firstResultUtc = $item.LastWriteTimeUtc }
+            }
+            catch { }
+            $script:sinceUtcSeen = $SinceUtc
+            & $script:realWait -Process $Process -HarnessDir $HarnessDir -Seconds $Seconds -SinceUtc $SinceUtc
+        }
+        $rig = Start-EarlyRig 'completedthenunhandled'
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        $script:firstResultUtc | Should Not BeNullOrEmpty
+        $script:sinceUtcSeen | Should Not BeNullOrEmpty
+        ($script:sinceUtcSeen -ge $script:firstResultUtc) | Should Be $true
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        $run = Read-RunRecord $rig
+        $run.message | Should Match 'System\.InvalidOperationException: during-shutdown'
+        $result = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\run-result.json') | ConvertFrom-Json
+        $result.status | Should Be 'Completed'
+        $result.exceptions.unhandled | Should Be 1   # the rewrite, not the result from before the line
+        @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
+    }
+    }
+    It 'classifies a HardTimeout whose UnhandledException line shows up only in the final read as Crashed' {
+        $saved = $script:HarnessLogCheckSeconds
+        $script:HarnessLogCheckSeconds = 3600   # only the read at the launch runs periodically; the line comes after it
+        try {
+            $rig = Start-EarlyRig 'unhandledlate' -HardTimeoutMinutes 0.12
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        }
+        finally { $script:HarnessLogCheckSeconds = $saved }
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+        (Read-RunRecord $rig).message | Should Match 'System\.InvalidOperationException: late'
+        Get-AgentLogText $rig | Should Match 'Hard timeout'
+    }
+    Context 'with an UnhandledException line that appears just before the run would be called Hung' {
+        It 'finds the line in the read before Hung and classifies Crashed' {
+            $script:SilenceSeconds = 2
+            $script:lateLineWritten = $false
+            # The status check of the silence watch runs right before that read: the line is appended there, after the
+            # periodic read of this pass, so only the read before Hung can see it.
+            Mock Get-ResultStatus {
+                if (-not $script:lateLineWritten) {
+                    $log = Join-Path $HarnessDir 'harness.log'
+                    # A scanner may hold the file for a moment: retry, and mark the line written only once it is.
+                    for ($try = 1; -not $script:lateLineWritten; $try++) {
+                        try {
+                            [System.IO.File]::AppendAllText($log, "20.0 UnhandledException (terminating=True): System.InvalidOperationException: before-hung`n")
+                            $script:lateLineWritten = $true
+                        }
+                        catch [System.IO.IOException] { if ($try -ge 20) { throw }; Start-Sleep -Milliseconds 50 }
+                    }
+                }
+                return 'Running'
+            }
+            $rig = Start-EarlyRig 'alivesleep' -HardTimeoutMinutes 0.4
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
+            (Read-RunRecord $rig).message | Should Match 'System\.InvalidOperationException: before-hung'
+            $script:lateLineWritten | Should Be $true
+        }
+    }
+    Context 'with a dialog nobody answered' {
+        It 'names the open dialog in the Hung message' {
+            $script:SilenceSeconds = 2
+            Mock Get-GameDialogs { return @([pscustomobject]@{ Handle = [IntPtr]106; Title = 'Some other dialog' }) }
+            $rig = Start-EarlyRig 'alivesleep' -HardTimeoutMinutes 0.4
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Hung'
+            (Read-RunRecord $rig).message | Should Match "; last line: harness day 1 reached; open dialogs: 'Some other dialog' \(not answered\)$"
+        }
+    }
+    Context 'with a harness.log that holds only an Alive line' {
+        It 'says (none) as the last line in the Hung message' {
+            $script:SilenceSeconds = 2
+            # The fake game starts harness.log with two progress lines: the reads are mocked to see only the Alive line.
+            $script:growthReads = 0
+            Mock Read-HarnessLogGrowth {
+                $script:growthReads++
+                if ($script:growthReads -eq 1) { return @('10.0 Alive: phase=Campaign') }
+                return @()
+            }
+            $rig = Start-EarlyRig 'alivesleep' -HardTimeoutMinutes 0.4
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Hung'
+            (Read-RunRecord $rig).message | Should Match '; last line: \(none\)$'
         }
     }
 }
