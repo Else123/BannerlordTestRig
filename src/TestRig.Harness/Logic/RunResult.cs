@@ -34,27 +34,80 @@ namespace TestRig.Harness.Logic
         public int Count { get; }
     }
 
+    /// <summary>
+    /// Cost and accuracy of the own/harness classification in the first-chance handler; see
+    /// <see cref="ExceptionStats"/> and <see cref="OwnClassificationCache"/>.
+    /// </summary>
+    public sealed class ClassificationSummary
+    {
+        /// <summary>No exception classified yet: no walks, no time, and "own" trivially exact.</summary>
+        public static readonly ClassificationSummary None = new ClassificationSummary(0, 0, 0, 0, true);
+
+        public ClassificationSummary(int walks, double walkMs, double handlerMs, double maxHandlerMs, bool ownExact)
+        {
+            Walks = walks;
+            WalkMs = walkMs;
+            HandlerMs = handlerMs;
+            MaxHandlerMs = maxHandlerMs;
+            OwnExact = ownExact;
+        }
+
+        /// <summary>Stack walks granted for the own classification.</summary>
+        public int Walks { get; }
+
+        /// <summary>
+        /// Part of <see cref="HandlerMs"/> spent in the handler calls that were granted a walk (stack
+        /// capture and walk included), so <c>WalkMs / Walks</c> is the mean cost of a walked exception
+        /// and <c>(HandlerMs - WalkMs) / (total - Walks)</c> the mean cost of the others.
+        /// </summary>
+        public double WalkMs { get; }
+
+        /// <summary>Summed handler time in milliseconds over all first-chance exceptions.</summary>
+        public double HandlerMs { get; }
+
+        /// <summary>Longest single handler time in milliseconds.</summary>
+        public double MaxHandlerMs { get; }
+
+        /// <summary>False once an exception was classified without its own stack walk (walk budget spent) or a walk failed.</summary>
+        public bool OwnExact { get; }
+    }
+
     /// <summary>Exception counters of a whole run; see <see cref="ExceptionStats"/>.</summary>
     public sealed class ExceptionSummary
     {
-        public static readonly ExceptionSummary Empty = new ExceptionSummary(0, 0, 0, new ExceptionKeyCount[0]);
+        public static readonly ExceptionSummary Empty =
+            new ExceptionSummary(0, 0, 0, 0, new ExceptionKeyCount[0], ClassificationSummary.None);
 
-        public ExceptionSummary(int total, int own, int unhandled, IReadOnlyList<ExceptionKeyCount> top)
+        /// <param name="harness">Not own and thrown in a harness assembly; disjoint from <paramref name="own"/>.</param>
+        public ExceptionSummary(int total, int own, int harness, int unhandled,
+            IReadOnlyList<ExceptionKeyCount> top, ClassificationSummary classification)
         {
             Total = total;
             Own = own;
+            Harness = harness;
             Unhandled = unhandled;
             Top = top ?? throw new ArgumentNullException(nameof(top));
+            Classification = classification ?? throw new ArgumentNullException(nameof(classification));
         }
 
         public int Total { get; }
 
         public int Own { get; }
 
+        public int Harness { get; }
+
+        /// <summary>Neither own nor harness: <c>Total - Own - Harness</c>.</summary>
+        public int Vanilla
+        {
+            get { return Total - Own - Harness; }
+        }
+
         public int Unhandled { get; }
 
         /// <summary>Most frequent keys, by count descending then key ordinal.</summary>
         public IReadOnlyList<ExceptionKeyCount> Top { get; }
+
+        public ClassificationSummary Classification { get; }
     }
 
     public sealed class ScenarioResult
@@ -117,6 +170,7 @@ namespace TestRig.Harness.Logic
             int? daysReached,
             int? realSeconds,
             double? gameDaysPerRealMinute,
+            double? runningDaysPerRealMinute,
             int? playerMapEvents,
             IReadOnlyList<ModuleEntry> modules,
             ExceptionSummary exceptions,
@@ -131,6 +185,7 @@ namespace TestRig.Harness.Logic
             DaysReached = daysReached;
             RealSeconds = realSeconds;
             GameDaysPerRealMinute = gameDaysPerRealMinute;
+            RunningDaysPerRealMinute = runningDaysPerRealMinute;
             PlayerMapEvents = playerMapEvents;
             Modules = modules ?? throw new ArgumentNullException(nameof(modules));
             Exceptions = exceptions ?? throw new ArgumentNullException(nameof(exceptions));
@@ -155,6 +210,13 @@ namespace TestRig.Harness.Logic
 
         /// <summary>Rounded to two decimals.</summary>
         public double? GameDaysPerRealMinute { get; }
+
+        /// <summary>
+        /// Game days per real minute over the Running phase only (from entering it until it ends,
+        /// or until now while it lasts), in health mode over its soak segment only; rounded to two
+        /// decimals. Null before that window began or when it has no measurable duration.
+        /// </summary>
+        public double? RunningDaysPerRealMinute { get; }
 
         public int? PlayerMapEvents { get; }
 
@@ -207,6 +269,7 @@ namespace TestRig.Harness.Logic
             return new RunResult(
                 RunStatus.Aborted,
                 "config:" + oneLine,
+                null,
                 null,
                 null,
                 null,

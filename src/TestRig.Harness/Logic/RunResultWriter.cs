@@ -30,6 +30,7 @@ namespace TestRig.Harness.Logic
             json.Name("daysReached").Number(result.DaysReached);
             json.Name("realSeconds").Number(result.RealSeconds);
             json.Name("gameDaysPerRealMinute").TwoDecimals(result.GameDaysPerRealMinute);
+            json.Name("runningDaysPerRealMinute").TwoDecimals(result.RunningDaysPerRealMinute);
             json.Name("playerMapEvents").Number(result.PlayerMapEvents);
 
             json.Name("modules").BeginArray();
@@ -47,7 +48,19 @@ namespace TestRig.Harness.Logic
             json.Name("exceptions").BeginObject();
             json.Name("total").Number(exceptions.Total);
             json.Name("own").Number(exceptions.Own);
+            json.Name("harness").Number(exceptions.Harness);
+            json.Name("vanilla").Number(exceptions.Vanilla);
             json.Name("unhandled").Number(exceptions.Unhandled);
+
+            ClassificationSummary classification = exceptions.Classification;
+            json.Name("classification").BeginObject();
+            json.Name("walks").Number(classification.Walks);
+            json.Name("walkMs").TwoDecimals(classification.WalkMs);
+            json.Name("handlerMs").TwoDecimals(classification.HandlerMs);
+            json.Name("maxHandlerMs").TwoDecimals(classification.MaxHandlerMs);
+            json.Name("ownExact").Bool(classification.OwnExact);
+            json.EndObject();
+
             json.Name("top").BeginArray();
             foreach (ExceptionKeyCount entry in exceptions.Top)
             {

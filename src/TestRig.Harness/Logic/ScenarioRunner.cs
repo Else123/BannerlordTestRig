@@ -48,6 +48,8 @@ namespace TestRig.Harness.Logic
     /// Skipped  never started because the run was tainted or aborted
     /// </code>
     /// After a tainting end the game state is unknown, so all remaining scenarios are Skipped.
+    /// A health runner (<see cref="ForHealth"/>) reports every scenario as <c>&lt;id&gt;@&lt;day&gt;</c> and
+    /// ends a scenario that yields <see cref="ScenarioStep.Days"/> as Error (does not taint).
     /// </summary>
     public sealed class ScenarioRunner
     {
@@ -59,7 +61,11 @@ namespace TestRig.Harness.Logic
         private readonly List<ScenarioResult> _results = new List<ScenarioResult>();
         private readonly List<CheckResult> _checks = new List<CheckResult>();
 
+        // Health runner only: the day of its bracket (result id suffix); null for a plain runner.
+        private readonly int? _healthDay;
+
         private int _nextIndex;
+        private int _day;
 
         // State of the current scenario; _current is null between scenarios.
         private Context _current;
@@ -73,6 +79,11 @@ namespace TestRig.Harness.Logic
         /// <param name="scenarios">Scenarios in run order, typically from <see cref="Resolve"/>.</param>
         /// <param name="log">Receives one line per runner event and per <see cref="IScenarioContext.Log"/> call.</param>
         public ScenarioRunner(IReadOnlyList<IScenario> scenarios, Action<string> log)
+            : this(scenarios, log, null)
+        {
+        }
+
+        private ScenarioRunner(IReadOnlyList<IScenario> scenarios, Action<string> log, int? healthDay)
         {
             if (scenarios == null)
             {
@@ -94,8 +105,32 @@ namespace TestRig.Harness.Logic
 
             _scenarios = scenarios;
             _log = log;
+            _healthDay = healthDay;
             Results = _results.AsReadOnly();
             Checks = _checks.AsReadOnly();
+        }
+
+        /// <summary>
+        /// Runner of one health bracket (run.cfg <c>health=</c>): results, checks, log lines and
+        /// <see cref="TaintedBy"/> use <see cref="HealthId"/> of each scenario and <paramref name="day"/>,
+        /// and a <see cref="ScenarioStep.Days"/> step ends the scenario as Error, as game time must stay
+        /// stopped inside a bracket.
+        /// </summary>
+        /// <param name="day">0 for the bracket before the soak, the requested days for the one after it.</param>
+        public static ScenarioRunner ForHealth(IReadOnlyList<IScenario> scenarios, int day, Action<string> log)
+        {
+            if (day < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(day), day, "must not be negative");
+            }
+
+            return new ScenarioRunner(scenarios, log, day);
+        }
+
+        /// <summary>Result id of health scenario <paramref name="id"/> in the bracket at <paramref name="day"/>: "&lt;id&gt;@&lt;day&gt;".</summary>
+        public static string HealthId(string id, int day)
+        {
+            return id + "@" + day.ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>True once every scenario has a result.</summary>
@@ -217,6 +252,8 @@ namespace TestRig.Harness.Logic
                 return;
             }
 
+            _day = daysElapsed;
+
             // Every call into scenario code (Run, its steps, Until conditions) happens in here.
             try
             {
@@ -287,21 +324,26 @@ namespace TestRig.Harness.Logic
 
             for (int i = _nextIndex; i < _scenarios.Count; i++)
             {
-                results.Add(new ScenarioResult(_scenarios[i].Id, ScenarioStatus.Skipped, null));
+                results.Add(new ScenarioResult(ResultId(_scenarios[i]), ScenarioStatus.Skipped, null));
             }
 
             return results;
+        }
+
+        private string ResultId(IScenario scenario)
+        {
+            return _healthDay.HasValue ? HealthId(scenario.Id, _healthDay.Value) : scenario.Id;
         }
 
         private void StartNext(double realSeconds)
         {
             IScenario scenario = _scenarios[_nextIndex];
             _nextIndex++;
-            _current = new Context(this, scenario.Id);
+            _current = new Context(this, ResultId(scenario));
             _wait = null;
             _startSeconds = realSeconds;
             Progress++;
-            _log("scenario " + scenario.Id + ": started");
+            _log("scenario " + _current.ScenarioId + ": started");
 
             IEnumerable<ScenarioStep> steps = scenario.Run(_current);
             if (steps == null)
@@ -343,6 +385,13 @@ namespace TestRig.Harness.Logic
             if (step == null)
             {
                 End(ScenarioStatus.Error, realSeconds, true, "yielded a null step");
+                return;
+            }
+
+            // Nothing ran yet for this step, so the game state is known: Error without taint.
+            if (_healthDay.HasValue && step.Kind == ScenarioStep.StepKind.Days)
+            {
+                End(ScenarioStatus.Error, realSeconds, false, "Days(n) is not allowed in a health scenario");
                 return;
             }
 
@@ -410,7 +459,7 @@ namespace TestRig.Harness.Logic
         {
             for (; _nextIndex < _scenarios.Count; _nextIndex++)
             {
-                string id = _scenarios[_nextIndex].Id;
+                string id = ResultId(_scenarios[_nextIndex]);
                 _results.Add(new ScenarioResult(id, ScenarioStatus.Skipped, null));
                 _log("scenario " + id + ": Skipped");
             }
@@ -434,6 +483,11 @@ namespace TestRig.Harness.Logic
             }
 
             public string ScenarioId { get; }
+
+            public int Day
+            {
+                get { return _runner._day; }
+            }
 
             public int CheckCount { get; private set; }
 

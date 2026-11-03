@@ -74,8 +74,14 @@ namespace TestRig.Harness.Logic
         /// </summary>
         public IReadOnlyList<string> Scenarios { get; }
 
+        /// <summary>
+        /// Ids of the health scenarios that bracket the soak (F-S6-1), trimmed and in requested order;
+        /// empty when the key is absent. Only valid for a soak run, i.e. never together with <see cref="Scenarios"/>.
+        /// </summary>
+        public IReadOnlyList<string> Health { get; }
+
         private RunConfig(int seed, int days, HarnessMode mode, double stallMinutes, double budgetMinutes,
-            IReadOnlyList<string> ownAssemblies, IReadOnlyList<string> scenarios)
+            IReadOnlyList<string> ownAssemblies, IReadOnlyList<string> scenarios, IReadOnlyList<string> health)
         {
             Seed = seed;
             Days = days;
@@ -84,6 +90,7 @@ namespace TestRig.Harness.Logic
             BudgetMinutes = budgetMinutes;
             OwnAssemblies = ownAssemblies;
             Scenarios = scenarios;
+            Health = health;
         }
 
         /// <summary>
@@ -104,6 +111,7 @@ namespace TestRig.Harness.Logic
             double? budgetMinutes = null;
             string[] ownAssemblies = null;
             string[] scenarios = null;
+            string[] health = null;
             bool anyLine = false;
 
             foreach (string rawLine in text.Split('\n'))
@@ -151,7 +159,11 @@ namespace TestRig.Harness.Logic
                 }
                 else if (string.Equals(key, "scenarios", StringComparison.OrdinalIgnoreCase))
                 {
-                    error = ReadScenarioIds(value, ref scenarios);
+                    error = ReadScenarioIds("scenarios", value, ref scenarios);
+                }
+                else if (string.Equals(key, "health", StringComparison.OrdinalIgnoreCase))
+                {
+                    error = ReadScenarioIds("health", value, ref health);
                 }
                 else
                 {
@@ -184,6 +196,11 @@ namespace TestRig.Harness.Logic
                 return RunConfigResult.Invalid("missing required key 'mode'");
             }
 
+            if (health != null && scenarios != null)
+            {
+                return RunConfigResult.Invalid("'health' cannot be combined with 'scenarios' (health brackets a soak run)");
+            }
+
             return RunConfigResult.Valid(new RunConfig(
                 seed.Value,
                 days.Value,
@@ -191,7 +208,8 @@ namespace TestRig.Harness.Logic
                 stallMinutes ?? DefaultStallMinutes,
                 budgetMinutes ?? DefaultBudgetMinutes,
                 ownAssemblies ?? new string[0],
-                scenarios ?? new string[0]));
+                scenarios ?? new string[0],
+                health ?? new string[0]));
         }
 
         // Each Read* helper stores into the slot and returns null, or returns an error text.
@@ -265,10 +283,11 @@ namespace TestRig.Harness.Logic
             return null;
         }
 
-        // Like ReadNameList, but at least one id and no id twice (ordinal): a present key means scenario mode.
-        private static string ReadScenarioIds(string value, ref string[] slot)
+        // Like ReadNameList, but at least one id and no id twice (ordinal): a present key means scenario
+        // (or health) mode.
+        private static string ReadScenarioIds(string key, string value, ref string[] slot)
         {
-            string error = ReadNameList("scenarios", value, ref slot);
+            string error = ReadNameList(key, value, ref slot);
             if (error != null)
             {
                 return error;
@@ -276,7 +295,7 @@ namespace TestRig.Harness.Logic
 
             if (slot.Length == 0)
             {
-                return "invalid value for 'scenarios' (expected at least one scenario id): " + value;
+                return "invalid value for '" + key + "' (expected at least one scenario id): " + value;
             }
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -284,7 +303,7 @@ namespace TestRig.Harness.Logic
             {
                 if (!seen.Add(id))
                 {
-                    return "duplicate scenario id in 'scenarios': " + id;
+                    return "duplicate scenario id in '" + key + "': " + id;
                 }
             }
 
@@ -354,61 +373,182 @@ namespace TestRig.Harness.Logic
     /// In scenario mode the Running phase drives a <see cref="ScenarioRunner"/> instead of
     /// counting days: the run completes after the last scenario and is aborted with reason
     /// "tainted:&lt;id&gt;" when a scenario taints it.
+    /// In health mode (run.cfg <c>health=</c>, F-S6-1) the Running phase is a soak bracketed by
+    /// two health runners: health@0 (time stopped) -> soak (time runs until the requested days)
+    /// -> health@N (time stopped) -> Ending. A taint in health@0 skips the rest and the soak; the
+    /// soak watchdog and the daysReached check stay as in a plain soak.
     /// </summary>
     public sealed class HarnessRun
     {
+        private enum RunKind { Soak, Scenarios, Health }
+
+        // Health mode: which part of the Running phase is active.
+        private enum HealthSegment { AtStart, Soak, AtEnd }
+
         private readonly RunConfig _config;
         private readonly double _startRealSeconds;
+        private readonly RunKind _kind;
 
-        // Null in soak mode.
+        // Scenario mode only.
         private readonly ScenarioRunner _runner;
+
+        // Health mode only: the brackets before and after the soak.
+        private readonly ScenarioRunner _healthAtStart;
+        private readonly ScenarioRunner _healthAtEnd;
+
+        private HealthSegment _segment;
+
+        // Health mode: start of the soak segment, and its result once it ended (null before).
+        private double _soakStartSeconds;
+        private ScenarioStatus? _soakStatus;
+        private int _soakSeconds;
 
         private double _lastProgressSeconds;
         private double _endingSinceSeconds;
         private int _maxDaysSeen;
         private bool _wasInMapEvent;
-        private int _runnerProgressSeen;
 
         // Real time of the last change to a final Status/Reason (completion, abort, end-stall).
         private double _finalRealSeconds;
 
-        /// <summary>Soak run; <paramref name="config"/> must not request scenarios.</summary>
+        // Bounds of the rate window for runningDaysPerRealMinute (F-S6-5): real time and DaysReached at
+        // its start and end. The window is the Running phase, in health mode only its soak segment.
+        // Null start = never started; null end = still open.
+        private double? _runningStartSeconds;
+        private int _runningStartDays;
+        private double? _runningEndSeconds;
+        private int _runningEndDays;
+
+        /// <summary>Soak run; <paramref name="config"/> must request neither scenarios nor health.</summary>
         public HarnessRun(RunConfig config, double startRealSeconds)
-            : this(config, startRealSeconds, null, false)
+            : this(config, startRealSeconds, RunKind.Soak, null, null, null)
         {
         }
 
         /// <summary>Scenario run; <paramref name="config"/> must request scenarios.</summary>
         public HarnessRun(RunConfig config, double startRealSeconds, ScenarioRunner runner)
-            : this(config, startRealSeconds, runner, true)
+            : this(config, startRealSeconds, RunKind.Scenarios, runner, null, null)
         {
         }
 
-        private HarnessRun(RunConfig config, double startRealSeconds, ScenarioRunner runner, bool scenarioMode)
+        /// <summary>
+        /// Soak run bracketed by health scenarios; <paramref name="config"/> must request health. The
+        /// runners are typically <see cref="ScenarioRunner.ForHealth"/> of the resolved health scenarios
+        /// at day 0 and at <see cref="RunConfig.Days"/>.
+        /// </summary>
+        public HarnessRun(RunConfig config, double startRealSeconds, ScenarioRunner healthAtStart, ScenarioRunner healthAtEnd)
+            : this(config, startRealSeconds, RunKind.Health, null, healthAtStart, healthAtEnd)
+        {
+        }
+
+        private HarnessRun(RunConfig config, double startRealSeconds, RunKind kind,
+            ScenarioRunner runner, ScenarioRunner healthAtStart, ScenarioRunner healthAtEnd)
         {
             if (config == null)
             {
                 throw new ArgumentNullException("config");
             }
 
-            if (scenarioMode && runner == null)
+            if (kind == RunKind.Scenarios && runner == null)
             {
                 throw new ArgumentNullException("runner");
             }
 
-            if (scenarioMode != config.Scenarios.Count > 0)
+            if (kind == RunKind.Health && healthAtStart == null)
             {
-                throw new ArgumentException(scenarioMode
+                throw new ArgumentNullException("healthAtStart");
+            }
+
+            if (kind == RunKind.Health && healthAtEnd == null)
+            {
+                throw new ArgumentNullException("healthAtEnd");
+            }
+
+            if ((kind == RunKind.Scenarios) != config.Scenarios.Count > 0)
+            {
+                throw new ArgumentException(kind == RunKind.Scenarios
                     ? "a scenario run needs a config with scenarios"
                     : "a config with scenarios needs a scenario runner", "config");
             }
 
+            if ((kind == RunKind.Health) != config.Health.Count > 0)
+            {
+                throw new ArgumentException(kind == RunKind.Health
+                    ? "a health run needs a config with health"
+                    : "a config with health needs health runners", "config");
+            }
+
             _config = config;
             _startRealSeconds = startRealSeconds;
+            _kind = kind;
             _runner = runner;
+            _healthAtStart = healthAtStart;
+            _healthAtEnd = healthAtEnd;
+            _segment = HealthSegment.AtStart;
             _lastProgressSeconds = startRealSeconds;
             Phase = HarnessPhase.Armed;
             Status = RunStatus.Running;
+        }
+
+        /// <summary>
+        /// Ids of the scenario lines a run of <paramref name="config"/> reports, in order: "soak" for a
+        /// soak run, the requested ids for a scenario run, and for a health run "&lt;id&gt;@0" per health id,
+        /// "soak", then "&lt;id&gt;@&lt;days&gt;" per health id.
+        /// </summary>
+        public static IReadOnlyList<string> ResultIds(RunConfig config)
+        {
+            if (config == null)
+            {
+                throw new ArgumentNullException(nameof(config));
+            }
+
+            if (config.Scenarios.Count > 0)
+            {
+                return config.Scenarios;
+            }
+
+            var ids = new List<string>();
+            foreach (string id in config.Health)
+            {
+                ids.Add(ScenarioRunner.HealthId(id, 0));
+            }
+
+            ids.Add(RunResult.SoakScenarioId);
+            foreach (string id in config.Health)
+            {
+                ids.Add(ScenarioRunner.HealthId(id, config.Days));
+            }
+
+            return ids;
+        }
+
+        // The runner driven in the current tick of phase Running; null while a soak (segment) runs.
+        private ScenarioRunner ActiveRunner
+        {
+            get
+            {
+                switch (_kind)
+                {
+                    case RunKind.Scenarios:
+                        return _runner;
+
+                    case RunKind.Health:
+                        switch (_segment)
+                        {
+                            case HealthSegment.AtStart:
+                                return _healthAtStart;
+
+                            case HealthSegment.AtEnd:
+                                return _healthAtEnd;
+
+                            default:
+                                return null;
+                        }
+
+                    default:
+                        return null;
+                }
+            }
         }
 
         public HarnessPhase Phase { get; private set; }
@@ -425,18 +565,38 @@ namespace TestRig.Harness.Logic
         public int PlayerMapEvents { get; private set; }
 
         /// <summary>
-        /// Whether game time should run: in phase Running, and in scenario mode only while the
-        /// current scenario waits on <see cref="ScenarioStep.Days"/>.
+        /// Whether game time should run: in phase Running, in scenario mode only while the current
+        /// scenario waits on <see cref="ScenarioStep.Days"/>, and in health mode only during the soak.
         /// </summary>
         public bool TimeShouldRun
         {
-            get { return Phase == HarnessPhase.Running && (_runner == null || _runner.TimeShouldRun); }
+            get
+            {
+                ScenarioRunner active = ActiveRunner;
+                return Phase == HarnessPhase.Running && (active == null || active.TimeShouldRun);
+            }
         }
 
-        /// <summary>Number of scenarios with a result (0 in soak mode); a change means run-result.json should be rewritten.</summary>
+        /// <summary>
+        /// Number of scenario lines with a result (0 in soak mode; in health mode including the soak
+        /// once it ended); a change means run-result.json should be rewritten.
+        /// </summary>
         public int ScenariosFinished
         {
-            get { return _runner == null ? 0 : _runner.Results.Count; }
+            get
+            {
+                switch (_kind)
+                {
+                    case RunKind.Scenarios:
+                        return _runner.Results.Count;
+
+                    case RunKind.Health:
+                        return _healthAtStart.Results.Count + (_soakStatus.HasValue ? 1 : 0) + _healthAtEnd.Results.Count;
+
+                    default:
+                        return 0;
+                }
+            }
         }
 
         public HarnessAction Tick(HarnessObservation o)
@@ -454,9 +614,10 @@ namespace TestRig.Harness.Logic
                 return TickEnding(o);
             }
 
-            // In scenario mode a running scenario is bounded by its own limits (see ScenarioRunner), so
-            // it counts as progress; the budget below still applies.
-            if (Phase == HarnessPhase.Running && _runner != null && _runner.HasCurrentScenario)
+            // A running (health) scenario is bounded by its own limits (see ScenarioRunner), so it counts
+            // as progress; the budget below still applies.
+            ScenarioRunner active = ActiveRunner;
+            if (Phase == HarnessPhase.Running && active != null && active.HasCurrentScenario)
             {
                 _lastProgressSeconds = o.RealSeconds;
             }
@@ -481,7 +642,9 @@ namespace TestRig.Harness.Logic
         /// <summary>
         /// Result record of this run at <paramref name="realSeconds"/>: in soak mode one soak scenario
         /// and one daysReached check; in scenario mode the scenarios with a result so far and their
-        /// checks. realSeconds is rounded to whole seconds and the rate to two decimals.
+        /// checks; in health mode the health@0 lines, the soak line with its daysReached check once the
+        /// soak ended (Skipped without a check when a final run never started it), then the health@N
+        /// lines. realSeconds is rounded to whole seconds and the rate to two decimals.
         /// </summary>
         public RunResult ToResult(double realSeconds, IReadOnlyList<ModuleEntry> modules, ExceptionSummary exceptions)
         {
@@ -492,7 +655,8 @@ namespace TestRig.Harness.Logic
         /// Result record for an unhandled exception that terminates the process. A run without a
         /// final status yet (Running) becomes Aborted with reason "unhandled:&lt;phase&gt;" as of
         /// <paramref name="realSeconds"/>: the soak scenario Failed, or in scenario mode the current
-        /// scenario Error and the remaining ones Skipped. A run that already has a final status keeps
+        /// scenario Error and the remaining ones Skipped; in health mode a running soak segment is
+        /// Failed, the current health scenario Error and everything not started Skipped. A run that already has a final status keeps
         /// it and its timing as of the final transition (realSeconds, rate, scenario seconds), so the
         /// crash only updates the exception counts. The run itself is not changed.
         /// </summary>
@@ -512,25 +676,23 @@ namespace TestRig.Harness.Logic
 
             IReadOnlyList<ScenarioResult> scenarios;
             IReadOnlyList<CheckResult> checks;
-            if (_runner == null)
+            switch (_kind)
             {
-                bool daysPassed = DaysReached >= _config.Days;
-                checks = new[]
-                {
-                    new CheckResult(
-                        RunResult.SoakScenarioId,
-                        "daysReached",
-                        ">= " + _config.Days.ToString(CultureInfo.InvariantCulture),
-                        DaysReached.ToString(CultureInfo.InvariantCulture),
-                        daysPassed),
-                };
-                scenarios = new[] { new ScenarioResult(RunResult.SoakScenarioId, ClassifySoak(status, reason, daysPassed), seconds) };
-            }
-            else
-            {
-                // Copies: the runner's lists keep growing after this record is taken.
-                scenarios = crashed ? _runner.ResultsAfterCrash(realSeconds) : new List<ScenarioResult>(_runner.Results);
-                checks = new List<CheckResult>(_runner.Checks);
+                case RunKind.Scenarios:
+                    // Copies: the runner's lists keep growing after this record is taken.
+                    scenarios = crashed ? _runner.ResultsAfterCrash(realSeconds) : new List<ScenarioResult>(_runner.Results);
+                    checks = new List<CheckResult>(_runner.Checks);
+                    break;
+
+                case RunKind.Health:
+                    HealthLines(status, realSeconds, crashed, out scenarios, out checks);
+                    break;
+
+                default:
+                    bool daysPassed = DaysReached >= _config.Days;
+                    checks = new[] { DaysReachedCheck() };
+                    scenarios = new[] { new ScenarioResult(RunResult.SoakScenarioId, ClassifySoak(status, reason, daysPassed), seconds) };
+                    break;
             }
 
             return new RunResult(
@@ -542,11 +704,79 @@ namespace TestRig.Harness.Logic
                 DaysReached,
                 seconds,
                 Math.Round(rate, 2, MidpointRounding.AwayFromZero),
+                RunningRate(realSeconds),
                 PlayerMapEvents,
                 modules,
                 exceptions,
                 scenarios,
                 checks);
+        }
+
+        private CheckResult DaysReachedCheck()
+        {
+            return new CheckResult(
+                RunResult.SoakScenarioId,
+                "daysReached",
+                ">= " + _config.Days.ToString(CultureInfo.InvariantCulture),
+                DaysReached.ToString(CultureInfo.InvariantCulture),
+                DaysReached >= _config.Days);
+        }
+
+        // Health mode: health@0 lines, soak line (+ its check), health@N lines, each part as far as it has
+        // a result. A soak that never started is listed (Skipped, no check) only in a final record.
+        private void HealthLines(RunStatus status, double realSeconds, bool crashed,
+            out IReadOnlyList<ScenarioResult> scenarios, out IReadOnlyList<CheckResult> checks)
+        {
+            var lines = new List<ScenarioResult>(crashed ? _healthAtStart.ResultsAfterCrash(realSeconds) : _healthAtStart.Results);
+            var checkList = new List<CheckResult>(_healthAtStart.Checks);
+
+            bool soakRunning = Phase == HarnessPhase.Running && _segment == HealthSegment.Soak;
+            if (_soakStatus.HasValue)
+            {
+                lines.Add(new ScenarioResult(RunResult.SoakScenarioId, _soakStatus.Value, _soakSeconds));
+                checkList.Add(DaysReachedCheck());
+            }
+            else if (crashed && soakRunning)
+            {
+                lines.Add(new ScenarioResult(RunResult.SoakScenarioId, ScenarioStatus.Failed, SoakSecondsAt(realSeconds)));
+                checkList.Add(DaysReachedCheck());
+            }
+            else if (status != RunStatus.Running)
+            {
+                lines.Add(new ScenarioResult(RunResult.SoakScenarioId, ScenarioStatus.Skipped, null));
+            }
+
+            lines.AddRange(crashed ? _healthAtEnd.ResultsAfterCrash(realSeconds) : _healthAtEnd.Results);
+            checkList.AddRange(_healthAtEnd.Checks);
+
+            scenarios = lines;
+            checks = checkList;
+        }
+
+        private int SoakSecondsAt(double realSeconds)
+        {
+            return (int)Math.Round(Math.Max(0, realSeconds - _soakStartSeconds), MidpointRounding.AwayFromZero);
+        }
+
+        // Game days per real minute of the rate window (the Running phase, in health mode its soak
+        // segment), which ends at the latest with the run's final transition; while it lasts it ends at
+        // realSeconds. Null when the window never began or has no duration.
+        private double? RunningRate(double realSeconds)
+        {
+            if (!_runningStartSeconds.HasValue)
+            {
+                return null;
+            }
+
+            double end = _runningEndSeconds ?? realSeconds;
+            int days = (_runningEndSeconds.HasValue ? _runningEndDays : DaysReached) - _runningStartDays;
+            double minutes = (end - _runningStartSeconds.Value) / 60.0;
+            if (!(minutes > 0))
+            {
+                return null;
+            }
+
+            return Math.Round(days / minutes, 2, MidpointRounding.AwayFromZero);
         }
 
         /// <summary>
@@ -667,6 +897,17 @@ namespace TestRig.Harness.Logic
                 _runner.Abort(realSeconds);
             }
 
+            if (_kind == RunKind.Health)
+            {
+                if (Phase == HarnessPhase.Running && _segment == HealthSegment.Soak)
+                {
+                    EndSoak(ClassifySoak(Status, Reason, DaysReached >= _config.Days), realSeconds);
+                }
+
+                _healthAtStart.Abort(realSeconds);
+                _healthAtEnd.Abort(realSeconds);
+            }
+
             EnterPhase(HarnessPhase.Ending, realSeconds);
             return HarnessAction.RequestEndGame;
         }
@@ -724,39 +965,94 @@ namespace TestRig.Harness.Logic
 
         private HarnessAction TickRunning(HarnessObservation o)
         {
-            if (_runner != null)
+            switch (_kind)
             {
-                return TickScenarios(o);
-            }
+                case RunKind.Scenarios:
+                    return TickScenarios(_runner, o) ?? (_runner.IsFinished ? Complete(o.RealSeconds) : HarnessAction.KeepRunning);
 
-            if (o.DaysElapsed >= _config.Days)
-            {
-                return Complete(o.RealSeconds);
-            }
+                case RunKind.Health:
+                    return TickHealth(o);
 
-            return HarnessAction.KeepRunning;
+                default:
+                    return o.DaysElapsed >= _config.Days ? Complete(o.RealSeconds) : HarnessAction.KeepRunning;
+            }
         }
 
-        // Scenario mode: the days key is ignored; every runner step is progress for the stall watchdog.
-        private HarnessAction TickScenarios(HarnessObservation o)
+        // Health mode: each segment change happens on the tick that ends the previous segment; health@N
+        // starts on the tick after the soak ended, once game time is stopped again.
+        private HarnessAction TickHealth(HarnessObservation o)
         {
-            _runner.Tick(o.RealSeconds, o.DaysElapsed);
-            if (_runner.Progress != _runnerProgressSeen)
+            switch (_segment)
             {
-                _runnerProgressSeen = _runner.Progress;
+                case HealthSegment.AtStart:
+                    HarnessAction? tainted = TickScenarios(_healthAtStart, o);
+                    if (tainted.HasValue)
+                    {
+                        // No soak after a taint: the game state is unknown.
+                        _healthAtEnd.Abort(o.RealSeconds);
+                        return tainted.Value;
+                    }
+
+                    if (_healthAtStart.IsFinished)
+                    {
+                        StartSoak(o.RealSeconds);
+                    }
+
+                    return HarnessAction.KeepRunning;
+
+                case HealthSegment.Soak:
+                    if (o.DaysElapsed >= _config.Days)
+                    {
+                        EndSoak(ScenarioStatus.Passed, o.RealSeconds);
+                    }
+
+                    return HarnessAction.KeepRunning;
+
+                default:
+                    return TickScenarios(_healthAtEnd, o)
+                        ?? (_healthAtEnd.IsFinished ? Complete(o.RealSeconds) : HarnessAction.KeepRunning);
+            }
+        }
+
+        private void StartSoak(double realSeconds)
+        {
+            _segment = HealthSegment.Soak;
+            _soakStartSeconds = realSeconds;
+            _lastProgressSeconds = realSeconds;
+            StartRateWindow(realSeconds);
+        }
+
+        // Ends the soak segment with its result; a passed soak hands over to health@N.
+        private void EndSoak(ScenarioStatus status, double realSeconds)
+        {
+            _soakStatus = status;
+            _soakSeconds = SoakSecondsAt(realSeconds);
+            _segment = HealthSegment.AtEnd;
+            _lastProgressSeconds = realSeconds;
+            EndRateWindow(realSeconds);
+        }
+
+        // Drives one runner by a tick (the days key is not evaluated here); every runner step is progress
+        // for the stall watchdog. Returns RequestEndGame when the runner got tainted, else null.
+        private HarnessAction? TickScenarios(ScenarioRunner runner, HarnessObservation o)
+        {
+            int progressBefore = runner.Progress;
+            runner.Tick(o.RealSeconds, o.DaysElapsed);
+            if (runner.Progress != progressBefore)
+            {
                 _lastProgressSeconds = o.RealSeconds;
             }
 
-            if (_runner.IsTainted)
+            if (runner.IsTainted)
             {
                 Status = RunStatus.Aborted;
-                Reason = "tainted:" + _runner.TaintedBy;
+                Reason = "tainted:" + runner.TaintedBy;
                 _finalRealSeconds = o.RealSeconds;
                 EnterPhase(HarnessPhase.Ending, o.RealSeconds);
                 return HarnessAction.RequestEndGame;
             }
 
-            return _runner.IsFinished ? Complete(o.RealSeconds) : HarnessAction.KeepRunning;
+            return null;
         }
 
         private HarnessAction Complete(double realSeconds)
@@ -767,12 +1063,41 @@ namespace TestRig.Harness.Logic
             return HarnessAction.RequestEndGame;
         }
 
-        // Every phase change is progress; entering Ending also starts the end-stall clock.
+        // Every phase change is progress; entering Ending also starts the end-stall clock. Entering and
+        // leaving Running bound the rate window, in health mode the soak segment does (see StartSoak/EndSoak).
         private void EnterPhase(HarnessPhase phase, double realSeconds)
         {
+            if (phase == HarnessPhase.Running && _kind != RunKind.Health)
+            {
+                StartRateWindow(realSeconds);
+            }
+            else if (Phase == HarnessPhase.Running)
+            {
+                EndRateWindow(realSeconds);
+            }
+
             Phase = phase;
             _lastProgressSeconds = realSeconds;
             _endingSinceSeconds = realSeconds;
+        }
+
+        // DaysReached already holds this tick.
+        private void StartRateWindow(double realSeconds)
+        {
+            _runningStartSeconds = realSeconds;
+            _runningStartDays = DaysReached;
+        }
+
+        // Only an open window is closed, so a later phase change keeps the first end.
+        private void EndRateWindow(double realSeconds)
+        {
+            if (!_runningStartSeconds.HasValue || _runningEndSeconds.HasValue)
+            {
+                return;
+            }
+
+            _runningEndSeconds = realSeconds;
+            _runningEndDays = DaysReached;
         }
     }
 }

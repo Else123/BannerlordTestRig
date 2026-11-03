@@ -1,0 +1,688 @@
+{
+    "jobId":  "20261103-063052-859d",
+    "suite":  "L1",
+    "status":  "completed",
+    "exitCode":  2,
+    "runs":  [
+                 {
+                     "runId":  "r1",
+                     "exitClass":  "Completed",
+                     "result":  {
+                                    "schema":  1,
+                                    "status":  "Completed",
+                                    "reason":  "",
+                                    "seed":  1,
+                                    "mode":  "WarSails",
+                                    "daysRequested":  3,
+                                    "daysReached":  3,
+                                    "realSeconds":  34,
+                                    "gameDaysPerRealMinute":  5.36,
+                                    "runningDaysPerRealMinute":  18.17,
+                                    "playerMapEvents":  0,
+                                    "modules":  [
+                                                    {
+                                                        "id":  "Bannerlord.Harmony",
+                                                        "version":  "v2.4.2"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.ButterLib",
+                                                        "version":  "v2.12.0"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.UIExtenderEx",
+                                                        "version":  "v3.0.3"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.MBOptionScreen",
+                                                        "version":  "v5.12.3"
+                                                    },
+                                                    {
+                                                        "id":  "Native",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "SandBoxCore",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "Sandbox",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "StoryMode",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "NavalDLC",
+                                                        "version":  "v1.2.8"
+                                                    },
+                                                    {
+                                                        "id":  "CoherentWarAI",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "AutoTraderSpeed",
+                                                        "version":  "v1.4.6"
+                                                    },
+                                                    {
+                                                        "id":  "SmithingSuite",
+                                                        "version":  "v1.0.0"
+                                                    },
+                                                    {
+                                                        "id":  "CompanionManagementSuite",
+                                                        "version":  "v1.4.7"
+                                                    },
+                                                    {
+                                                        "id":  "TestRig.Harness",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "CoherentWarAI.Scenarios",
+                                                        "version":  "v1.0.0"
+                                                    },
+                                                    {
+                                                        "id":  "AutoTraderSpeed.Scenarios",
+                                                        "version":  "v1.0.0"
+                                                    },
+                                                    {
+                                                        "id":  "SmithingSuite.Scenarios",
+                                                        "version":  "v1.0.0"
+                                                    },
+                                                    {
+                                                        "id":  "CompanionManagementSuite.Scenarios",
+                                                        "version":  "v1.0.0"
+                                                    }
+                                                ],
+                                    "exceptions":  {
+                                                       "total":  0,
+                                                       "own":  0,
+                                                       "harness":  0,
+                                                       "vanilla":  0,
+                                                       "unhandled":  0,
+                                                       "classification":  {
+                                                                              "walks":  0,
+                                                                              "walkMs":  0.00,
+                                                                              "handlerMs":  0.00,
+                                                                              "maxHandlerMs":  0.00,
+                                                                              "ownExact":  true
+                                                                          },
+                                                       "top":  [
+
+                                                               ]
+                                                   },
+                                    "scenarios":  [
+                                                      {
+                                                          "id":  "coherentwarai.health@0",
+                                                          "status":  "Passed",
+                                                          "seconds":  0
+                                                      },
+                                                      {
+                                                          "id":  "autotrader.health@0",
+                                                          "status":  "Passed",
+                                                          "seconds":  0
+                                                      },
+                                                      {
+                                                          "id":  "smithingsuite.health@0",
+                                                          "status":  "Failed",
+                                                          "seconds":  0
+                                                      },
+                                                      {
+                                                          "id":  "companionsuite.health@0",
+                                                          "status":  "Passed",
+                                                          "seconds":  0
+                                                      },
+                                                      {
+                                                          "id":  "soak",
+                                                          "status":  "Passed",
+                                                          "seconds":  10
+                                                      },
+                                                      {
+                                                          "id":  "coherentwarai.health@3",
+                                                          "status":  "Passed",
+                                                          "seconds":  0
+                                                      },
+                                                      {
+                                                          "id":  "autotrader.health@3",
+                                                          "status":  "Passed",
+                                                          "seconds":  0
+                                                      },
+                                                      {
+                                                          "id":  "smithingsuite.health@3",
+                                                          "status":  "Failed",
+                                                          "seconds":  0
+                                                      },
+                                                      {
+                                                          "id":  "companionsuite.health@3",
+                                                          "status":  "Passed",
+                                                          "seconds":  0
+                                                      }
+                                                  ],
+                                    "checks":  [
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "setup.campaign",
+                                                       "expected":  "Campaign.Current != null",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.OutcomeLog",
+                                                       "expected":  "OutcomeLogBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.BanditHunt",
+                                                       "expected":  "BanditHuntBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.SightingNetwork",
+                                                       "expected":  "SightingNetworkBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.Command",
+                                                       "expected":  "CommandBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.WarPosture",
+                                                       "expected":  "WarPostureBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.WarCoordinator",
+                                                       "expected":  "WarCoordinatorBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.ChokepointMap",
+                                                       "expected":  "ChokepointMapBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.MapMarker",
+                                                       "expected":  "MapMarkerBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "behavior.SettingsSync",
+                                                       "expected":  "SettingsSyncBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "model.TargetScoreCalculatingModel",
+                                                       "expected":  "active model is CoherentTargetScoreModel",
+                                                       "actual":  "CoherentWarAI.Models.CoherentTargetScoreModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "model.SettlementGarrisonModel",
+                                                       "expected":  "active model is CoherentGarrisonModel",
+                                                       "actual":  "CoherentWarAI.Models.CoherentGarrisonModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@0",
+                                                       "name":  "model.ArmyManagementCalculationModel",
+                                                       "expected":  "active model is CoherentArmyManagementModel",
+                                                       "actual":  "CoherentWarAI.Models.CoherentArmyManagementModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@0",
+                                                       "name":  "behavior.trade",
+                                                       "expected":  "TradeBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@0",
+                                                       "name":  "behavior.warehouse",
+                                                       "expected":  "WarehouseBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@0",
+                                                       "name":  "menu.town-exists",
+                                                       "expected":  "game menu \u0027town\u0027 exists",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@0",
+                                                       "name":  "menu.town-autotrader_town",
+                                                       "expected":  "occurs exactly once",
+                                                       "actual":  "1 time(s)",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@0",
+                                                       "name":  "behavior.SmithingBehavior",
+                                                       "expected":  "SmithingBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@0",
+                                                       "name":  "behavior.TravelStaminaBehavior",
+                                                       "expected":  "TravelStaminaBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@0",
+                                                       "name":  "menu.town",
+                                                       "expected":  "game menu \u0027town\u0027 exists",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@0",
+                                                       "name":  "menu.option-once",
+                                                       "expected":  "smithingsuite_town occurs exactly once",
+                                                       "actual":  "1",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@0",
+                                                       "name":  "menu.option-after-anchor",
+                                                       "expected":  "smithingsuite_town directly after town_smithy",
+                                                       "actual":  "smithingsuite_town at 2, town_smithy at 14",
+                                                       "passed":  false
+                                                   },
+                                                   {
+                                                       "scenario":  "companionsuite.health@0",
+                                                       "name":  "behavior.CompanionSuiteBehavior",
+                                                       "expected":  "CompanionSuite.Persistence.CompanionSuiteBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "companionsuite.health@0",
+                                                       "name":  "behavior.AutoBuildBehavior",
+                                                       "expected":  "CompanionSuite.Integration.AutoBuildBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "companionsuite.health@0",
+                                                       "name":  "model.equipment-selection",
+                                                       "expected":  "Models.EquipmentSelectionModel is CompanionSuite.Integration.RoleAwareEquipmentSelectionModel",
+                                                       "actual":  "CompanionSuite.Integration.RoleAwareEquipmentSelectionModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "soak",
+                                                       "name":  "daysReached",
+                                                       "expected":  "\u003e= 3",
+                                                       "actual":  "3",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "setup.campaign",
+                                                       "expected":  "Campaign.Current != null",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.OutcomeLog",
+                                                       "expected":  "OutcomeLogBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.BanditHunt",
+                                                       "expected":  "BanditHuntBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.SightingNetwork",
+                                                       "expected":  "SightingNetworkBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.Command",
+                                                       "expected":  "CommandBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.WarPosture",
+                                                       "expected":  "WarPostureBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.WarCoordinator",
+                                                       "expected":  "WarCoordinatorBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.ChokepointMap",
+                                                       "expected":  "ChokepointMapBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.MapMarker",
+                                                       "expected":  "MapMarkerBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "behavior.SettingsSync",
+                                                       "expected":  "SettingsSyncBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "model.TargetScoreCalculatingModel",
+                                                       "expected":  "active model is CoherentTargetScoreModel",
+                                                       "actual":  "CoherentWarAI.Models.CoherentTargetScoreModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "model.SettlementGarrisonModel",
+                                                       "expected":  "active model is CoherentGarrisonModel",
+                                                       "actual":  "CoherentWarAI.Models.CoherentGarrisonModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "model.ArmyManagementCalculationModel",
+                                                       "expected":  "active model is CoherentArmyManagementModel",
+                                                       "actual":  "CoherentWarAI.Models.CoherentArmyManagementModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "coherentwarai.health@3",
+                                                       "name":  "log.no-errors",
+                                                       "expected":  "no [Error] / [Exception] / Exception in 23798 appended bytes",
+                                                       "actual":  "none found",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@3",
+                                                       "name":  "behavior.trade",
+                                                       "expected":  "TradeBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@3",
+                                                       "name":  "behavior.warehouse",
+                                                       "expected":  "WarehouseBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@3",
+                                                       "name":  "menu.town-exists",
+                                                       "expected":  "game menu \u0027town\u0027 exists",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@3",
+                                                       "name":  "menu.town-autotrader_town",
+                                                       "expected":  "occurs exactly once",
+                                                       "actual":  "1 time(s)",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "autotrader.health@3",
+                                                       "name":  "log.no-errors",
+                                                       "expected":  "no error marker in AutoTrader.log since start",
+                                                       "actual":  "none",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@3",
+                                                       "name":  "behavior.SmithingBehavior",
+                                                       "expected":  "SmithingBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@3",
+                                                       "name":  "behavior.TravelStaminaBehavior",
+                                                       "expected":  "TravelStaminaBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@3",
+                                                       "name":  "menu.town",
+                                                       "expected":  "game menu \u0027town\u0027 exists",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@3",
+                                                       "name":  "menu.option-once",
+                                                       "expected":  "smithingsuite_town occurs exactly once",
+                                                       "actual":  "1",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@3",
+                                                       "name":  "menu.option-after-anchor",
+                                                       "expected":  "smithingsuite_town directly after town_smithy",
+                                                       "actual":  "smithingsuite_town at 2, town_smithy at 14",
+                                                       "passed":  false
+                                                   },
+                                                   {
+                                                       "scenario":  "smithingsuite.health@3",
+                                                       "name":  "log.no-error-markers",
+                                                       "expected":  "no error marker in the 0 bytes appended since @0 (run failed with an unexpected exception | disabling advisor after exception)",
+                                                       "actual":  "none",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "companionsuite.health@3",
+                                                       "name":  "behavior.CompanionSuiteBehavior",
+                                                       "expected":  "CompanionSuite.Persistence.CompanionSuiteBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "companionsuite.health@3",
+                                                       "name":  "behavior.AutoBuildBehavior",
+                                                       "expected":  "CompanionSuite.Integration.AutoBuildBehavior registered",
+                                                       "actual":  "ok",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "companionsuite.health@3",
+                                                       "name":  "model.equipment-selection",
+                                                       "expected":  "Models.EquipmentSelectionModel is CompanionSuite.Integration.RoleAwareEquipmentSelectionModel",
+                                                       "actual":  "CompanionSuite.Integration.RoleAwareEquipmentSelectionModel",
+                                                       "passed":  true
+                                                   },
+                                                   {
+                                                       "scenario":  "companionsuite.health@3",
+                                                       "name":  "log.no-errors",
+                                                       "expected":  "no \u0027ERROR\u0027 lines in the 0 chars appended since day-0 baseline",
+                                                       "actual":  "none",
+                                                       "passed":  true
+                                                   }
+                                               ]
+                                },
+                     "gameVersion":  "v1.4.8",
+                     "moduleVersions":  [
+                                            {
+                                                "id":  "Bannerlord.Harmony",
+                                                "version":  "v2.4.2.248",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.ButterLib",
+                                                "version":  "v2.12.0",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.UIExtenderEx",
+                                                "version":  "v3.0.3",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.MBOptionScreen",
+                                                "version":  "v5.12.3",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Native",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "SandBoxCore",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Sandbox",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "StoryMode",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "NavalDLC",
+                                                "version":  "v1.2.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "CoherentWarAI",
+                                                "version":  "v1.4.8",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "AutoTraderSpeed",
+                                                "version":  "v1.4.6",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "SmithingSuite",
+                                                "version":  "v1.0.0",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "CompanionManagementSuite",
+                                                "version":  "v1.4.7",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "TestRig.Harness",
+                                                "version":  "v1.4.8",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "CoherentWarAI.Scenarios",
+                                                "version":  "v1.0.0",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "AutoTraderSpeed.Scenarios",
+                                                "version":  "v1.0.0",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "SmithingSuite.Scenarios",
+                                                "version":  "v1.0.0",
+                                                "source":  "package"
+                                            },
+                                            {
+                                                "id":  "CompanionManagementSuite.Scenarios",
+                                                "version":  "v1.0.0",
+                                                "source":  "package"
+                                            }
+                                        ],
+                     "health":  [
+                                    {
+                                        "id":  "coherentwarai.health@0",
+                                        "expected":  "Passed",
+                                        "actual":  "Passed"
+                                    },
+                                    {
+                                        "id":  "autotrader.health@0",
+                                        "expected":  "Passed",
+                                        "actual":  "Passed"
+                                    },
+                                    {
+                                        "id":  "smithingsuite.health@0",
+                                        "expected":  "Passed",
+                                        "actual":  "Failed"
+                                    },
+                                    {
+                                        "id":  "companionsuite.health@0",
+                                        "expected":  "Passed",
+                                        "actual":  "Passed"
+                                    },
+                                    {
+                                        "id":  "coherentwarai.health@3",
+                                        "expected":  "Passed",
+                                        "actual":  "Passed"
+                                    },
+                                    {
+                                        "id":  "autotrader.health@3",
+                                        "expected":  "Passed",
+                                        "actual":  "Passed"
+                                    },
+                                    {
+                                        "id":  "smithingsuite.health@3",
+                                        "expected":  "Passed",
+                                        "actual":  "Failed"
+                                    },
+                                    {
+                                        "id":  "companionsuite.health@3",
+                                        "expected":  "Passed",
+                                        "actual":  "Passed"
+                                    }
+                                ]
+                 }
+             ],
+    "versionWarnings":  [
+                            "WARN version differs: Bannerlord.UIExtenderEx tower v3.0.2, .20 v3.0.3"
+                        ]
+}

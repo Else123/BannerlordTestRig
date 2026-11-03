@@ -10,10 +10,15 @@ namespace TestRig.Harness.Logic
     /// </summary>
     public interface IScenario
     {
-        /// <summary>Unique id, matched ordinally against the <c>scenarios=</c> key of run.cfg.</summary>
+        /// <summary>Unique id, matched ordinally against the <c>scenarios=</c> and <c>health=</c> keys of run.cfg.</summary>
         string Id { get; }
 
-        /// <summary>Called once per run; the steps are consumed one per resume.</summary>
+        /// <summary>
+        /// Called once per run; the steps are consumed one per resume. A health scenario
+        /// (<c>health=</c>) is called twice on the same instance: before the soak (result id
+        /// <c>&lt;id&gt;@0</c>) and after it (<c>&lt;id&gt;@&lt;days&gt;</c>), so it may keep state from
+        /// the first call for the second one. It must not yield <see cref="ScenarioStep.Days"/>.
+        /// </summary>
         IEnumerable<ScenarioStep> Run(IScenarioContext ctx);
     }
 
@@ -28,6 +33,14 @@ namespace TestRig.Harness.Logic
 
         /// <summary>Writes one line to the harness log, prefixed with the scenario id.</summary>
         void Log(string message);
+
+        /// <summary>
+        /// In-game day count of the current tick: day changes (daily ticks) since the campaign
+        /// session was launched, the same counter as <c>daysReached</c> in run-result.json. A health
+        /// scenario sees the count at the map (normally 0) before the soak and at least the
+        /// requested days after it.
+        /// </summary>
+        int Day { get; }
     }
 
     /// <summary>A wait yielded by a scenario. Created only through the factory methods.</summary>

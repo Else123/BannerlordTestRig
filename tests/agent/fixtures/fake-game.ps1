@@ -6,11 +6,15 @@
 #   FAKEGAME_HARNESS   CoherentWarAI (default) | TestRig: Documents subfolder whose harness\ holds run.cfg/harness.log and
 #                      the result (CoherentWarAI: result.txt; TestRig: run-result.json, via .tmp + Move)
 #   FAKEGAME_NOMODLOG  set (any value): do not create the CoherentWarAI mod log folder or file
+#   FAKEGAME_MODLOGS   set (any value): also write the logs of the other mods (Configs\AutoTrader.log,
+#                      SmithingSuite\smithingsuite.log, CompanionManagementSuite\companion-suite.log)
 #   FAKEGAME_BEHAVIOR  complete (default) | sleep | noresult | child (sleeps, owns a sleeping
 #                      child process, PID in child-pid.txt) | slow (completes after 6 s) |
 #                      modchange (blocking message box 'Mod change detected' with OK, completes after
 #                      it is closed) | modchangeokcancel (same, OK/Cancel) | modchangeyesno (same, Yes/No)
 #                      | otherdialog (OK box titled 'Some other dialog')
+#                      (TestRig, complete: with health=<ids> in run.cfg the result lists the health bracket lines
+#                      <id>@0 ..., soak, <id>@<days> ..., all Passed)
 #                      | txtonly (TestRig only: writes result.txt like the old harness) | badjson (TestRig only: invalid run-result.json)
 #                      | crash (watchdog log says 'Crash occurred', then hangs like the real crash dialog)
 #                      | crashexit (same log, then exits without a result)
@@ -72,6 +76,13 @@ $ownLine = @([System.IO.File]::ReadAllLines((Join-Path $harnessDir 'run.cfg')) |
 if (-not $env:FAKEGAME_NOMODLOG) {
     New-Item -ItemType Directory -Path $modDir -Force | Out-Null   # the mod log folder exists independently of the harness folder
     [System.IO.File]::WriteAllText((Join-Path $modDir 'CoherentWarAI.log'), "fake mod log`r`n", $utf8)
+}
+if ($env:FAKEGAME_MODLOGS) {
+    foreach ($relative in @('Configs\AutoTrader.log', 'SmithingSuite\smithingsuite.log', 'CompanionManagementSuite\companion-suite.log')) {
+        $logPath = Join-Path $docs $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null
+        [System.IO.File]::WriteAllText($logPath, "fake $relative`r`n", $utf8)
+    }
 }
 if ($env:FAKEGAME_BEHAVIOR -ne 'nolog') {
     [System.IO.File]::WriteAllText((Join-Path $harnessDir 'harness.log'), "harness started`r`nharness day 1 reached`r`n", $utf8)
@@ -282,9 +293,19 @@ if ($behavior -eq 'badjson' -and $harnessName -eq 'TestRig') {
 }
 elseif ($behavior -ne 'noresult') {
     if ($harnessName -eq 'TestRig' -and $behavior -ne 'txtonly') {
+        # With health=<ids> in run.cfg the lines of the health bracket, in the harness order: <id>@0 per id, soak,
+        # <id>@<days> per id (days from run.cfg), all Passed.
+        $cfgLines = @([System.IO.File]::ReadAllLines((Join-Path $harnessDir 'run.cfg')))
+        $healthIds = @($cfgLines | Where-Object { $_ -like 'health=*' } | ForEach-Object { $_.Substring(7).Split(',') })
+        $cfgDays = @($cfgLines | Where-Object { $_ -like 'days=*' } | ForEach-Object { $_.Substring(5) }) -join ''
+        $lineIds = @($healthIds | ForEach-Object { "$_@0" }) + @('soak') + @($healthIds | ForEach-Object { "$_@$cfgDays" })
+        $scenarioLines = @($lineIds | ForEach-Object {
+                $seconds = if ($_ -ceq 'soak') { 25 } else { 1 }
+                '{"id":"' + $_ + '","status":"Passed","seconds":' + $seconds + '}'
+            }) -join ','
         $json = '{"schema":1,"status":"Completed","reason":"","seed":7,"mode":"WarSails","daysRequested":1,"daysReached":1,"realSeconds":25,"gameDaysPerRealMinute":2.41,"playerMapEvents":0,' +
             '"modules":[{"id":"Native","version":"v1.4.8"}],"exceptions":{"total":0,"own":0,"unhandled":0,"top":[]},' +
-            '"scenarios":[{"id":"soak","status":"Passed","seconds":25}],"checks":[{"name":"daysReached","expected":">= 1","actual":"1","passed":true}]}'
+            '"scenarios":[' + $scenarioLines + '],"checks":[{"name":"daysReached","expected":">= 1","actual":"1","passed":true}]}'
         $tmp = Join-Path $harnessDir 'run-result.json.tmp'
         [System.IO.File]::WriteAllText($tmp, $json, $utf8)
         Move-Item -LiteralPath $tmp -Destination (Join-Path $harnessDir 'run-result.json') -Force

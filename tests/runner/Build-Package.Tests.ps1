@@ -53,9 +53,17 @@ $script:projects = @(
     @{ Repo = 'BannerlordSmithingSuite'; Rel = 'tests\InGame\SmithingSuite.Scenarios\SmithingSuite.Scenarios.csproj'; Id = 'SmithingSuite.Scenarios' }
 )
 
+# The health scenario projects that only -Suite L1 adds (after the seven), in build order.
+$script:l1ScenarioProjects = @(
+    @{ Repo = 'BannerlordCoherentWarAI'; Rel = 'tests\InGame\CoherentWarAI.Scenarios\CoherentWarAI.Scenarios.csproj'; Id = 'CoherentWarAI.Scenarios'; Mod = 'CoherentWarAI' },
+    @{ Repo = 'BannerlordAutoTrader'; Rel = 'tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj'; Id = 'AutoTraderSpeed.Scenarios'; Mod = 'AutoTraderSpeed' },
+    @{ Repo = 'CompanionManagementSuite'; Rel = 'tests\InGame\CompanionManagementSuite.Scenarios\CompanionManagementSuite.Scenarios.csproj'; Id = 'CompanionManagementSuite.Scenarios'; Mod = 'CompanionManagementSuite' }
+)
+
 function New-FakeWorkspace([string]$Root) {
-    foreach ($repo in ($script:projects | ForEach-Object { $_.Repo } | Select-Object -Unique)) {
-        $files = @($script:projects | Where-Object { $_.Repo -eq $repo } | ForEach-Object { $_.Rel })
+    $all = @($script:projects) + @($script:l1ScenarioProjects)
+    foreach ($repo in ($all | ForEach-Object { $_.Repo } | Select-Object -Unique)) {
+        $files = @($all | Where-Object { $_.Repo -eq $repo } | ForEach-Object { $_.Rel })
         New-GitRepo (Join-Path $Root $repo) $files
     }
 }
@@ -77,6 +85,8 @@ $ids = @{
     'CoherentWarAI.csproj' = 'CoherentWarAI'; 'CoherentWarAI.TestHarness.csproj' = 'CoherentWarAI.TestHarness'; 'TestRig.Harness.csproj' = 'TestRig.Harness'
     'AutoTrader.csproj' = 'AutoTraderSpeed'; 'SmithingSuite.csproj' = 'SmithingSuite'; 'CompanionSuite.csproj' = 'CompanionManagementSuite'
     'SmithingSuite.Scenarios.csproj' = 'SmithingSuite.Scenarios'; 'TestRig.SelfTest.csproj' = 'TestRig.SelfTest'
+    'CoherentWarAI.Scenarios.csproj' = 'CoherentWarAI.Scenarios'; 'AutoTraderSpeed.Scenarios.csproj' = 'AutoTraderSpeed.Scenarios'
+    'CompanionManagementSuite.Scenarios.csproj' = 'CompanionManagementSuite.Scenarios'
 }
 $id = $ids[$name]
 if (-not $id -or -not $modules) { Write-Output "fake msbuild: bad arguments: $argLine"; exit 2 }
@@ -121,8 +131,12 @@ Describe 'Get-RigBuildProjects' {
         $iScen | Should BeGreaterThan ([array]::IndexOf($ids, 'SmithingSuite'))
     }
     It 'adds TestRig.SelfTest (repo BannerlordTestRig) after the harness only for -Suite RIG' {
-        foreach ($s in @($null, '', 'L1', 'SM')) {
+        foreach ($s in @($null, '', 'SM')) {
             @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s).Count | Should Be 7
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' }).Count | Should Be 0
+        }
+        foreach ($s in @('L1')) {
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s).Count | Should Be 10
             @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' }).Count | Should Be 0
         }
         $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite RIG)
@@ -133,6 +147,31 @@ Describe 'Get-RigBuildProjects' {
         $hit[0].ProjectPath | Should Be (Join-Path 'C:\ws\BannerlordTestRig' 'src\TestRig.SelfTest\TestRig.SelfTest.csproj')
         $ids = @($r | ForEach-Object { $_.ModuleId })
         [array]::IndexOf($ids, 'TestRig.SelfTest') | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
+    }
+    It 'adds the three health scenario projects only for -Suite L1, after the seven (each after its mod and the harness)' {
+        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite L1)
+        $r.Count | Should Be 10
+        $ids = @($r | ForEach-Object { $_.ModuleId })
+        ($ids[0..6] -join ',') | Should Be (@($script:projects | ForEach-Object { $_.Id }) -join ',')
+        ($ids[7..9] -join ',') | Should Be 'CoherentWarAI.Scenarios,AutoTraderSpeed.Scenarios,CompanionManagementSuite.Scenarios'
+        foreach ($p in $script:l1ScenarioProjects) {
+            $hit = @($r | Where-Object { $_.ModuleId -eq $p.Id })
+            $hit.Count | Should Be 1
+            $hit[0].Repo | Should Be $p.Repo
+            $hit[0].ProjectPath | Should Be (Join-Path (Join-Path 'C:\ws' $p.Repo) $p.Rel)
+            [array]::IndexOf($ids, $p.Id) | Should BeGreaterThan ([array]::IndexOf($ids, $p.Mod))
+            [array]::IndexOf($ids, $p.Id) | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
+        }
+        foreach ($s in @($null, '', 'SM', 'RIG', 'L1-BASE')) {
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s | Where-Object { $_.ModuleId -in 'CoherentWarAI.Scenarios', 'AutoTraderSpeed.Scenarios', 'CompanionManagementSuite.Scenarios' }).Count | Should Be 0
+        }
+    }
+    It 'builds only the harness for -Suite L1-BASE (no mod, no scenario module)' {
+        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'L1-BASE')
+        $r.Count | Should Be 1
+        $r[0].ModuleId | Should Be 'TestRig.Harness'
+        $r[0].Repo | Should Be 'BannerlordTestRig'
+        $r[0].ProjectPath | Should Be (Join-Path 'C:\ws\BannerlordTestRig' 'src\TestRig.Harness\TestRig.Harness.csproj')
     }
 }
 
@@ -425,6 +464,41 @@ Describe 'Invoke-RigBuildPackage' {
         $iT | Should BeGreaterThan $iH
         Test-Path -LiteralPath (Join-Path $script:stage 'Modules\TestRig.SelfTest\SubModule.xml') | Should Be $true
         @($r.Repos).Count | Should Be 5
+    }
+
+    It 'builds and stages only the harness for -Suite L1-BASE and records only its repo' {
+        $r = Build @{ Suite = 'L1-BASE' }
+        $lines = @(Get-Content -LiteralPath $script:log)
+        $lines.Count | Should Be 1
+        $lines[0] | Should Match 'TestRig\.Harness\.csproj'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:stage 'Modules') -Directory | ForEach-Object { $_.Name }) -join ',' | Should Be 'TestRig.Harness'
+        @($r.Repos).Count | Should Be 1
+        @($r.Repos)[0].name | Should Be 'BannerlordTestRig'
+    }
+
+    It 'builds and stages the ten L1 projects for -Suite L1 (scenario modules last) and records the five repos' {
+        $r = Build @{ Suite = 'L1' }
+        $lines = @(Get-Content -LiteralPath $script:log)
+        $lines.Count | Should Be 10
+        $iH = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match 'TestRig\.Harness\.csproj') }), $true)
+        foreach ($p in $script:l1ScenarioProjects) {
+            $iS = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match ([regex]::Escape($p.Id) + '\.csproj')) }), $true)
+            $iS | Should BeGreaterThan $iH
+            Test-Path -LiteralPath (Join-Path $script:stage "Modules\$($p.Id)\SubModule.xml") | Should Be $true
+        }
+        @($r.Repos).Count | Should Be 5
+        $m = [IO.File]::ReadAllText($r.ManifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        @($m.modules).Count | Should Be 10
+    }
+    It 'records a repo with an uncommitted (untracked) scenario project as dirty (-Suite L1)' {
+        $repo = Join-Path $script:ws 'CompanionManagementSuite'
+        $extra = Join-Path $repo 'tests\InGame\CompanionManagementSuite.Scenarios\HealthScenario.cs'
+        Set-Content -LiteralPath $extra -Value 'class X { }'
+        try {
+            $r = Build @{ Suite = 'L1' }
+            (@($r.Repos | Where-Object { $_.name -eq 'CompanionManagementSuite' }))[0].dirty | Should Be $true
+            (@($r.Repos | Where-Object { $_.name -eq 'BannerlordAutoTrader' }))[0].dirty | Should Be $false
+        } finally { Remove-Item -LiteralPath $extra -Force }
     }
 
     It 'does not build or stage TestRig.SelfTest for other suites or without a suite' {

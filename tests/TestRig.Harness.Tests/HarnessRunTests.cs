@@ -1104,7 +1104,7 @@ namespace TestRig.Harness.Tests
             HarnessRun run = NewRun(days: 3, seed: 7, mode: "NoDlc", start: 100);
             DriveToRunning(run, 100);
             run.Tick(Obs(150, map: true, inGame: true, days: 3));
-            ExceptionSummary exceptions = new ExceptionSummary(4, 1, 0, new[] { new ExceptionKeyCount("k", 4) });
+            ExceptionSummary exceptions = new ExceptionSummary(4, 1, 0, 0, new[] { new ExceptionKeyCount("k", 4) }, ClassificationSummary.None);
 
             RunResult result = run.ToResult(220, SomeModules, exceptions);   // elapsed 120 s = 2 min, 3 days -> 1.50
 
@@ -1200,8 +1200,123 @@ namespace TestRig.Harness.Tests
             {
                 string json = RunResultWriter.Write(ToResult(run, 220));
 
-                Assert.Contains("\"realSeconds\": 120,\n  \"gameDaysPerRealMinute\": 1.50,\n  \"playerMapEvents\": 0,", json);
+                Assert.Contains(
+                    "\"realSeconds\": 120,\n  \"gameDaysPerRealMinute\": 1.50,\n  \"runningDaysPerRealMinute\": 3.60,\n  \"playerMapEvents\": 0,",
+                    json);
             });
+        }
+
+        // ------------------------------------------------- F-S6-5: rate of the running phase
+
+        // Menu at 0, map at 40, Running from 60 (with `daysAtMap` days already elapsed).
+        private static HarnessRun RunFromSixty(int days, int daysAtMap = 0, double stallMinutes = 5)
+        {
+            HarnessRun run = NewRun(days: days, stallMinutes: stallMinutes, start: 0);
+            run.Tick(Obs(0, menu: true));
+            run.Tick(Obs(40, map: true, inGame: true, days: daysAtMap));
+            run.Tick(Obs(60, map: true, inGame: true, days: daysAtMap));
+            Assert.Equal(HarnessPhase.Running, run.Phase);
+            return run;
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_CountsOnlyTheRunningPhase()
+        {
+            HarnessRun run = RunFromSixty(days: 3);
+            run.Tick(Obs(180, map: true, inGame: true, days: 3));   // Completed at 180: 3 days in 2 min
+
+            RunResult result = ToResult(run, 180);
+
+            Assert.Equal(1.50, result.RunningDaysPerRealMinute);
+            Assert.Equal(1.00, result.GameDaysPerRealMinute);   // unchanged: 3 days in 3 min since the start
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_IsFrozenWhenTheRunningPhaseEnds()
+        {
+            HarnessRun run = RunFromSixty(days: 3);
+            run.Tick(Obs(180, map: true, inGame: true, days: 3));   // Completed -> Ending
+            run.Tick(Obs(300, map: true, inGame: true, days: 5));   // days still counted while Ending
+
+            RunResult result = ToResult(run, 400);
+
+            Assert.Equal(5, result.DaysReached);
+            Assert.Equal(1.50, result.RunningDaysPerRealMinute);
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_SubtractsTheDaysElapsedBeforeTheRunningPhase()
+        {
+            HarnessRun run = RunFromSixty(days: 3, daysAtMap: 1);
+            run.Tick(Obs(120, map: true, inGame: true, days: 3));   // 2 days in 1 min
+
+            Assert.Equal(2.00, ToResult(run, 120).RunningDaysPerRealMinute);
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_WhileRunning_UsesTheGivenTime()
+        {
+            HarnessRun run = RunFromSixty(days: 5);
+            run.Tick(Obs(90, map: true, inGame: true, days: 1));
+
+            Assert.Equal(0.50, ToResult(run, 180).RunningDaysPerRealMinute);   // 1 day in 2 min
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_AbortWhileRunning_EndsTheRunningPhase()
+        {
+            HarnessRun run = RunFromSixty(days: 10, stallMinutes: 5);
+            run.Tick(Obs(90, map: true, inGame: true, days: 1));
+            run.Tick(Obs(390, map: true, inGame: true, days: 1));   // stall:Running at 390: 1 day in 5.5 min
+
+            RunResult result = ToResult(run, 600);
+
+            Assert.Equal("stall:Running", result.Reason);
+            Assert.Equal(0.18, result.RunningDaysPerRealMinute);
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_BeforeTheRunningPhase_IsNull()
+        {
+            HarnessRun run = NewRun(start: 0);
+            run.Tick(Obs(10, menu: true));
+
+            Assert.Null(ToResult(run, 60).RunningDaysPerRealMinute);
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_AbortBeforeTheRunningPhase_IsNull()
+        {
+            HarnessRun run = NewRun(stallMinutes: 5, start: 0);
+            run.Tick(Obs(300));   // stall:Armed
+
+            Assert.Null(ToResult(run, 400).RunningDaysPerRealMinute);
+        }
+
+        [Fact]
+        public void ToResult_RunningRate_ZeroLengthRunningPhase_IsNull()
+        {
+            HarnessRun run = RunFromSixty(days: 3);
+
+            Assert.Null(ToResult(run, 60).RunningDaysPerRealMinute);
+        }
+
+        [Fact]
+        public void ToUnhandledResult_WhileRunning_RunningRateUsesTheCrashTime()
+        {
+            HarnessRun run = RunFromSixty(days: 5);
+            run.Tick(Obs(120, map: true, inGame: true, days: 2));
+
+            Assert.Equal(1.00, ToUnhandledResult(run, 180).RunningDaysPerRealMinute);   // 2 days in 2 min
+        }
+
+        [Fact]
+        public void ToUnhandledResult_AfterCompletion_KeepsTheRunningRate()
+        {
+            HarnessRun run = RunFromSixty(days: 3);
+            run.Tick(Obs(180, map: true, inGame: true, days: 3));   // Completed -> Ending
+
+            Assert.Equal(1.50, ToUnhandledResult(run, 500).RunningDaysPerRealMinute);
         }
 
         [Theory]
@@ -1236,7 +1351,7 @@ namespace TestRig.Harness.Tests
             HarnessRun run = NewRun(days: 5, start: 0);
             DriveToRunning(run, 0);
             run.Tick(Obs(30, map: true, inGame: true, days: 2));
-            ExceptionSummary exceptions = new ExceptionSummary(9, 0, 1, new ExceptionKeyCount[0]);
+            ExceptionSummary exceptions = new ExceptionSummary(9, 0, 0, 1, new ExceptionKeyCount[0], ClassificationSummary.None);
 
             RunResult result = run.ToUnhandledResult(60, SomeModules, exceptions);
 
@@ -1293,7 +1408,7 @@ namespace TestRig.Harness.Tests
             DriveToRunning(run, 0);
             run.Tick(Obs(30, map: true, inGame: true, days: 1));   // Completed -> Ending at 30 s
             run.Tick(Obs(90, map: true, inGame: true, days: 1));   // still Ending
-            ExceptionSummary exceptions = new ExceptionSummary(4, 1, 1, new ExceptionKeyCount[0]);
+            ExceptionSummary exceptions = new ExceptionSummary(4, 1, 0, 1, new ExceptionKeyCount[0], ClassificationSummary.None);
 
             RunResult result = run.ToUnhandledResult(200, SomeModules, exceptions);
 

@@ -1,0 +1,428 @@
+{
+    "schema":  1,
+    "suite":  "L1",
+    "note":  "Written by runner/Update-L1Baseline.ps1, do not edit by hand. The runner recomputes the thresholds from baseRuns; derived is for reading.",
+    "gameVersion":  "v1.4.8",
+    "updatedUtc":  "2026-11-03T15:02:00Z",
+    "jobs":  [
+                 {
+                     "jobId":  "20261103-063455-cd32",
+                     "suite":  "L1-BASE",
+                     "exitCode":  0,
+                     "modules":  [
+                                     {
+                                         "id":  "Bannerlord.Harmony",
+                                         "version":  "v2.4.2"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.ButterLib",
+                                         "version":  "v2.12.0"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.UIExtenderEx",
+                                         "version":  "v3.0.3"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.MBOptionScreen",
+                                         "version":  "v5.12.3"
+                                     },
+                                     {
+                                         "id":  "Native",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "SandBoxCore",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "Sandbox",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "StoryMode",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "NavalDLC",
+                                         "version":  "v1.2.8"
+                                     },
+                                     {
+                                         "id":  "TestRig.Harness",
+                                         "version":  "v1.4.8"
+                                     }
+                                 ]
+                 },
+                 {
+                     "jobId":  "20261103-064702-5411",
+                     "suite":  "L1",
+                     "exitCode":  0,
+                     "modules":  [
+                                     {
+                                         "id":  "Bannerlord.Harmony",
+                                         "version":  "v2.4.2"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.ButterLib",
+                                         "version":  "v2.12.0"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.UIExtenderEx",
+                                         "version":  "v3.0.3"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.MBOptionScreen",
+                                         "version":  "v5.12.3"
+                                     },
+                                     {
+                                         "id":  "Native",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "SandBoxCore",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "Sandbox",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "StoryMode",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "NavalDLC",
+                                         "version":  "v1.2.8"
+                                     },
+                                     {
+                                         "id":  "CoherentWarAI",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "AutoTraderSpeed",
+                                         "version":  "v1.4.6"
+                                     },
+                                     {
+                                         "id":  "SmithingSuite",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "CompanionManagementSuite",
+                                         "version":  "v1.4.7"
+                                     },
+                                     {
+                                         "id":  "TestRig.Harness",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "CoherentWarAI.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "AutoTraderSpeed.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "SmithingSuite.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "CompanionManagementSuite.Scenarios",
+                                         "version":  "v1.0.0"
+                                     }
+                                 ]
+                 },
+                 {
+                     "jobId":  "20261103-065021-2607",
+                     "suite":  "L1",
+                     "exitCode":  0,
+                     "modules":  [
+                                     {
+                                         "id":  "Bannerlord.Harmony",
+                                         "version":  "v2.4.2"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.ButterLib",
+                                         "version":  "v2.12.0"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.UIExtenderEx",
+                                         "version":  "v3.0.3"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.MBOptionScreen",
+                                         "version":  "v5.12.3"
+                                     },
+                                     {
+                                         "id":  "Native",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "SandBoxCore",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "Sandbox",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "StoryMode",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "NavalDLC",
+                                         "version":  "v1.2.8"
+                                     },
+                                     {
+                                         "id":  "CoherentWarAI",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "AutoTraderSpeed",
+                                         "version":  "v1.4.6"
+                                     },
+                                     {
+                                         "id":  "SmithingSuite",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "CompanionManagementSuite",
+                                         "version":  "v1.4.7"
+                                     },
+                                     {
+                                         "id":  "TestRig.Harness",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "CoherentWarAI.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "AutoTraderSpeed.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "SmithingSuite.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "CompanionManagementSuite.Scenarios",
+                                         "version":  "v1.0.0"
+                                     }
+                                 ]
+                 },
+                 {
+                     "jobId":  "20261103-065316-646d",
+                     "suite":  "L1",
+                     "exitCode":  0,
+                     "modules":  [
+                                     {
+                                         "id":  "Bannerlord.Harmony",
+                                         "version":  "v2.4.2"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.ButterLib",
+                                         "version":  "v2.12.0"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.UIExtenderEx",
+                                         "version":  "v3.0.3"
+                                     },
+                                     {
+                                         "id":  "Bannerlord.MBOptionScreen",
+                                         "version":  "v5.12.3"
+                                     },
+                                     {
+                                         "id":  "Native",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "SandBoxCore",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "Sandbox",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "StoryMode",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "NavalDLC",
+                                         "version":  "v1.2.8"
+                                     },
+                                     {
+                                         "id":  "CoherentWarAI",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "AutoTraderSpeed",
+                                         "version":  "v1.4.6"
+                                     },
+                                     {
+                                         "id":  "SmithingSuite",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "CompanionManagementSuite",
+                                         "version":  "v1.4.7"
+                                     },
+                                     {
+                                         "id":  "TestRig.Harness",
+                                         "version":  "v1.4.8"
+                                     },
+                                     {
+                                         "id":  "CoherentWarAI.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "AutoTraderSpeed.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "SmithingSuite.Scenarios",
+                                         "version":  "v1.0.0"
+                                     },
+                                     {
+                                         "id":  "CompanionManagementSuite.Scenarios",
+                                         "version":  "v1.0.0"
+                                     }
+                                 ]
+                 }
+             ],
+    "baseRuns":  [
+                     {
+                         "jobId":  "20261103-063455-cd32",
+                         "runId":  "r1",
+                         "seed":  1,
+                         "daysReached":  30,
+                         "runningDaysPerRealMinute":  22.26,
+                         "playerMapEvents":  0,
+                         "exceptions":  {
+                                            "total":  0,
+                                            "own":  0,
+                                            "harness":  0,
+                                            "vanilla":  0,
+                                            "unhandled":  0
+                                        }
+                     },
+                     {
+                         "jobId":  "20261103-063455-cd32",
+                         "runId":  "r2",
+                         "seed":  1,
+                         "daysReached":  30,
+                         "runningDaysPerRealMinute":  22.26,
+                         "playerMapEvents":  0,
+                         "exceptions":  {
+                                            "total":  0,
+                                            "own":  0,
+                                            "harness":  0,
+                                            "vanilla":  0,
+                                            "unhandled":  0
+                                        }
+                     },
+                     {
+                         "jobId":  "20261103-063455-cd32",
+                         "runId":  "r3",
+                         "seed":  1,
+                         "daysReached":  30,
+                         "runningDaysPerRealMinute":  22.23,
+                         "playerMapEvents":  0,
+                         "exceptions":  {
+                                            "total":  6,
+                                            "own":  0,
+                                            "harness":  0,
+                                            "vanilla":  6,
+                                            "unhandled":  0
+                                        }
+                     },
+                     {
+                         "jobId":  "20261103-063455-cd32",
+                         "runId":  "r4",
+                         "seed":  2,
+                         "daysReached":  30,
+                         "runningDaysPerRealMinute":  22.27,
+                         "playerMapEvents":  0,
+                         "exceptions":  {
+                                            "total":  0,
+                                            "own":  0,
+                                            "harness":  0,
+                                            "vanilla":  0,
+                                            "unhandled":  0
+                                        }
+                     },
+                     {
+                         "jobId":  "20261103-063455-cd32",
+                         "runId":  "r5",
+                         "seed":  3,
+                         "daysReached":  30,
+                         "runningDaysPerRealMinute":  22.26,
+                         "playerMapEvents":  0,
+                         "exceptions":  {
+                                            "total":  0,
+                                            "own":  0,
+                                            "harness":  0,
+                                            "vanilla":  0,
+                                            "unhandled":  0
+                                        }
+                     }
+                 ],
+    "l1Runs":  [
+                   {
+                       "jobId":  "20261103-064702-5411",
+                       "runId":  "r1",
+                       "seed":  1,
+                       "daysReached":  30,
+                       "runningDaysPerRealMinute":  17.59,
+                       "playerMapEvents":  0,
+                       "exceptions":  {
+                                          "total":  0,
+                                          "own":  0,
+                                          "harness":  0,
+                                          "vanilla":  0,
+                                          "unhandled":  0
+                                      }
+                   },
+                   {
+                       "jobId":  "20261103-065021-2607",
+                       "runId":  "r1",
+                       "seed":  1,
+                       "daysReached":  30,
+                       "runningDaysPerRealMinute":  19.34,
+                       "playerMapEvents":  0,
+                       "exceptions":  {
+                                          "total":  0,
+                                          "own":  0,
+                                          "harness":  0,
+                                          "vanilla":  0,
+                                          "unhandled":  0
+                                      }
+                   },
+                   {
+                       "jobId":  "20261103-065316-646d",
+                       "runId":  "r1",
+                       "seed":  1,
+                       "daysReached":  30,
+                       "runningDaysPerRealMinute":  18.25,
+                       "playerMapEvents":  0,
+                       "exceptions":  {
+                                          "total":  0,
+                                          "own":  0,
+                                          "harness":  0,
+                                          "vanilla":  0,
+                                          "unhandled":  0
+                                      }
+                   }
+               ],
+    "derived":  {
+                    "baseRunCount":  5,
+                    "tempoMedian":  22.26,
+                    "tempoMin":  22.23,
+                    "tempoMax":  22.27,
+                    "tempoSpread":  0.0018,
+                    "tempoThreshold":  15.582,
+                    "vanillaMax":  6,
+                    "vanillaThreshold":  29,
+                    "l1TempoRatioMin":  0.7902
+                }
+}

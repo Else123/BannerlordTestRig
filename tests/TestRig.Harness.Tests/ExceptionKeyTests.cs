@@ -66,10 +66,11 @@ namespace TestRig.Harness.Tests
         }
 
         [Fact]
-        public void Own_ForAnExceptionWithVariableMessages_UsesOneWalkOnly()
+        public void Own_ForAnExceptionWithVariableMessages_IsAnsweredByOneCachedKeyAfterTheWalkBudget()
         {
             var cache = new OwnClassificationCache(maxWalks: 10);
             int walks = 0;
+            int cachedOwn = 0;
 
             for (int i = 0; i < 1000; i++)
             {
@@ -78,15 +79,21 @@ namespace TestRig.Harness.Tests
 
                 string ownKey = ExceptionKey.Own("System.InvalidOperationException", "Game.Inventory.Find");
                 bool own;
-                if (cache.Lookup(ownKey, out own) == OwnLookup.Walk)
+                OwnLookup lookup = cache.Lookup(ownKey, out own);
+                if (lookup == OwnLookup.Walk)
                 {
                     walks++;
                     cache.Store(ownKey, true);
                 }
+                else if (lookup == OwnLookup.Cached && own)
+                {
+                    cachedOwn++;
+                }
             }
 
-            Assert.Equal(1, walks);
-            Assert.Equal(1, cache.Walks);
+            Assert.Equal(10, walks);
+            Assert.Equal(10, cache.Walks);
+            Assert.Equal(990, cachedOwn);
         }
 
         [Fact]

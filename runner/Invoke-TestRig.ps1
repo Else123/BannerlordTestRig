@@ -19,9 +19,15 @@
     (NotCompleted, Crashed, too few days); 3 time limit or agent not responding (HardTimeout,
     Hung, Aborted, claim timeout, stale heartbeat, overall deadline). Precedence: 1 > 3 > 2 > 0.
     If the job is not completed, the done status and the agent's message are printed.
-    -Suite RIG (self-test, one job with three runs) is judged differently: each run must end with its
-    expected exitClass (r1, r2: and a run message showing the cause); exit 0 if all do, 2 if one does not, 1 if the job is not completed (except
-    aborted or the runner deadline: 3) or a run is missing. -HardTimeoutMinutes conflicts with -Suite RIG.
+    -Suite RIG (self-test, one job with four runs) is judged differently: each run must end with its
+    expected exitClass (r1, r2: and a run message showing the cause; r4: and its exception counts); exit 0 if all do, 2 if
+    one does not, 1 if the job is not completed (except aborted or the runner deadline: 3) or a run is missing.
+    -HardTimeoutMinutes conflicts with -Suite RIG.
+    -Suite L1-BASE (vanilla baseline: five soak runs with their own seeds, no mod) is judged the same way: each run
+    must end Completed with enough days (Hung, HardTimeout, Aborted: 3). -HardTimeoutMinutes and -Seed conflict with it;
+    -Days overrides its 30 days (a longer one scales the per-run hard timeout).
+    -Suite L1 also judges each Completed run's measurements against runner\baselines\L1.json (own/unhandled 0, vanilla
+    threshold, tempo ratio, modules; written by Update-L1Baseline.ps1): a violation is exit 2, an unmeasured value exit 1.
 
 .EXAMPLE
     .\runner\Invoke-TestRig.ps1 -Days 3 -Wait
@@ -36,7 +42,7 @@ param(
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
     [ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode = 'WarSails',
     [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
-    [ValidateSet('L1', 'SM', 'RIG')][string]$Suite,
+    [ValidateSet('L1', 'L1-BASE', 'SM', 'RIG')][string]$Suite,
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
     [ValidateRange(1, [int]::MaxValue)][int]$BudgetMinutes = 60,
     [ValidateRange(1, [int]::MaxValue)][int]$HardTimeoutMinutes = 20,
@@ -62,7 +68,15 @@ $script:RigHarnessModules = [ordered]@{
 # modules, which reference the harness and so load after it). Kind is the run kind: 'soak' or 'scenarios'
 # (then Scenarios = the scenario ids to run). A suite may instead define Runs: one job with several runs, each with
 # RunId, Scenarios, HardTimeoutMinutes and ExpectedExitClass (the verdict then compares every run with it), and
-# optionally ExpectedMessagePattern: a case-sensitive regex the run's agent message (agent-run.json) must match.
+# optionally ExpectedMessagePattern: a case-sensitive regex the run's agent message (agent-run.json) must match,
+# Seed: the run's own seed (job.json runs[].seed) instead of the suite's; then an explicit -Seed is a usage error,
+# OwnAssemblies: the DLL names written to job.json runs[].ownAssemblies (the agent passes exactly them to run.cfg),
+# ExpectedValues: @{ Path; Value } per value the run's run-result.json must hold when it is Completed (Path = dotted
+# property path, Value = a number or a boolean; see Get-RigExpectedValueChecks), and ClassificationTiming = $true: print
+# the R2 timing line of exceptions.classification (Format-RigClassificationTiming). The HardTimeoutMinutes of a soak
+# suite's run holds for the suite's Days; a longer -Days scales it (Get-RigSuiteRuns).
+# Health (soak suites only): the scenario ids of the health bracket (F-S6-1), written to every run as job.json
+# runs[].health; the verdict then also needs each <id>@0 and <id>@<days> line (see Get-RigHealthOutcome).
 $script:RigSuites = @{
     L1 = @{
         Harness           = 'TestRig'
@@ -72,7 +86,29 @@ $script:RigSuites = @{
         Kind              = 'soak'
         WithCoherentWarAI = $true
         ExtraModules      = @('AutoTraderSpeed', 'SmithingSuite', 'CompanionManagementSuite')
+        # One scenario module per mod, in the order of the mods; each holds that mod's health scenario.
+        TailModules       = @('CoherentWarAI.Scenarios', 'AutoTraderSpeed.Scenarios', 'SmithingSuite.Scenarios', 'CompanionManagementSuite.Scenarios')
+        Health            = @('coherentwarai.health', 'autotrader.health', 'smithingsuite.health', 'companionsuite.health')
+    }
+    # Vanilla baseline for L1 (F-S6-3): the L1 module list without the four mods and without scenario modules (the
+    # Workshop libraries and NavalDLC stay). Five 30-day soaks; the seed varies across runs, three repeat seed 1.
+    'L1-BASE' = @{
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 30
+        Kind              = 'soak'
+        WithCoherentWarAI = $false
+        ExtraModules      = @()
         TailModules       = @()
+        Runs              = @(
+            # 10 min each: a 30-day L1 soak took 3m41s of agent time on the game PC (job 20261102-183606-fd57).
+            @{ RunId = 'r1'; Seed = 1; HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r2'; Seed = 1; HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r3'; Seed = 1; HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r4'; Seed = 2; HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r5'; Seed = 3; HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' }
+        )
     }
     SM = @{
         Harness           = 'TestRig'
@@ -103,11 +139,31 @@ $script:RigSuites = @{
             # Hung by the silence watch, not by another cause.
             @{ RunId = 'r2'; Scenarios = @('rig.selftest-hang'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Hung'
                 ExpectedMessagePattern = '^No Alive line in harness\.log for \d+ s' },
-            @{ RunId = 'r3'; Scenarios = @('rig.selftest-pass'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' }
+            @{ RunId = 'r3'; Scenarios = @('rig.selftest-pass'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' },
+            # R2 (#22): 10,000 caught exceptions from the self-test module, which only this run lists as own; the walk
+            # budget (1000) is spent, so the rest is answered from the cache and own is no longer exact.
+            @{ RunId = 'r4'; Scenarios = @('rig.selftest-exception-storm'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed'
+                OwnAssemblies = @('TestRig.SelfTest'); ClassificationTiming = $true
+                ExpectedValues = @(
+                    @{ Path = 'exceptions.own'; Value = 10000 },
+                    @{ Path = 'exceptions.classification.walks'; Value = 1000 },
+                    @{ Path = 'exceptions.classification.ownExact'; Value = $false })
+            }
         )
     }
 }
 $script:DefaultMsBuildPath = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
+# L1 verdict (#21): the vanilla baseline the runner judges -Suite L1 runs against (written by Update-L1Baseline.ps1),
+# and the threshold rules (F-S6-7): vanilla exceptions <= 1.5 x max of the base runs + 20, running-phase tempo
+# >= 0.7 x median of the base runs.
+$script:RigL1BaselinePath = Join-Path $PSScriptRoot 'baselines\L1.json'
+$script:RigL1VanillaFactor = 1.5
+$script:RigL1VanillaSlack = 20
+$script:RigL1TempoFactor = 0.7
+# R2 start values [A] (#22, RIG r4): mean handler time of a walked exception and upper bound of a cache hit; above them
+# the runner only warns.
+$script:RigR2WalkMeanMaxMs = 1
+$script:RigR2CacheHitMaxUs = 50
 
 function Write-RigMessage {
     param([string]$Text)
@@ -164,28 +220,74 @@ function Get-RigSuiteKind {
     if ($Suite) { $script:RigSuites[$Suite].Kind } else { 'soak' }
 }
 
-# The runs a suite defines (RunId, Scenarios, HardTimeoutMinutes, ExpectedExitClass, ExpectedMessagePattern = $null
-# when the run has none); none for suites without Runs.
-# Callers wrap the result in @().
-function Get-RigSuiteRuns {
+# Health scenario ids of a suite (none without a suite or without Health). Callers wrap the result in @().
+function Get-RigSuiteHealth {
     param([string]$Suite)
+    if ($Suite -and $script:RigSuites[$Suite].ContainsKey('Health')) { $script:RigSuites[$Suite].Health }
+}
+
+# The result lines a run with health ids must report, in the harness order (F-S6-1): <id>@0 per id, then <id>@<Days>
+# per id (the soak line between them is judged by the soak rules). None without health ids.
+function Get-RigHealthLineIds {
+    param([string[]]$Health = @(), [Parameter(Mandatory)][int]$Days)
+    foreach ($h in $Health) { "$h@0" }
+    foreach ($h in $Health) { "$h@$Days" }
+}
+
+# Structural verdict of the health lines of a Completed soak run: 'Met' when every expected line (Get-RigHealthLineIds,
+# from $Run.requestedHealth and $Days) is reported Passed, or the run has no health ids; 'RigError' when one is missing or
+# reported with any status other than Passed or Failed (Skipped, Timeout, Error, unknown: that health check did not
+# run to a verdict); else 'Mismatch' (one is Failed). Ids compare case-sensitively, statuses case-insensitively (as in
+# Resolve-RigExitCode); a line reported twice counts by its first report. The verdict on the run's measurements is Get-RigL1Verdict, next to this structural one.
+function Get-RigHealthOutcome {
+    param([Parameter(Mandatory)]$Run, [Parameter(Mandatory)][int]$Days)
+    $health = @(if ($null -ne $Run.requestedHealth) { $Run.requestedHealth })
+    $ids = @(if ($null -ne $Run.scenarioIds) { $Run.scenarioIds })
+    $statuses = @(if ($null -ne $Run.scenarioStatuses) { $Run.scenarioStatuses })
+    $failed = $false
+    foreach ($wanted in @(Get-RigHealthLineIds -Health $health -Days $Days)) {
+        $status = $null
+        for ($i = 0; $i -lt $ids.Count; $i++) {
+            if ($ids[$i] -ceq $wanted) { $status = $statuses[$i]; break }
+        }
+        if ($status -is [string] -and $status -eq 'Passed') { continue }
+        if ($status -is [string] -and $status -eq 'Failed') { $failed = $true; continue }
+        return 'RigError'
+    }
+    if ($failed) { 'Mismatch' } else { 'Met' }
+}
+
+# The runs a suite defines (RunId, Scenarios (empty for a soak run), HardTimeoutMinutes, ExpectedExitClass,
+# ExpectedMessagePattern and Seed = $null when the run has none, OwnAssemblies and ExpectedValues (empty when none),
+# ClassificationTiming); none for suites without Runs. $Days = the job's days (0 = the suite's Days): a soak run's
+# hard timeout holds for the suite's Days and grows in proportion to a longer -Days, rounded up (L1-BASE: max(10,
+# ceil(10 x days / 30)) minutes); a shorter -Days keeps it. Callers wrap the result in @().
+function Get-RigSuiteRuns {
+    param([string]$Suite, [int]$Days)
     if (-not $Suite -or -not $script:RigSuites[$Suite].ContainsKey('Runs')) { return }
-    foreach ($r in $script:RigSuites[$Suite].Runs) {
+    $s = $script:RigSuites[$Suite]
+    foreach ($r in $s.Runs) {
+        $hardTimeout = [int]$r.HardTimeoutMinutes
+        if ($s.Kind -eq 'soak' -and $Days -gt $s.Days) { $hardTimeout = [int][math]::Ceiling($hardTimeout * $Days / $s.Days) }
         [pscustomobject]@{
-            RunId = [string]$r.RunId; Scenarios = @($r.Scenarios)
-            HardTimeoutMinutes = [int]$r.HardTimeoutMinutes; ExpectedExitClass = [string]$r.ExpectedExitClass
+            RunId = [string]$r.RunId; Scenarios = @(if ($r.ContainsKey('Scenarios')) { $r.Scenarios })
+            HardTimeoutMinutes = $hardTimeout; ExpectedExitClass = [string]$r.ExpectedExitClass
             ExpectedMessagePattern = if ($r.ContainsKey('ExpectedMessagePattern')) { [string]$r.ExpectedMessagePattern } else { $null }
+            Seed = if ($r.ContainsKey('Seed')) { [int]$r.Seed } else { $null }
+            OwnAssemblies = @(if ($r.ContainsKey('OwnAssemblies')) { $r.OwnAssemblies })
+            ExpectedValues = @(if ($r.ContainsKey('ExpectedValues')) { $r.ExpectedValues })
+            ClassificationTiming = $r.ContainsKey('ClassificationTiming') -and [bool]$r.ClassificationTiming
         }
     }
 }
 
 # Overall runner deadline of a suite with Runs, in minutes; $null without Runs. Formula: per run its hard timeout
-# + 2 min (baseline restore, kill, stray sweep, artifact copy), plus the claim wait (rounded up to whole minutes;
-# install/preflight happen after the claim) plus 5 min slack. Never below the sum of hard timeouts + 10 (the
-# default of a single-run job: HardTimeoutMinutes + 10).
+# (for $Days, see Get-RigSuiteRuns) + 2 min (baseline restore, kill, stray sweep, artifact copy), plus the claim wait
+# (rounded up to whole minutes; install/preflight happen after the claim) plus 5 min slack. Never below the sum of
+# hard timeouts + 10 (the default of a single-run job: HardTimeoutMinutes + 10).
 function Get-RigSuiteTimeoutMinutes {
-    param([string]$Suite, [double]$ClaimTimeoutSeconds = 120)
-    $suiteRuns = @(Get-RigSuiteRuns -Suite $Suite)
+    param([string]$Suite, [double]$ClaimTimeoutSeconds = 120, [int]$Days)
+    $suiteRuns = @(Get-RigSuiteRuns -Suite $Suite -Days $Days)
     if ($suiteRuns.Count -eq 0) { return $null }
     $hardSum = 0
     foreach ($r in $suiteRuns) { $hardSum += $r.HardTimeoutMinutes }
@@ -196,7 +298,8 @@ function Get-RigSuiteTimeoutMinutes {
 
 # Applies -Suite to the parameter values. $BoundParameters = names of the parameters given explicitly
 # (keys of $PSBoundParameters). Harness is fixed by the suite: an explicit different one throws. Mode and
-# Seed keep an explicit value; Days defaults to the suite's value only when not given. Without a suite the
+# Seed keep an explicit value; Days defaults to the suite's value only when not given. A suite whose runs fix
+# their hard timeout or seed rejects an explicit -HardTimeoutMinutes or -Seed. Without a suite the
 # values are returned unchanged.
 function Resolve-RigSuiteSettings {
     param(
@@ -214,6 +317,9 @@ function Resolve-RigSuiteSettings {
         }
         if ($BoundParameters -contains 'HardTimeoutMinutes' -and @(Get-RigSuiteRuns -Suite $Suite).Count -gt 0) {
             throw "-Suite $Suite fixes the hard timeout of each run; -HardTimeoutMinutes conflicts with it (omit -HardTimeoutMinutes)."
+        }
+        if ($BoundParameters -contains 'Seed' -and @(Get-RigSuiteRuns -Suite $Suite | Where-Object { $null -ne $_.Seed }).Count -gt 0) {
+            throw "-Suite $Suite fixes the seed of each run; -Seed conflicts with it (omit -Seed)."
         }
         $Harness = $s.Harness
         if ($BoundParameters -notcontains 'Mode') { $Mode = $s.Mode }
@@ -277,13 +383,15 @@ function New-RigJobManifest {
         [AllowNull()][AllowEmptyString()][string]$ExpectedGameVersion   # tower game version; $null/empty = not checked
     )
     $kind = Get-RigSuiteKind -Suite $Suite
+    $health = @(Get-RigSuiteHealth -Suite $Suite)
     $newRun = {
-        param([string]$RunId, [int]$RunHardTimeoutMinutes, $RunScenarios)
+        # $RunSeed: $null = the job's -Seed; $RunOwnAssemblies: empty = no ownAssemblies field (the agent derives the list)
+        param([string]$RunId, [int]$RunHardTimeoutMinutes, $RunScenarios, $RunSeed, $RunOwnAssemblies)
         $run = [ordered]@{
             runId              = $RunId
             kind               = $kind
             harness            = $Harness
-            seed               = $Seed
+            seed               = if ($null -ne $RunSeed) { [int]$RunSeed } else { $Seed }
             days               = $Days
             mode               = $Mode
             stallMinutes       = $StallMinutes
@@ -291,12 +399,14 @@ function New-RigJobManifest {
             hardTimeoutMinutes = $RunHardTimeoutMinutes
         }
         if ($kind -eq 'scenarios') { $run.scenarios = @($RunScenarios) }
+        if ($kind -eq 'soak' -and $health.Count -gt 0) { $run.health = $health }   # a JSON array, also with one id
+        if ($null -ne $RunOwnAssemblies -and @($RunOwnAssemblies).Count -gt 0) { $run.ownAssemblies = @($RunOwnAssemblies) }   # a JSON array, also with one name
         $run
     }
-    $suiteRuns = @(Get-RigSuiteRuns -Suite $Suite)
+    $suiteRuns = @(Get-RigSuiteRuns -Suite $Suite -Days $Days)
     # Outer @(): a one-run list must stay a JSON array (an assignment from `if` unrolls a single element).
     $runs = @(if ($suiteRuns.Count -gt 0) {
-            $suiteRuns | ForEach-Object { & $newRun $_.RunId $_.HardTimeoutMinutes $_.Scenarios }
+            $suiteRuns | ForEach-Object { & $newRun $_.RunId $_.HardTimeoutMinutes $_.Scenarios $_.Seed $_.OwnAssemblies }
         } else {
             & $newRun 'r1' $HardTimeoutMinutes $(if ($kind -eq 'scenarios') { $script:RigSuites[$Suite].Scenarios })
         })
@@ -538,23 +648,48 @@ function Test-RigScenariosChecked {
 # Judges one run of a suite with expectations. Expectation: RunId, Scenarios, ExpectedExitClass, optional
 # ExpectedMessagePattern. $Run = the run as collected from done.json and agent-run.json (runId, exitClass, message,
 # scenarioIds/scenarioStatuses), $null when done.json has no such run.
-# Returns 'Met', 'Mismatch' (a test failure), 'RigError' (the run failed in the rig itself: SetupError, LaunchFailed,
-# CleanupFailed that was not expected) or 'Missing'. With an ExpectedMessagePattern the run's message must match it
-# (case-sensitive; a missing message does not). An expected Completed also needs every scenario of the
-# expectation to be reported Passed; other expected classes (Crashed, Hung) have no scenario results by design.
+# Returns 'Met', 'Mismatch' (a test failure), 'Inconclusive' (a soak run expected Completed ended HardTimeout, Hung or
+# Aborted: a time limit or hang, exit 3 as without a suite; an Error or unknown result row there is still RigError), 'RigError' (the run failed in the rig itself: SetupError,
+# LaunchFailed, CleanupFailed that was not expected) or 'Missing'. With an ExpectedMessagePattern the run's message must
+# match it (case-sensitive; a missing message does not). An expected Completed also needs every scenario of the
+# expectation to be reported Passed, every ExpectedValues check Passed (Get-RigExpectedValueChecks: Failed = Mismatch,
+# Error = RigError) and, for a run that is not of kind 'scenarios' (a soak), daysReached >= $Days, no soak result row
+# Failed (Mismatch) or Error/unknown (RigError) and its health lines judged by Get-RigHealthOutcome. Every rule is
+# checked, so a RigError found after a Mismatch still wins. Other expected classes (Crashed, Hung) have no scenario
+# results by design.
 function Get-RigExpectationOutcome {
     param(
         [Parameter(Mandatory)]$Expectation,
-        $Run
+        $Run,
+        [Parameter(Mandatory)][int]$Days   # the days the job asked for (judged for soak runs only)
     )
     if ($null -eq $Run) { return 'Missing' }
     $actual = [string]$Run.exitClass
     if ($actual -cne $Expectation.ExpectedExitClass) {
         if ($actual -in 'SetupError', 'LaunchFailed', 'CleanupFailed') { return 'RigError' }
+        if ($Run.kind -ne 'scenarios' -and $Expectation.ExpectedExitClass -ceq 'Completed' -and $actual -in 'HardTimeout', 'Hung', 'Aborted') {
+            # As without a suite (Resolve-RigExitCode): an Error or unknown result row is a rig error in every exit class.
+            foreach ($rowStatus in @(if ($null -ne $Run.scenarioStatuses) { $Run.scenarioStatuses })) {
+                if ($rowStatus -isnot [string] -or $rowStatus -notin 'Passed', 'Timeout', 'Skipped', 'Failed') { return 'RigError' }
+            }
+            return 'Inconclusive'
+        }
         return 'Mismatch'
     }
-    if (-not (Test-RigExpectedMessage -Expectation $Expectation -Run $Run)) { return 'Mismatch' }
-    if ($actual -ne 'Completed') { return 'Met' }
+    $mismatch = -not (Test-RigExpectedMessage -Expectation $Expectation -Run $Run)
+    if ($actual -ne 'Completed') { return $(if ($mismatch) { 'Mismatch' } else { 'Met' }) }
+    if ($Run.kind -ne 'scenarios') {
+        if ($null -eq $Run.daysReached -or [int]$Run.daysReached -lt $Days) { $mismatch = $true }
+        # The soak's own result row(s): every reported status is judged, like the per-run rules of Resolve-RigExitCode.
+        foreach ($soakStatus in @(if ($null -ne $Run.scenarioStatuses) { $Run.scenarioStatuses })) {
+            if ($soakStatus -isnot [string] -or $soakStatus -notin 'Passed', 'Timeout', 'Skipped', 'Failed') { return 'RigError' }
+            if ($soakStatus -eq 'Failed') { $mismatch = $true }
+        }
+        switch (Get-RigHealthOutcome -Run $Run -Days $Days) {
+            'RigError' { return 'RigError' }
+            'Mismatch' { $mismatch = $true }
+        }
+    }
     $ids = @(if ($null -ne $Run.scenarioIds) { $Run.scenarioIds })
     $statuses = @(if ($null -ne $Run.scenarioStatuses) { $Run.scenarioStatuses })
     foreach ($wanted in @($Expectation.Scenarios)) {
@@ -562,9 +697,77 @@ function Get-RigExpectationOutcome {
         for ($i = 0; $i -lt $ids.Count; $i++) {
             if ($ids[$i] -ceq $wanted -and $statuses[$i] -ceq 'Passed') { $passed = $true; break }
         }
-        if (-not $passed) { return 'Mismatch' }
+        if (-not $passed) { $mismatch = $true }
     }
-    'Met'
+    foreach ($check in @(Get-RigExpectedValueChecks -Expectation $Expectation -Result $Run.result)) {
+        if ($check.Status -eq 'Error') { return 'RigError' }
+        if ($check.Status -eq 'Failed') { $mismatch = $true }
+    }
+    if ($mismatch) { 'Mismatch' } else { 'Met' }
+}
+
+# The value at a dotted property path (e.g. 'exceptions.classification.walks') of a parsed run-result.json; $null when a
+# step is missing or not a JSON object (a result.txt map or no result has none).
+function Get-RigResultValue {
+    param($Result, [Parameter(Mandatory)][string]$Path)
+    $value = $Result
+    foreach ($name in $Path.Split('.')) {
+        if ($value -isnot [System.Management.Automation.PSCustomObject] -or $value.PSObject.Properties.Name -cnotcontains $name) { return $null }
+        $value = $value.$name
+    }
+    $value
+}
+
+# A value check operand as JSON writes it: true/false, the number (invariant culture), 'null' or 'invalid'.
+function Format-RigCheckValue {
+    param($Value)
+    if ($Value -is [bool]) { if ($Value) { 'true' } else { 'false' } } else { Format-RigMeasuredValue $Value }
+}
+
+# The ExpectedValues checks of an expectation against $Result (the parsed run-result.json), in their order:
+# Name (the path), Expected and Actual (Format-RigCheckValue) and Status: 'Passed' (equal), 'Failed' (another value of
+# the same kind) or 'Error' (missing, or not of the expected kind: a number for a number, a boolean for a boolean: the
+# harness did not measure it). None for an expectation without ExpectedValues. Callers wrap the result in @().
+function Get-RigExpectedValueChecks {
+    param([Parameter(Mandatory)]$Expectation, $Result)
+    foreach ($v in @($Expectation.ExpectedValues | Where-Object { $null -ne $_ })) {
+        $value = Get-RigResultValue -Result $Result -Path $v.Path
+        $status = if ($v.Value -is [bool]) {
+            if ($value -isnot [bool]) { 'Error' } elseif ($value -eq $v.Value) { 'Passed' } else { 'Failed' }
+        } elseif (-not (Test-RigNumber $value)) { 'Error' } elseif ([double]$value -eq [double]$v.Value) { 'Passed' } else { 'Failed' }
+        [pscustomobject]@{ Name = $v.Path; Expected = (Format-RigCheckValue $v.Value); Actual = (Format-RigCheckValue $value); Status = $status }
+    }
+}
+
+# R2 timing (#22) of a run's exceptions.classification, console lines: the walk mean walkMs / walks (ms) and the
+# cache-hit upper bound (handlerMs - walkMs) / (total - walks) (us; the mean of every exception without a walk, see
+# docs/JOB-PROTOCOL.md), always printed; a WARN line each when above the R2 start values ($script:RigR2WalkMeanMaxMs,
+# $script:RigR2CacheHitMaxUs; never changes the exit code). 'n/a' for a mean without exceptions to divide by;
+# 'not measured' when a value is missing.
+function Format-RigClassificationTiming {
+    param([Parameter(Mandatory)][string]$RunId, $Result)
+    $total = Get-RigResultValue -Result $Result -Path 'exceptions.total'
+    $walks = Get-RigResultValue -Result $Result -Path 'exceptions.classification.walks'
+    $walkMs = Get-RigResultValue -Result $Result -Path 'exceptions.classification.walkMs'
+    $handlerMs = Get-RigResultValue -Result $Result -Path 'exceptions.classification.handlerMs'
+    if (-not ((Test-RigNumber $total) -and (Test-RigNumber $walks) -and (Test-RigNumber $walkMs) -and (Test-RigNumber $handlerMs))) {
+        '    R2 timing: not measured (exceptions.classification incomplete)'
+        return
+    }
+    $others = [double]$total - [double]$walks
+    $walkMean = if ([double]$walks -gt 0) { [double]$walkMs / [double]$walks } else { $null }
+    # Clamped at 0: handlerMs and walkMs are rounded separately, so their difference can come out slightly negative.
+    $hitUs = if ($others -gt 0) { [math]::Max(0.0, [double]$handlerMs - [double]$walkMs) / $others * 1000 } else { $null }
+    $walkText = if ($null -ne $walkMean) { '{0} ms' -f (Format-RigNumber $walkMean '0.000') } else { 'n/a' }
+    $hitText = if ($null -ne $hitUs) { '{0} us' -f (Format-RigNumber $hitUs '0.0') } else { 'n/a' }
+    '    R2 timing: walk mean {0} ({1} walks); cache hit at most {2} (mean of {3} other exceptions)' -f $walkText,
+        (Format-RigNumber $walks), $hitText, (Format-RigNumber $others)
+    if ($null -ne $walkMean -and $walkMean -gt $script:RigR2WalkMeanMaxMs) {
+        'WARN {0} R2 walk mean {1} > {2} ms (start value, warning only)' -f $RunId, $walkText, (Format-RigNumber $script:RigR2WalkMeanMaxMs)
+    }
+    if ($null -ne $hitUs -and $hitUs -gt $script:RigR2CacheHitMaxUs) {
+        'WARN {0} R2 cache hit at most {1} > {2} us (start value, warning only)' -f $RunId, $hitText, (Format-RigNumber $script:RigR2CacheHitMaxUs)
+    }
 }
 
 # True if the run's message matches the expectation's ExpectedMessagePattern, or the expectation has none.
@@ -576,13 +779,348 @@ function Test-RigExpectedMessage {
     return ($message -is [string] -and $message -cmatch $pattern)
 }
 
+# True for a JSON number as ConvertFrom-Json returns it (Int32, Int64, Decimal, Double); $null, strings and booleans are not.
+function Test-RigNumber {
+    param($Value)
+    $Value -is [int] -or $Value -is [long] -or $Value -is [decimal] -or $Value -is [double]
+}
+
+# A number in invariant culture (a German host would print 0,70).
+function Format-RigNumber {
+    param([Parameter(Mandatory)][double]$Value, [string]$Format = '0.##')
+    $Value.ToString($Format, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+# A measured value for a verdict row: the number, 'null' for $null (or a missing field), else 'invalid'.
+function Format-RigMeasuredValue {
+    param($Value, [string]$Format = '0.##')
+    if (Test-RigNumber $Value) { Format-RigNumber $Value $Format } elseif ($null -eq $Value) { 'null' } else { 'invalid' }
+}
+
+# Thresholds from the base runs (F-S6-7): tempo median (odd count: the middle value, even count: the mean of the two
+# middle values), min, max, spread = (max - min) / median, TempoThreshold = 0.7 x median; VanillaMax and
+# VanillaThreshold = 1.5 x VanillaMax + 20. Both lists must be non-empty and the tempos positive.
+function Get-RigL1Thresholds {
+    param([Parameter(Mandatory)][double[]]$Tempos, [Parameter(Mandatory)][double[]]$Vanillas)
+    $sorted = @($Tempos | Sort-Object)
+    $mid = [int][math]::Floor($sorted.Count / 2)
+    $median = if ($sorted.Count % 2 -eq 1) { $sorted[$mid] } else { ($sorted[$mid - 1] + $sorted[$mid]) / 2 }
+    $vanillaMax = [double]($Vanillas | Measure-Object -Maximum).Maximum
+    [pscustomobject]@{
+        TempoMedian      = [double]$median
+        TempoMin         = [double]$sorted[0]
+        TempoMax         = [double]$sorted[-1]
+        TempoSpread      = ($sorted[-1] - $sorted[0]) / $median
+        TempoThreshold   = $script:RigL1TempoFactor * $median
+        VanillaMax       = $vanillaMax
+        VanillaThreshold = $script:RigL1VanillaFactor * $vanillaMax + $script:RigL1VanillaSlack
+    }
+}
+
+# Reads the L1 baseline (runner/baselines/L1.json, format: docs/JOB-PROTOCOL.md "L1 verdict"). Status 'Ok' (GameVersion,
+# BaseRunCount, Thresholds from the base runs, JobIds of all runs in the file), 'Missing' (no file, or no base runs: the
+# committed placeholder) or 'Invalid' (unreadable, no gameVersion, a base run without a positive tempo or a vanilla
+# count >= 0); Reason says why when not 'Ok'. The thresholds are always recomputed from baseRuns: 'derived' in the file
+# is for readers only.
+function Read-RigL1Baseline {
+    param([Parameter(Mandatory)][string]$Path)
+    $b = [ordered]@{ Status = 'Missing'; Reason = $null; Path = $Path; GameVersion = $null; BaseRunCount = 0; Thresholds = $null; JobIds = @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        $b.Reason = "baseline missing: $Path not found"
+        return [pscustomobject]$b
+    }
+    try {
+        $doc = [IO.File]::ReadAllText($Path, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
+        if ($doc -isnot [System.Management.Automation.PSCustomObject]) { throw 'not a JSON object' }
+        $baseRuns = @($doc.baseRuns | Where-Object { $null -ne $_ })
+        if ($baseRuns.Count -eq 0) {
+            $b.Reason = "baseline missing: no base runs in $Path"
+            return [pscustomobject]$b
+        }
+        if ($doc.gameVersion -isnot [string] -or $doc.gameVersion -eq '') { throw 'no gameVersion' }
+        $tempos = New-Object System.Collections.Generic.List[double]
+        $vanillas = New-Object System.Collections.Generic.List[double]
+        foreach ($run in $baseRuns) {
+            $label = '{0}/{1}' -f $run.jobId, $run.runId
+            $tempo = $run.runningDaysPerRealMinute
+            $vanilla = if ($null -ne $run.exceptions) { $run.exceptions.vanilla } else { $null }
+            if (-not (Test-RigNumber $tempo) -or [double]$tempo -le 0) { throw "base run ${label}: runningDaysPerRealMinute is not a positive number" }
+            if (-not (Test-RigNumber $vanilla) -or [double]$vanilla -lt 0) { throw "base run ${label}: exceptions.vanilla is not a number >= 0" }
+            $tempos.Add([double]$tempo)
+            $vanillas.Add([double]$vanilla)
+        }
+    } catch {
+        $b.Status = 'Invalid'
+        $b.Reason = "baseline invalid: ${Path}: $($_.Exception.Message)"
+        return [pscustomobject]$b
+    }
+    $b.Status = 'Ok'
+    $b.GameVersion = $doc.gameVersion
+    $b.BaseRunCount = $baseRuns.Count
+    $b.Thresholds = Get-RigL1Thresholds -Tempos $tempos.ToArray() -Vanillas $vanillas.ToArray()
+    $b.JobIds = @(@($baseRuns) + @($doc.l1Runs | Where-Object { $null -ne $_ }) | ForEach-Object { [string]$_.jobId } | Select-Object -Unique)
+    [pscustomobject]$b
+}
+
+# One row of the L1 verdict. status: Passed | Failed | Warn (never fails) | NotJudged | Error (rig error).
+function New-RigL1Check {
+    param([string]$Name, [string]$Status, [string]$Expected, [string]$Actual)
+    [pscustomobject]@{ name = $Name; status = $Status; expected = $Expected; actual = $Actual }
+}
+
+# L1 verdict on the measurements of one Completed L1 run (#21; F-S6-2, F-S6-7). $Result = the parsed run-result.json,
+# $ExpectedModules = job.modules ($null = unknown), $GameVersion = the run's game version (agent-run.json), $Baseline =
+# Read-RigL1Baseline. Checks, in this order: own = 0, unhandled = 0, vanilla <= baseline threshold, tempo
+# (runningDaysPerRealMinute) / baseline median >= 0.7, modules[].id = job.modules (same ids, same order, case-sensitive),
+# playerMapEvents > 0 (Warn only). A missing own, unhandled or modules value is a rig error (the harness did not
+# measure). Vanilla and tempo are NotJudged (with a WARN line) when the baseline is missing or invalid or its game
+# version differs from the run's (or the run has none); a null tempo is NotJudged with a WARN line too.
+# Returns Outcome ('RigError' if a check is Error, else 'Failed' if one is Failed, else 'Met'), Checks and Warnings.
+function Get-RigL1Verdict {
+    param(
+        [Parameter(Mandatory)][string]$RunId,
+        $Result,
+        [AllowNull()][string[]]$ExpectedModules,
+        $GameVersion,
+        [Parameter(Mandatory)]$Baseline
+    )
+    $checks = New-Object System.Collections.Generic.List[object]
+    $warnings = New-Object System.Collections.Generic.List[string]
+    $exceptions = if ($null -ne $Result) { $Result.exceptions } else { $null }
+    if ($exceptions -isnot [System.Management.Automation.PSCustomObject]) { $exceptions = $null }
+    foreach ($counter in 'own', 'unhandled') {
+        $value = if ($null -ne $exceptions) { $exceptions.$counter } else { $null }
+        $status = if (-not (Test-RigNumber $value)) { 'Error' } elseif ([double]$value -eq 0) { 'Passed' } else { 'Failed' }
+        $checks.Add((New-RigL1Check $counter $status '0' (Format-RigMeasuredValue $value)))
+    }
+
+    # Why vanilla and tempo cannot be judged ($null = they can).
+    $notJudged = $null
+    if ($Baseline.Status -ne 'Ok') { $notJudged = $Baseline.Reason }
+    elseif ($GameVersion -isnot [string] -or $GameVersion -eq '') { $notJudged = "the run reported no game version (baseline: $($Baseline.GameVersion))" }
+    elseif ($GameVersion -cne $Baseline.GameVersion) { $notJudged = "baseline is for game $($Baseline.GameVersion), the run ran $(Format-RigCheckField $GameVersion 40)" }
+    if ($null -ne $notJudged) { $warnings.Add("WARN L1 $RunId vanilla and tempo not judged: $notJudged") }
+    $t = $Baseline.Thresholds
+
+    $vanilla = if ($null -ne $exceptions) { $exceptions.vanilla } else { $null }
+    if ($null -ne $notJudged) {
+        $checks.Add((New-RigL1Check 'vanilla' 'NotJudged' '-' (Format-RigMeasuredValue $vanilla)))
+    } else {
+        $expected = '<= {0} ({1} x baseline max {2} + {3})' -f (Format-RigNumber $t.VanillaThreshold), (Format-RigNumber $script:RigL1VanillaFactor),
+            (Format-RigNumber $t.VanillaMax), (Format-RigNumber $script:RigL1VanillaSlack)
+        $status = if (-not (Test-RigNumber $vanilla)) { 'Error' } elseif ([double]$vanilla -le $t.VanillaThreshold) { 'Passed' } else { 'Failed' }
+        $checks.Add((New-RigL1Check 'vanilla' $status $expected (Format-RigMeasuredValue $vanilla)))
+    }
+
+    $tempo = if ($null -ne $Result) { $Result.runningDaysPerRealMinute } else { $null }
+    if ($null -ne $notJudged) {
+        $checks.Add((New-RigL1Check 'tempo' 'NotJudged' '-' (Format-RigMeasuredValue $tempo '0.00')))
+    } elseif (-not (Test-RigNumber $tempo)) {
+        $checks.Add((New-RigL1Check 'tempo' 'NotJudged' '-' (Format-RigMeasuredValue $tempo '0.00')))
+        $warnings.Add("WARN L1 $RunId tempo not judged: runningDaysPerRealMinute is $(Format-RigMeasuredValue $tempo)")
+    } else {
+        # The ratio, not tempo >= 0.7 x median: 0.7 * 10 is 7.000000000000001 in binary floating point, 7 / 10 is 0.7.
+        $ratio = [double]$tempo / $t.TempoMedian
+        $factor = Format-RigNumber $script:RigL1TempoFactor
+        $expected = 'ratio >= {0} ({0} x baseline median {1} = {2} days/min)' -f $factor, (Format-RigNumber $t.TempoMedian '0.00'), (Format-RigNumber $t.TempoThreshold '0.00')
+        $actual = '{0} days/min, ratio {1}' -f (Format-RigNumber $tempo '0.00'), (Format-RigNumber $ratio '0.000')
+        $status = if ($ratio -ge $script:RigL1TempoFactor) { 'Passed' } else { 'Failed' }
+        $checks.Add((New-RigL1Check 'tempo' $status $expected $actual))
+    }
+
+    $reported = $null
+    if ($null -ne $Result -and $null -ne $Result.modules) {
+        $reported = @($Result.modules | ForEach-Object { if ($_ -is [System.Management.Automation.PSCustomObject] -and $_.id -is [string]) { $_.id } else { '' } })
+    }
+    if ($null -eq $ExpectedModules) {
+        $checks.Add((New-RigL1Check 'modules' 'Error' 'job.modules' 'job.modules unknown to the runner'))
+    } elseif ($null -eq $reported) {
+        $checks.Add((New-RigL1Check 'modules' 'Error' "job.modules ($(@($ExpectedModules).Count))" 'null'))
+    } else {
+        $expectedIds = @($ExpectedModules)
+        $missing = @($expectedIds | Where-Object { $reported -cnotcontains $_ })
+        $extra = @($reported | Where-Object { $expectedIds -cnotcontains $_ })
+        $firstDiff = -1
+        for ($i = 0; $i -lt [math]::Max($expectedIds.Count, $reported.Count); $i++) {
+            if ($i -ge $expectedIds.Count -or $i -ge $reported.Count -or $expectedIds[$i] -cne $reported[$i]) { $firstDiff = $i; break }
+        }
+        if ($firstDiff -lt 0) {
+            $checks.Add((New-RigL1Check 'modules' 'Passed' "job.modules ($($expectedIds.Count))" "$($reported.Count) modules, same order"))
+        } else {
+            $parts = @()
+            if ($missing.Count -gt 0) { $parts += 'missing ' + ($missing -join ', ') }
+            if ($extra.Count -gt 0) { $parts += 'extra ' + ($extra -join ', ') }
+            if ($parts.Count -eq 0) { $parts += 'order differs at position {0}: {1}' -f ($firstDiff + 1), $reported[$firstDiff] }   # 1-based
+            $checks.Add((New-RigL1Check 'modules' 'Failed' "job.modules ($($expectedIds.Count))" (Format-RigCheckField ($parts -join '; ') 400)))
+        }
+    }
+
+    $mapEvents = if ($null -ne $Result) { $Result.playerMapEvents } else { $null }
+    if ((Test-RigNumber $mapEvents) -and [double]$mapEvents -gt 0) {
+        $checks.Add((New-RigL1Check 'playerMapEvents' 'Passed' '> 0' (Format-RigMeasuredValue $mapEvents)))
+    } else {
+        $checks.Add((New-RigL1Check 'playerMapEvents' 'Warn' '> 0' (Format-RigMeasuredValue $mapEvents)))
+        $warnings.Add("WARN L1 $RunId playerMapEvents is $(Format-RigMeasuredValue $mapEvents): the player party had no map event (warning only)")
+    }
+
+    $statuses = @($checks | ForEach-Object { $_.status })
+    $outcome = if ($statuses -contains 'Error') { 'RigError' } elseif ($statuses -contains 'Failed') { 'Failed' } else { 'Met' }
+    [pscustomobject]@{ Outcome = $outcome; Checks = $checks.ToArray(); Warnings = $warnings.ToArray() }
+}
+
+# Console rows of an L1 verdict: one per check (run, L1-<name>, status, expected, actual), then its WARN lines.
+function Format-RigL1Lines {
+    param([Parameter(Mandatory)][string]$RunId, [Parameter(Mandatory)]$Verdict)
+    foreach ($c in @($Verdict.Checks)) {
+        $shown = switch ($c.status) { 'Passed' { 'Passed' } 'Failed' { 'Failed' } 'Warn' { 'WARN' } 'NotJudged' { 'not judged' } default { 'ERROR' } }
+        '{0,-6} {1,-18} {2,-10} expected {3}, actual {4}' -f $RunId, "L1-$($c.name)", $shown, $c.expected, $c.actual
+    }
+    @($Verdict.Warnings)
+}
+
+# Reads out\results\<jobId>\job-result.json (written by Publish-RigResult) as data. Throws on an invalid id, a missing
+# or unreadable file, or a file of another job.
+function Read-RigJobResultFile {
+    param([Parameter(Mandatory)][string]$ResultsRoot, [Parameter(Mandatory)][string]$JobId)
+    if ($JobId -cnotmatch '^\d{8}-\d{6}-[0-9a-f]{4}\z') { throw "Invalid job id '$JobId' (expected yyyyMMdd-HHmmss-xxxx)." }
+    $file = Join-Path (Join-Path $ResultsRoot $JobId) 'job-result.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "No job-result.json for job ${JobId}: $file" }
+    $job = [IO.File]::ReadAllText($file, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
+    if ($job -isnot [System.Management.Automation.PSCustomObject] -or [string]$job.jobId -cne $JobId) {
+        throw "$file does not belong to job $JobId."
+    }
+    $job
+}
+
+# The runner/baselines/L1.json document from finished jobs (parsed job-result.json): $BaseJobs = one or more L1-BASE
+# jobs (exit code 0), $L1Jobs = the L1 calibration jobs (any exit code). Every run must be Completed with a positive
+# runningDaysPerRealMinute, numeric exceptions counters and a game version, all runs the same one; a job may appear
+# only once. Throws naming the first violation.
+function New-RigL1BaselineDocument {
+    param([Parameter(Mandatory)][object[]]$BaseJobs, [object[]]$L1Jobs = @(), [datetime]$UtcNow = [datetime]::UtcNow)
+    $jobs = New-Object System.Collections.Generic.List[object]
+    $baseRuns = New-Object System.Collections.Generic.List[object]
+    $l1Runs = New-Object System.Collections.Generic.List[object]
+    $versions = New-Object System.Collections.Generic.List[string]
+    $seenJobs = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($group in @(@{ Suite = 'L1-BASE'; Jobs = @($BaseJobs); Runs = $baseRuns }, @{ Suite = 'L1'; Jobs = @($L1Jobs); Runs = $l1Runs })) {
+        foreach ($job in @($group.Jobs | Where-Object { $null -ne $_ })) {
+            $jobId = [string]$job.jobId
+            if (-not $seenJobs.Add($jobId)) { throw "job ${jobId} is listed twice." }
+            if ([string]$job.suite -cne $group.Suite) { throw "job ${jobId}: suite '$($job.suite)', expected $($group.Suite)." }
+            if ($group.Suite -eq 'L1-BASE' -and $job.exitCode -ne 0) { throw "job ${jobId}: exit code $($job.exitCode); a base job must have exit code 0." }
+            $runs = @($job.runs | Where-Object { $null -ne $_ })
+            if ($runs.Count -eq 0) { throw "job ${jobId}: no runs." }
+            foreach ($run in $runs) {
+                $label = "$jobId/$($run.runId)"
+                if ([string]$run.exitClass -cne 'Completed') { throw "run ${label}: exitClass '$($run.exitClass)', expected Completed." }
+                $r = $run.result
+                $tempo = $r.runningDaysPerRealMinute
+                if (-not (Test-RigNumber $tempo) -or [double]$tempo -le 0) { throw "run ${label}: runningDaysPerRealMinute is not a positive number." }
+                $counts = [ordered]@{}
+                foreach ($k in 'total', 'own', 'harness', 'vanilla', 'unhandled') {
+                    $v = if ($null -ne $r.exceptions) { $r.exceptions.$k } else { $null }
+                    if (-not (Test-RigNumber $v)) { throw "run ${label}: exceptions.$k is not a number." }
+                    $counts[$k] = [long]$v
+                }
+                if ($run.gameVersion -isnot [string] -or $run.gameVersion -eq '') { throw "run ${label}: no gameVersion." }
+                if ($versions -cnotcontains $run.gameVersion) { $versions.Add($run.gameVersion) }
+                $group.Runs.Add([ordered]@{
+                        jobId = $jobId; runId = [string]$run.runId; seed = $r.seed; daysReached = $r.daysReached
+                        runningDaysPerRealMinute = [double]$tempo; playerMapEvents = $r.playerMapEvents; exceptions = $counts
+                    })
+            }
+            $jobs.Add([ordered]@{
+                    jobId = $jobId; suite = $group.Suite; exitCode = $job.exitCode
+                    modules = @(@($runs[0].result.modules | Where-Object { $null -ne $_ }) | ForEach-Object { [ordered]@{ id = [string]$_.id; version = [string]$_.version } })
+                })
+        }
+    }
+    if ($baseRuns.Count -eq 0) { throw 'no base runs.' }
+    if ($versions.Count -gt 1) { throw "the runs report different game versions: $($versions -join ', ')." }
+    $t = Get-RigL1Thresholds -Tempos @($baseRuns | ForEach-Object { $_.runningDaysPerRealMinute }) -Vanillas @($baseRuns | ForEach-Object { [double]$_.exceptions.vanilla })
+    $l1RatioMin = $null
+    if ($l1Runs.Count -gt 0) {
+        $slowest = ($l1Runs | ForEach-Object { $_.runningDaysPerRealMinute } | Measure-Object -Minimum).Minimum
+        $l1RatioMin = [math]::Round($slowest / $t.TempoMedian, 4)
+    }
+    [ordered]@{
+        schema      = 1
+        suite       = 'L1'
+        note        = 'Written by runner/Update-L1Baseline.ps1, do not edit by hand. The runner recomputes the thresholds from baseRuns; derived is for reading.'
+        gameVersion = $versions[0]
+        updatedUtc  = $UtcNow.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        jobs        = $jobs.ToArray()
+        baseRuns    = $baseRuns.ToArray()
+        l1Runs      = $l1Runs.ToArray()
+        derived     = [ordered]@{
+            baseRunCount     = $baseRuns.Count
+            tempoMedian      = [math]::Round($t.TempoMedian, 4)
+            tempoMin         = $t.TempoMin
+            tempoMax         = $t.TempoMax
+            tempoSpread      = [math]::Round($t.TempoSpread, 4)
+            tempoThreshold   = [math]::Round($t.TempoThreshold, 4)
+            vanillaMax       = $t.VanillaMax
+            vanillaThreshold = $t.VanillaThreshold
+            l1TempoRatioMin  = $l1RatioMin
+        }
+    }
+}
+
+# Writes the L1 baseline from finished jobs (out\results\<jobId>\job-result.json) to $Path (UTF-8 without BOM, LF) and
+# prints the derived values with the calibration checks: tempo spread of the base runs (max - min) / median <= 10 %
+# (else run more base runs) and slowest L1 run / base median >= 0.8 (else decide the threshold before trusting the
+# tempo verdict); both only warn. Returns 0, or 1 (nothing written) when a job is unusable.
+function Update-RigL1Baseline {
+    param(
+        [Parameter(Mandatory)][string[]]$BaseJobIds,
+        [string[]]$L1JobIds = @(),
+        [Parameter(Mandatory)][string]$ResultsRoot,
+        [Parameter(Mandatory)][string]$Path
+    )
+    try {
+        # Where-Object: a $null list (no ids) must not become one $null id.
+        $baseJobs = @($BaseJobIds | Where-Object { $null -ne $_ } | ForEach-Object { Read-RigJobResultFile -ResultsRoot $ResultsRoot -JobId $_ })
+        $l1Jobs = @($L1JobIds | Where-Object { $null -ne $_ } | ForEach-Object { Read-RigJobResultFile -ResultsRoot $ResultsRoot -JobId $_ })
+        $doc = New-RigL1BaselineDocument -BaseJobs $baseJobs -L1Jobs $l1Jobs
+        $dir = Split-Path -Parent $Path
+        if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        $json = (ConvertTo-RigJson $doc) -replace "`r`n", "`n"
+        [IO.File]::WriteAllText($Path, $json + "`n", (New-Object Text.UTF8Encoding($false)))
+    } catch {
+        Write-RigMessage "ERROR: baseline not written: $($_.Exception.Message)"
+        return 1
+    }
+    $d = $doc.derived
+    Write-RigMessage ("baseline written: {0} (game {1}, {2} base runs, {3} L1 runs)" -f $Path, $doc.gameVersion, $d.baseRunCount, @($doc.l1Runs).Count)
+    Write-RigMessage ('tempo (days/min): median {0}, min {1}, max {2}, spread {3} %; L1 needs ratio >= {4} (>= {5})' -f (Format-RigNumber $d.tempoMedian '0.00'),
+        (Format-RigNumber $d.tempoMin '0.00'), (Format-RigNumber $d.tempoMax '0.00'), (Format-RigNumber ($d.tempoSpread * 100) '0.0'),
+        (Format-RigNumber $script:RigL1TempoFactor), (Format-RigNumber $d.tempoThreshold '0.00'))
+    Write-RigMessage ('vanilla exceptions: base max {0}; L1 threshold {1} x max + {2} = {3}' -f (Format-RigNumber $d.vanillaMax),
+        (Format-RigNumber $script:RigL1VanillaFactor), (Format-RigNumber $script:RigL1VanillaSlack), (Format-RigNumber $d.vanillaThreshold))
+    if ($d.tempoSpread -gt 0.10) {
+        Write-RigMessage ('WARN tempo spread {0} % > 10 % across the base runs: run more base runs (calibration rule)' -f (Format-RigNumber ($d.tempoSpread * 100) '0.0'))
+    }
+    if ($null -ne $d.l1TempoRatioMin) {
+        if ($d.l1TempoRatioMin -lt 0.8) {
+            Write-RigMessage ('WARN slowest L1 run / base median = {0} < 0.8: decide the tempo threshold (or record that the mods slow the game) before relying on the tempo verdict' -f (Format-RigNumber $d.l1TempoRatioMin '0.000'))
+        } else {
+            Write-RigMessage ('slowest L1 run / base median = {0}' -f (Format-RigNumber $d.l1TempoRatioMin '0.000'))
+        }
+    }
+    0
+}
+
 # Exit code of one finished job. A run with kind 'scenarios' skips the daysReached rule below; instead a Completed
-# one must report every requested scenario without Skipped (Test-RigScenariosChecked), else 1. Per run: the exitClass maps to 0/1/2/3 (see below); additionally a scenario
+# one must report every requested scenario without Skipped (Test-RigScenariosChecked), else 1. A Completed soak run with
+# health ids (requestedHealth) must also report every health line Passed (Get-RigHealthOutcome): missing or unchecked
+# = 1, Failed = 2 by the status rule below; a Completed soak run with an L1 verdict (property l1Verdict, see
+# Get-RigL1Verdict) adds 2 for outcome Failed and 1 for RigError. Per run: the exitClass maps to 0/1/2/3 (see below); additionally a scenario
 # (run-result.json) with status Failed counts as 2; Passed/Timeout/Skipped add nothing here; Error and any
 # unknown or non-string status count as 1.
 # Across everything: 1 > 3 > 2 > 0, so an Error scenario wins over any other code, and Failed (2) is the weakest.
 # With -Expectations (a suite with Runs) the per-run rules above do not apply; instead every expectation is judged by
-# Get-RigExpectationOutcome: Met = 0, Mismatch = 2, RigError or a run missing from a completed job = 1. The job status
+# Get-RigExpectationOutcome: Met = 0, Mismatch = 2, Inconclusive = 3, RigError or a run missing from a completed job = 1. The job status
 # and -ForceTimeout rules stay.
 function Resolve-RigExitCode {
     param(
@@ -603,9 +1141,10 @@ function Resolve-RigExitCode {
     foreach ($e in $expectationList) {
         $run = $runList | Where-Object { $_.runId -ceq $e.RunId } | Select-Object -First 1
         if ($null -eq $run -and $DoneStatus -ne 'completed') { continue }   # the job status already decided
-        switch (Get-RigExpectationOutcome -Expectation $e -Run $run) {
+        switch (Get-RigExpectationOutcome -Expectation $e -Run $run -Days $Days) {
             'Met' { }
             'Mismatch' { $codes.Add(2) }
+            'Inconclusive' { $codes.Add(3) }
             default { $codes.Add(1) }   # RigError, Missing
         }
     }
@@ -616,6 +1155,12 @@ function Resolve-RigExitCode {
                 # A scenario run ends by its scenarios, not by a day count (its scenarios decide below).
                 if ($r.kind -ne 'scenarios') {
                     if ($null -eq $r.daysReached -or [int]$r.daysReached -lt $Days) { $codes.Add(2) }
+                    # Health bracket: a Failed line already gives 2 below; a missing or unchecked one is a rig error.
+                    if ((Get-RigHealthOutcome -Run $r -Days $Days) -eq 'RigError') { $codes.Add(1) }
+                    # L1 verdict on the measurements (Get-RigL1Verdict), when the run has one.
+                    if ($null -ne $r.l1Verdict) {
+                        switch ($r.l1Verdict.Outcome) { 'Failed' { $codes.Add(2) } 'RigError' { $codes.Add(1) } }
+                    }
                 }
                 elseif (-not (Test-RigScenariosChecked -Run $r)) { $codes.Add(1) }   # nothing (or not everything) was checked
             }
@@ -660,22 +1205,26 @@ function Format-RigRunLine {
 }
 
 # Console row of a suite run with an expectation: the expected and the actual exitClass and whether they agree
-# (met / MISMATCH / ERROR for a rig error / missing). The actual class comes from the tower: sanitized like the check fields.
+# (met / MISMATCH / INCONCLUSIVE / ERROR for a rig error / missing). The actual class comes from the tower: sanitized like
+# the check fields.
 function Format-RigExpectationLine {
     param(
         [Parameter(Mandatory)]$Expectation,
         $Run,   # $null = the run is missing from done.json
         [Parameter(Mandatory)][string]$Suite,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$Days   # passed on to Get-RigExpectationOutcome
     )
-    $verdict = switch (Get-RigExpectationOutcome -Expectation $Expectation -Run $Run) {
+    $verdict = switch (Get-RigExpectationOutcome -Expectation $Expectation -Run $Run -Days $Days) {
         'Met' { 'met' }
         'Mismatch' { 'MISMATCH' }
+        'Inconclusive' { 'INCONCLUSIVE' }
         'RigError' { 'ERROR' }
         default { 'missing' }
     }
     $actual = if ($null -eq $Run) { '-' } else { Format-RigCheckField ([string]$Run.exitClass) 40 }
-    '{0,-6} {1,-6} expected {2,-10} actual {3,-12} {4,-8} {5}' -f $Expectation.RunId, "$Suite-$(@($Expectation.Scenarios) -join '+')", `
+    $what = if (@($Expectation.Scenarios).Count -gt 0) { @($Expectation.Scenarios) -join '+' } else { 'soak' }
+    '{0,-6} {1,-6} expected {2,-10} actual {3,-12} {4,-8} {5}' -f $Expectation.RunId, "$Suite-$what", `
         $Expectation.ExpectedExitClass, $actual, $verdict, $Path
 }
 
@@ -773,6 +1322,8 @@ function Publish-RigResult {
         [Parameter(Mandatory)][int]$Days,
         [string]$Suite,           # when set, scenario ids are shown as <Suite>-<id> and job-result.json gets 'suite'
         [string]$TowerGamePath,   # when set, versions reported by the agent are compared with the tower (warnings only)
+        [AllowNull()][string[]]$ExpectedModules,   # job.modules; the L1 verdict compares the reported modules with it
+        [string]$BaselinePath = $script:RigL1BaselinePath,   # the L1 baseline (-Suite L1 only)
         [switch]$ForceTimeout
     )
     $doneFile = Join-Path $ResultDir 'done.json'
@@ -793,8 +1344,11 @@ function Publish-RigResult {
     $runs = @()
     $lines = @()
     $runKind = Get-RigSuiteKind -Suite $Suite   # the job's run kind follows from its suite (jobs carry one suite)
-    $expectations = @(Get-RigSuiteRuns -Suite $Suite)   # suites with Runs: one expectation per run
+    $expectations = @(Get-RigSuiteRuns -Suite $Suite -Days $Days)   # suites with Runs: one expectation per run
     $requestedScenarios = @(if ($runKind -eq 'scenarios' -and $expectations.Count -eq 0) { $script:RigSuites[$Suite].Scenarios })
+    $requestedHealth = @(if ($runKind -eq 'soak') { Get-RigSuiteHealth -Suite $Suite })   # as written to job.json runs[].health
+    $healthLineIds = @(Get-RigHealthLineIds -Health $requestedHealth -Days $Days)
+    $l1Baseline = if ($Suite -ceq 'L1') { Read-RigL1Baseline -Path $BaselinePath } else { $null }
     foreach ($dr in $doneRuns) {
         $runId = [string]$dr.runId
         if ($runId -cnotmatch '^[A-Za-z0-9_-]+\z') { throw "Invalid runId in done.json: '$runId'" }
@@ -820,17 +1374,24 @@ function Publish-RigResult {
         $moduleVersions = $null
         if ($arProps -contains 'moduleVersions' -and $null -ne $ar.moduleVersions) { $moduleVersions = @($ar.moduleVersions) }
 
+        # L1 verdict on the measurements: only a Completed run (any other exit class already fails by itself).
+        $l1Verdict = $null
+        if ($null -ne $l1Baseline -and [string]$dr.exitClass -ceq 'Completed') {
+            $l1Verdict = Get-RigL1Verdict -RunId $runId -Result $rr.Result -ExpectedModules $ExpectedModules -GameVersion $gameVersion -Baseline $l1Baseline
+        }
+
         $runs += [pscustomobject]@{
             runId = $runId; kind = $runKind; exitClass = [string]$dr.exitClass; daysReached = $daysReached; result = $rr.Result
             scenarioStatuses = @($rr.Scenarios | ForEach-Object { $_.Status })
             scenarioIds = @($rr.Scenarios | ForEach-Object { $_.Id })
-            requestedScenarios = $requestedScenarios
-            gameVersion = $gameVersion; moduleVersions = $moduleVersions; message = $runMessage
+            requestedScenarios = $requestedScenarios; requestedHealth = $requestedHealth
+            gameVersion = $gameVersion; moduleVersions = $moduleVersions; message = $runMessage; l1Verdict = $l1Verdict
         }
         # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario, each followed by
         # one indented line per failed check of that scenario
-        # (with expectations, a run without scenario results, e.g. a crashed one, gets only its expectation row)
-        $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } elseif ($expectations.Count -eq 0) { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) } else { @() }
+        # (with expectations, a scenario run without scenario results, e.g. a crashed one, gets only its expectation row;
+        # a soak run keeps its line: its days reached are part of the verdict)
+        $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } elseif ($expectations.Count -eq 0 -or $runKind -ne 'scenarios') { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) } else { @() }
         foreach ($sc in $lineSources) {
             $kind = if ($Suite) { "$Suite-$($sc.Id)" } else { $sc.Id }
             $lines += Format-RigRunLine -RunId $runId -Kind $kind -Status $sc.Status -DaysReached $daysReached -Days $Days `
@@ -839,16 +1400,36 @@ function Publish-RigResult {
                 $lines += '    {0}: expected {1}, actual {2}' -f (Format-RigCheckField $check.Name), (Format-RigCheckField $check.Expected), (Format-RigCheckField $check.Actual)
             }
         }
+        # An expected health line the run did not report gets its own row (status 'missing') once the run reported any
+        # line, and always for a Completed run (it must report them all); a run that ended otherwise without a line keeps
+        # its single soak row.
+        if ($rr.Scenarios.Count -gt 0 -or [string]$dr.exitClass -ceq 'Completed') {
+            $reportedIds = @($rr.Scenarios | ForEach-Object { $_.Id })
+            foreach ($missingId in @($healthLineIds | Where-Object { $reportedIds -cnotcontains $_ })) {
+                $kind = if ($Suite) { "$Suite-$missingId" } else { $missingId }
+                $lines += Format-RigRunLine -RunId $runId -Kind $kind -Status 'missing' -DaysReached $daysReached -Days $Days `
+                    -ExitClass ([string]$dr.exitClass) -Duration $duration -Path $runDir -RunKind $runKind
+            }
+        }
+        if ($null -ne $l1Verdict) { $lines += @(Format-RigL1Lines -RunId $runId -Verdict $l1Verdict) }
     }
     if ($expectations.Count -gt 0) {
         $expectationLines = foreach ($e in $expectations) {
             $run = $runs | Where-Object { $_.runId -ceq $e.RunId } | Select-Object -First 1
             $dir = Join-Path $ResultDir $e.RunId
-            Format-RigExpectationLine -Expectation $e -Run $run -Suite $Suite -Path $dir
+            Format-RigExpectationLine -Expectation $e -Run $run -Suite $Suite -Path $dir -Days $Days
             if ($null -ne $run -and [string]$run.exitClass -ceq $e.ExpectedExitClass -and -not (Test-RigExpectedMessage -Expectation $e -Run $run)) {
                 $shownMessage = if ($run.message -is [string]) { Format-RigCheckField $run.message 400 } else { '(none)' }
                 '    message does not match {0}: {1}' -f $e.ExpectedMessagePattern, $shownMessage
             }
+            # Value checks: judged (and shown) only for a run that ended Completed as expected.
+            if ($null -ne $run -and [string]$run.exitClass -ceq 'Completed' -and $e.ExpectedExitClass -ceq 'Completed') {
+                foreach ($check in @(Get-RigExpectedValueChecks -Expectation $e -Result $run.result)) {
+                    $shown = switch ($check.Status) { 'Passed' { 'met' } 'Failed' { 'MISMATCH' } default { 'ERROR' } }
+                    '    {0}: expected {1}, actual {2} {3}' -f $check.Name, $check.Expected, $check.Actual, $shown
+                }
+            }
+            if ($null -ne $run -and $e.ClassificationTiming) { Format-RigClassificationTiming -RunId $e.RunId -Result $run.result }
         }
         $lines = @($expectationLines) + @($lines)
     }
@@ -880,14 +1461,39 @@ function Publish-RigResult {
                         runId = $_.runId; exitClass = $_.exitClass; result = $_.result
                         gameVersion = $_.gameVersion; moduleVersions = $_.moduleVersions
                     }
+                    if ($healthLineIds.Count -gt 0) {   # health suites: every expected health line with what the run reported
+                        $reportedIds = [object[]]@($_.scenarioIds)
+                        $reportedStatuses = @($_.scenarioStatuses)
+                        $entry.health = @($healthLineIds | ForEach-Object {
+                                $index = [array]::IndexOf($reportedIds, $_)   # ordinal: the first report of that id
+                                [ordered]@{ id = $_; expected = 'Passed'; actual = $(if ($index -ge 0) { $reportedStatuses[$index] } else { $null }) }
+                            })
+                    }
+                    if ($null -ne $l1Baseline) {   # -Suite L1: the verdict on the measurements, null for a run that is not Completed
+                        $entry.l1 = $null
+                        if ($null -ne $_.l1Verdict) {
+                            $entry.l1 = [ordered]@{
+                                outcome  = $_.l1Verdict.Outcome
+                                baseline = [ordered]@{
+                                    path = $l1Baseline.Path; status = $l1Baseline.Status; reason = $l1Baseline.Reason
+                                    gameVersion = $l1Baseline.GameVersion; jobIds = @($l1Baseline.JobIds)
+                                }
+                                checks   = @($_.l1Verdict.Checks)
+                                warnings = @($_.l1Verdict.Warnings)
+                            }
+                        }
+                    }
                     if ($expectations.Count -gt 0) {   # suites with Runs: what the run was judged against, and the verdict
                         $judgedRunId = $_.runId
                         $judgedBy = $expectations | Where-Object { $_.RunId -ceq $judgedRunId } | Select-Object -First 1
                         $entry.expected = $null   # a run the suite does not define is not judged
                         $entry.verdict = $null
                         if ($null -ne $judgedBy) {
-                            $entry.expected = [ordered]@{ exitClass = $judgedBy.ExpectedExitClass; messagePattern = $judgedBy.ExpectedMessagePattern }
-                            $entry.verdict = Get-RigExpectationOutcome -Expectation $judgedBy -Run $_
+                            $entry.expected = [ordered]@{
+                                exitClass = $judgedBy.ExpectedExitClass; messagePattern = $judgedBy.ExpectedMessagePattern
+                                values = @($judgedBy.ExpectedValues | ForEach-Object { [ordered]@{ name = $_.Path; expected = $_.Value } })
+                            }
+                            $entry.verdict = Get-RigExpectationOutcome -Expectation $judgedBy -Run $_ -Days $Days
                         }
                     }
                     $entry
@@ -1000,7 +1606,8 @@ function Start-TestRigJob {
         $localDir = Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action {
             Receive-JobResult -Target $target -JobId $jobId -DestinationRoot (Join-Path $OutRoot 'results')
         }
-        return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -Suite $Suite -TowerGamePath $towerGamePath -ForceTimeout:$forceTimeout)
+        return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -Suite $Suite -TowerGamePath $towerGamePath `
+                -ExpectedModules @($manifest.modules) -ForceTimeout:$forceTimeout)
     } catch {
         Write-RigMessage "ERROR: $($_.Exception.Message)"
         return 1
@@ -1018,7 +1625,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     # A suite with Runs sets its own overall deadline (see Get-RigSuiteTimeoutMinutes) unless -TimeoutMinutes is given.
     if (@($PSBoundParameters.Keys) -notcontains 'TimeoutMinutes') {
-        $suiteTimeout = Get-RigSuiteTimeoutMinutes -Suite $Suite -ClaimTimeoutSeconds $ClaimTimeoutSeconds
+        $suiteTimeout = Get-RigSuiteTimeoutMinutes -Suite $Suite -ClaimTimeoutSeconds $ClaimTimeoutSeconds -Days $settings.Days
         if ($null -ne $suiteTimeout) { $TimeoutMinutes = $suiteTimeout }
     }
     $code = Start-TestRigJob -PackageFrom $PackageFrom -Seed $settings.Seed -Days $settings.Days -Mode $settings.Mode `

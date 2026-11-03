@@ -65,12 +65,10 @@ namespace TestRig.Harness
         private readonly ExceptionLogBudget _exceptionBudget = new ExceptionLogBudget(
             maxDistinctFull: 100, repeatsPerKey: 3, maxLines: 400);
 
-        // Run-wide counters for run-result.json; guarded by _logLock like the budget.
+        // Run-wide counters for run-result.json, including the own-classification cache that bounds the
+        // own-exception stack walks (OwnCache, keyed by ExceptionKey.Own) and the handler timing;
+        // guarded by _logLock like the budget.
         private readonly ExceptionStats _exceptionStats = new ExceptionStats();
-
-        // Bounds the own-exception stack walks (see OwnClassificationCache), keyed by exception type
-        // and throw site without the message (ExceptionKey.Own); guarded by _logLock.
-        private readonly OwnClassificationCache _ownCache = new OwnClassificationCache();
 
         // Simple-name cache for the own-exception stack walk; guarded by _logLock.
         private readonly Dictionary<Assembly, string> _assemblyNames = new Dictionary<Assembly, string>();
@@ -146,19 +144,32 @@ namespace TestRig.Harness
                 }
 
                 _clock.Start();
-                if (_config.Scenarios.Count == 0)
+                if (_config.Scenarios.Count > 0)
                 {
-                    _run = new HarnessRun(_config, RealSeconds);
-                }
-                else
-                {
-                    ScenarioRunner runner = PrepareScenarios();
-                    if (runner == null)
+                    IReadOnlyList<IScenario> scenarios = ResolveScenarios(_config.Scenarios, "scenarios", null);   // established error text
+                    if (scenarios == null)
                     {
                         return;
                     }
 
-                    _run = new HarnessRun(_config, RealSeconds, runner);
+                    _run = new HarnessRun(_config, RealSeconds, new ScenarioRunner(scenarios, m => Log(OneLine(m))));
+                }
+                else if (_config.Health.Count > 0)
+                {
+                    IReadOnlyList<IScenario> health = ResolveScenarios(_config.Health, "health", "health: ");
+                    if (health == null)
+                    {
+                        return;
+                    }
+
+                    // The same instances run in both brackets, so a scenario can carry state from @0 to @N.
+                    _run = new HarnessRun(_config, RealSeconds,
+                        ScenarioRunner.ForHealth(health, 0, m => Log(OneLine(m))),
+                        ScenarioRunner.ForHealth(health, _config.Days, m => Log(OneLine(m))));
+                }
+                else
+                {
+                    _run = new HarnessRun(_config, RealSeconds);
                 }
 
                 Log("Armed, phase " + _run.Phase);
@@ -171,8 +182,9 @@ namespace TestRig.Harness
 
         // Discovery runs here, not in OnSubModuleLoad: by the initial state every module's assemblies
         // are loaded. Any failure is a config error, so the process quits on the next tick instead of
-        // idling until the runner's hard timeout.
-        private ScenarioRunner PrepareScenarios()
+        // idling until the runner's hard timeout. <paramref name="key"/> is the run.cfg key of the ids;
+        // <paramref name="errorPrefix"/> (null for none) precedes a resolution error in the config reason.
+        private IReadOnlyList<IScenario> ResolveScenarios(IReadOnlyList<string> requested, string key, string errorPrefix)
         {
             try
             {
@@ -188,16 +200,17 @@ namespace TestRig.Harness
                         + ", assembly " + scenario.GetType().Assembly.GetName().Name + ")");
                 }
 
-                Log("Scenario discovery: " + discovery.Scenarios.Count + " found, requested " + string.Join(",", _config.Scenarios));
+                Log("Scenario discovery: " + discovery.Scenarios.Count + " found, requested " + key + "=" + string.Join(",", requested));
 
-                ScenarioResolution resolution = ScenarioRunner.Resolve(_config.Scenarios, discovery.Scenarios);
+                ScenarioResolution resolution = ScenarioRunner.Resolve(requested, discovery.Scenarios);
                 if (!resolution.IsValid)
                 {
-                    FailScenarioConfig(discovery.WithNotes(resolution.Error));
+                    string error = errorPrefix + resolution.Error;
+                    FailScenarioConfig(discovery.WithNotes(error));
                     return null;
                 }
 
-                return new ScenarioRunner(resolution.Scenarios, m => Log(OneLine(m)));
+                return resolution.Scenarios;
             }
             catch (Exception e)
             {
@@ -210,7 +223,7 @@ namespace TestRig.Harness
         {
             _configError = error;
             Log("Invalid scenarios (config:" + OneLine(error) + "); quitting on the next tick");
-            WriteResult(RunResult.ForConfigError(error, _modules, _config.Scenarios));
+            WriteResult(RunResult.ForConfigError(error, _modules, HarnessRun.ResultIds(_config)));
         }
 
         protected override void InitializeGameStarter(Game game, IGameStarter gameStarterObject)
@@ -683,8 +696,12 @@ namespace TestRig.Harness
             _inExceptionHandler = true;
             try
             {
+                // Handler cost for exceptions.classification: everything up to and including the
+                // counting (key, own/harness classification with stack capture and walk), not the log write.
+                long started = System.Diagnostics.Stopwatch.GetTimestamp();
                 Exception e = args.Exception;
-                string site = ThrowSite(e);
+                MethodBase target = e.TargetSite;
+                string site = ThrowSite(target);
                 string typeName = e.GetType().FullName;
                 string key = ExceptionKey.Full(typeName, e.Message, site);
 
@@ -696,30 +713,41 @@ namespace TestRig.Harness
                 ExceptionLogDecision decision;
                 OwnLookup lookup = OwnLookup.Unknown;
                 bool own = false;
+                bool harness;
                 string ownKey = classify ? ExceptionKey.Own(typeName, site) : null;
                 lock (_logLock)
                 {
                     decision = _exceptionBudget.Next(key, out occurrence);
+                    harness = IsHarnessThrowSite(target);
                     if (classify)
                     {
-                        lookup = _ownCache.Lookup(ownKey, out own);
+                        lookup = _exceptionStats.OwnCache.Lookup(ownKey, out own);
                     }
                 }
 
                 // At most one stack capture per exception, shared by the own check and the full log
-                // line; repeats of an already classified key and dropped exceptions capture nothing.
+                // line; it is skipped only once the walk budget is spent and the line is not a full one.
                 System.Diagnostics.StackTrace callers = lookup == OwnLookup.Walk || decision == ExceptionLogDecision.Full
                     ? new System.Diagnostics.StackTrace(1, false)
                     : null;
 
                 lock (_logLock)
                 {
-                    if (lookup == OwnLookup.Walk && TryClassifyOwn(classifier, callers, out own))
+                    bool walked = lookup == OwnLookup.Walk;
+                    if (walked)
                     {
-                        _ownCache.Store(ownKey, own);
+                        if (TryClassifyOwn(classifier, callers, out own))
+                        {
+                            _exceptionStats.OwnCache.Store(ownKey, own);
+                        }
+                        else
+                        {
+                            _exceptionStats.OwnCache.MarkInexact();
+                        }
                     }
 
-                    _exceptionStats.RecordFirstChance(key, own);
+                    _exceptionStats.RecordFirstChance(key, own, harness);
+                    _exceptionStats.RecordHandlerTime(ElapsedMilliseconds(started), walked);
                 }
 
                 if (decision == ExceptionLogDecision.Drop)
@@ -784,7 +812,8 @@ namespace TestRig.Harness
         // Classifies the captured live stack of the throwing thread (at first-chance time e.StackTrace
         // holds only the throw frame; the live stack holds the whole chain). Only the declaring types'
         // assemblies are read (no file/line info); harness frames (this handler) are skipped. Returns
-        // false with own = false when the check throws: it must never take the handler down.
+        // false with own = false when the check throws (the caller marks "own" inexact): it must never
+        // take the handler down.
         // Caller holds _logLock.
         private bool TryClassifyOwn(OwnAssemblyClassifier classifier, System.Diagnostics.StackTrace callers, out bool own)
         {
@@ -847,12 +876,25 @@ namespace TestRig.Harness
             return _run.ToResult(now, _modules, exceptions);
         }
 
-        private static string ThrowSite(Exception e)
+        private static string ThrowSite(MethodBase site)
         {
-            MethodBase site = e.TargetSite;
             return site == null
                 ? ExceptionKey.Site(null, null)
                 : ExceptionKey.Site(site.DeclaringType == null ? null : site.DeclaringType.FullName, site.Name);
+        }
+
+        // Harness exception (exceptions.harness): the throwing method is declared in a TestRig.* assembly.
+        // An unknown throw site (no TargetSite or declaring type) is not harness. Caller holds _logLock.
+        private bool IsHarnessThrowSite(MethodBase site)
+        {
+            Type type = site == null ? null : site.DeclaringType;
+            return type != null && ExceptionStats.IsHarnessAssembly(SimpleName(type.Assembly));
+        }
+
+        private static double ElapsedMilliseconds(long startedTimestamp)
+        {
+            long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startedTimestamp;
+            return Math.Max(0, elapsed) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         }
 
         private void RequestEndGame()

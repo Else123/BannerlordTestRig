@@ -64,6 +64,7 @@
     <Compile Include="ThrowScenario.cs" />
     <Compile Include="HangScenario.cs" />
     <Compile Include="PassScenario.cs" />
+    <Compile Include="ExceptionStormScenario.cs" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="SubModule.xml">

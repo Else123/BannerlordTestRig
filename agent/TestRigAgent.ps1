@@ -71,6 +71,15 @@ $script:ConfirmableDialogTitles = @('Mod change detected')
 # Reset-EngineSafelyExited normally prevents it; this is the fallback.
 $script:DeclinedDialogTitles = @('Safe Mode')
 $script:StopSliceMilliseconds = 5000   # Stop-ProcessTree waits in slices of at most this, with a heartbeat between
+# Logs of the other mods, collected per run like CoherentWarAI.log (a missing one is not an error). RelativePath is below
+# <documentsRoot>\Mount and Blade II Bannerlord, where each mod writes it: AutoTraderSpeed via EngineFilePaths.ConfigsPath
+# (AutoTrader\src\AutoTraderHelpers.cs), SmithingSuite (src\Integration\SmithingLog.cs), CompanionManagementSuite
+# (src\Diagnostics\SuiteLog.cs).
+$script:ModLogFiles = @(
+    @{ Name = 'AutoTrader.log'; RelativePath = 'Configs\AutoTrader.log' },
+    @{ Name = 'smithingsuite.log'; RelativePath = 'SmithingSuite\smithingsuite.log' },
+    @{ Name = 'companion-suite.log'; RelativePath = 'CompanionManagementSuite\companion-suite.log' }
+)
 # Upper bounds per numeric run field (also keeps DateTime.AddMinutes from overflowing).
 $script:RunNumberLimits = [ordered]@{ days = 3650; stallMinutes = 1440; budgetMinutes = 1440; hardTimeoutMinutes = 1440 }
 # Vanilla and framework modules the rig never replaces, even if the config allowlists them.
@@ -489,30 +498,50 @@ function Test-IsNumber {
     return ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal])
 }
 
+function Test-ScenarioIdList {
+    # Errors for the run field $Field ('scenarios', 'health' or 'ownAssemblies'), which must be a non-empty array of
+    # unique ids (case-insensitive; [A-Za-z0-9._-]+: they are written to a comma-separated run.cfg line).
+    param([string]$RunLabel, [string]$Field, $Run)
+    $list = $null
+    if ($Run.PSObject.Properties.Name -contains $Field) { $list = $Run.$Field }   # not `$x = if`: that unrolls a one-element array to a scalar
+    if ($list -isnot [System.Array] -or $list.Count -eq 0) { return @("${RunLabel}: '$Field' must be a non-empty array of ids.") }
+    $errs = @()
+    $seenIds = @{}
+    foreach ($sid in $list) {
+        if ($sid -isnot [string] -or $sid -cnotmatch '\A[A-Za-z0-9._-]+\z') { $errs += "${RunLabel}: invalid id '$sid' in '$Field' (allowed: letters, digits, '.', '_', '-')."; continue }
+        if ($seenIds.ContainsKey($sid)) { $errs += "${RunLabel}: duplicate id '$sid' in '$Field'." }
+        $seenIds[$sid] = $true
+    }
+    return $errs
+}
+
 function Test-RunKindSchema {
     # kind is 'soak' or 'scenarios'. A scenarios run needs the TestRig harness and a non-empty scenarios array of
-    # unique ids ([A-Za-z0-9._-]+: they are written to a comma-separated run.cfg line); a soak run has none.
+    # unique ids; a soak run has none. A soak run may carry 'health' (the health bracket, F-S6-1): only with the TestRig
+    # harness, a non-empty array of unique ids; a scenarios run never does. Ids: see Test-ScenarioIdList.
     param($Run)
     $errs = @()
     $id = "Run $($Run.runId)"
-    $hasScenarios = $Run.PSObject.Properties.Name -contains 'scenarios'
+    $names = $Run.PSObject.Properties.Name
+    $hasScenarios = $names -contains 'scenarios'
+    $hasHealth = $names -contains 'health'
     if ($Run.kind -isnot [string] -or $Run.kind -eq '') { return $errs }   # reported as required by the caller
+    if ($names -contains 'ownAssemblies') {   # any kind, TestRig only
+        if ($Run.harness -ne 'TestRig') { $errs += "${id}: 'ownAssemblies' needs the TestRig harness." }
+        $errs += @(Test-ScenarioIdList -RunLabel $id -Field 'ownAssemblies' -Run $Run)
+    }
     if ($Run.kind -ceq 'soak') {
         if ($hasScenarios) { $errs += "${id}: 'scenarios' is only allowed for kind 'scenarios'." }
+        if ($hasHealth) {
+            if ($Run.harness -ne 'TestRig') { $errs += "${id}: 'health' needs the TestRig harness." }
+            $errs += @(Test-ScenarioIdList -RunLabel $id -Field 'health' -Run $Run)
+        }
         return $errs
     }
     if ($Run.kind -cne 'scenarios') { return @("${id}: unknown kind '$($Run.kind)' (allowed: soak, scenarios).") }
     if ($Run.harness -ne 'TestRig') { $errs += "${id}: kind 'scenarios' needs the TestRig harness." }
-    $list = $null
-    if ($hasScenarios) { $list = $Run.scenarios }   # not `$x = if`: that unrolls a one-element array to a scalar
-    if ($list -isnot [System.Array] -or $list.Count -eq 0) { return @($errs + "${id}: 'scenarios' must be a non-empty array of scenario ids.") }
-    $seenIds = @{}
-    foreach ($sid in $list) {
-        if ($sid -isnot [string] -or $sid -cnotmatch '\A[A-Za-z0-9._-]+\z') { $errs += "${id}: invalid scenario id '$sid' (allowed: letters, digits, '.', '_', '-')."; continue }
-        if ($seenIds.ContainsKey($sid)) { $errs += "${id}: duplicate scenario id '$sid'." }
-        $seenIds[$sid] = $true
-    }
-    return $errs
+    if ($hasHealth) { $errs += "${id}: 'health' is only allowed for kind 'soak'." }
+    return @($errs + @(Test-ScenarioIdList -RunLabel $id -Field 'scenarios' -Run $Run))
 }
 
 function Test-JobSchema {
@@ -969,10 +998,17 @@ function Get-HarnessDir {
     return (Join-Path $Config.documentsRoot ('Mount and Blade II Bannerlord\' + $script:Harnesses[$Harness].Folder))
 }
 
+function Test-RunHasOwnAssemblies {
+    # True when the run carries an explicit runs[].ownAssemblies list (TestRig harness only; the job schema guarantees
+    # a non-empty array of unique ids without ',' or line breaks).
+    param($Run)
+    return ($Run.harness -eq 'TestRig' -and $Run.PSObject.Properties.Name -contains 'ownAssemblies' -and @($Run.ownAssemblies).Count -gt 0)
+}
+
 function Get-RunCfgText {
     # ownAssemblies is written only when given: the CoherentWarAI harness rejects unknown keys. The same holds
-    # for scenarios: written only for the TestRig harness with kind 'scenarios' (the job schema guarantees ids
-    # without ',' or line breaks).
+    # for scenarios: written only for the TestRig harness with kind 'scenarios', and for health: only for the TestRig
+    # harness with kind 'soak' (the job schema guarantees ids without ',' or line breaks, and never both keys).
     param($Run, [string[]]$OwnAssemblies = @())
     $lines = @(
         ('seed=' + [System.Convert]::ToString($Run.seed, $script:Invariant)),
@@ -984,6 +1020,10 @@ function Get-RunCfgText {
     if ($Run.kind -ceq 'scenarios' -and $Run.harness -eq 'TestRig' -and @($Run.scenarios).Count -gt 0) {
         $lines += ('scenarios=' + (@($Run.scenarios) -join ','))
     }
+    if ($Run.kind -ceq 'soak' -and $Run.harness -eq 'TestRig' -and $Run.PSObject.Properties.Name -contains 'health' -and @($Run.health).Count -gt 0) {
+        $lines += ('health=' + (@($Run.health) -join ','))
+    }
+    if (Test-RunHasOwnAssemblies $Run) { $OwnAssemblies = @($Run.ownAssemblies) }   # the job's explicit list wins over the derived one
     if (@($OwnAssemblies).Count -gt 0) { $lines += ('ownAssemblies=' + (@($OwnAssemblies) -join ',')) }
     return ($lines -join "`n") + "`n"
 }
@@ -1726,7 +1766,7 @@ function Invoke-Run {
             if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
         }
         $ownAssemblies = @()
-        if ([string]$Run.harness -eq 'TestRig') {
+        if ([string]$Run.harness -eq 'TestRig' -and -not (Test-RunHasOwnAssemblies $Run)) {   # an explicit list replaces the derivation
             # Only package modules that this job loads (job.modules); game and workshop modules are not own code.
             $loadedPackageModules = @($Modules | Where-Object { @($PackageModuleIds) -contains $_ })
             $ownAssemblies = @(Get-OwnAssemblyNames -ModulesDir (Get-ModulesDir $Config) `
@@ -1940,6 +1980,9 @@ function Invoke-Run {
         $copies += @{ Name = 'harness.log'; Source = $harnessLogPath }
     }
     $copies += @{ Name = 'CoherentWarAI.log'; Source = (Join-Path $modLogDir 'CoherentWarAI.log') }
+    foreach ($modLog in $script:ModLogFiles) {
+        $copies += @{ Name = $modLog.Name; Source = (Join-Path $docs $modLog.RelativePath) }
+    }
     if ($null -ne $process) {
         $copies += @{ Name = "rgl_log_$($process.Id).txt"; Source = (Join-Path $engineLogDir "rgl_log_$($process.Id).txt") }
         $copies += @{ Name = "rgl_log_errors_$($process.Id).txt"; Source = (Join-Path $engineLogDir "rgl_log_errors_$($process.Id).txt") }

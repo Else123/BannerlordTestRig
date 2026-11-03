@@ -23,9 +23,16 @@ namespace TestRig.Harness.Tests
                 daysReached: 1,
                 realSeconds: 25,
                 gameDaysPerRealMinute: rate,
+                runningDaysPerRealMinute: 3.6,
                 playerMapEvents: 0,
                 modules: new[] { new ModuleEntry("Native", "v1.4.8"), new ModuleEntry("SandBox", "v1.4.8") },
-                exceptions: new ExceptionSummary(7, 2, 1, new[] { new ExceptionKeyCount("k1", 3), new ExceptionKeyCount("k2", 1) }),
+                exceptions: new ExceptionSummary(
+                    total: 7,
+                    own: 2,
+                    harness: 1,
+                    unhandled: 1,
+                    top: new[] { new ExceptionKeyCount("k1", 3), new ExceptionKeyCount("k2", 1) },
+                    classification: new ClassificationSummary(walks: 7, walkMs: 9.8765, handlerMs: 12.3456, maxHandlerMs: 4.5, ownExact: true)),
                 scenarios: new[] { new ScenarioResult("soak", ScenarioStatus.Passed, 25) },
                 checks: new[] { new CheckResult("soak", "daysReached", ">= 1", "1", true) });
         }
@@ -60,6 +67,7 @@ namespace TestRig.Harness.Tests
                 "  \"daysReached\": 1,\n" +
                 "  \"realSeconds\": 25,\n" +
                 "  \"gameDaysPerRealMinute\": 2.41,\n" +
+                "  \"runningDaysPerRealMinute\": 3.60,\n" +
                 "  \"playerMapEvents\": 0,\n" +
                 "  \"modules\": [\n" +
                 "    {\n" +
@@ -74,7 +82,16 @@ namespace TestRig.Harness.Tests
                 "  \"exceptions\": {\n" +
                 "    \"total\": 7,\n" +
                 "    \"own\": 2,\n" +
+                "    \"harness\": 1,\n" +
+                "    \"vanilla\": 4,\n" +
                 "    \"unhandled\": 1,\n" +
+                "    \"classification\": {\n" +
+                "      \"walks\": 7,\n" +
+                "      \"walkMs\": 9.88,\n" +
+                "      \"handlerMs\": 12.35,\n" +
+                "      \"maxHandlerMs\": 4.50,\n" +
+                "      \"ownExact\": true\n" +
+                "    },\n" +
                 "    \"top\": [\n" +
                 "      {\n" +
                 "        \"key\": \"k1\",\n" +
@@ -117,11 +134,38 @@ namespace TestRig.Harness.Tests
                     new[]
                     {
                         "schema", "status", "reason", "seed", "mode", "daysRequested", "daysReached",
-                        "realSeconds", "gameDaysPerRealMinute", "playerMapEvents", "modules", "exceptions",
-                        "scenarios", "checks",
+                        "realSeconds", "gameDaysPerRealMinute", "runningDaysPerRealMinute", "playerMapEvents",
+                        "modules", "exceptions", "scenarios", "checks",
                     },
                     names);
             }
+        }
+
+        [Fact]
+        public void Write_ExceptionsFieldOrder_IsTheContractOrder()
+        {
+            using (JsonDocument doc = JsonDocument.Parse(RunResultWriter.Write(SampleResult())))
+            {
+                JsonElement exceptions = doc.RootElement.GetProperty("exceptions");
+
+                Assert.Equal(
+                    new[] { "total", "own", "harness", "vanilla", "unhandled", "classification", "top" },
+                    exceptions.EnumerateObject().Select(p => p.Name).ToArray());
+                Assert.Equal(
+                    new[] { "walks", "walkMs", "handlerMs", "maxHandlerMs", "ownExact" },
+                    exceptions.GetProperty("classification").EnumerateObject().Select(p => p.Name).ToArray());
+            }
+        }
+
+        [Fact]
+        public void Write_OwnNotExact_IsJsonFalse()
+        {
+            var result = new RunResult(
+                RunStatus.Completed, "", 1, "NoDlc", 1, 1, 60, 1, 1, 0, NoModules,
+                new ExceptionSummary(2, 0, 0, 0, new ExceptionKeyCount[0], new ClassificationSummary(1, 0.5, 0.5, 0.5, false)),
+                new ScenarioResult[0], new CheckResult[0]);
+
+            Assert.Contains("\"ownExact\": false\n", RunResultWriter.Write(result));
         }
 
         [Fact]
@@ -140,12 +184,22 @@ namespace TestRig.Harness.Tests
                 "  \"daysReached\": null,\n" +
                 "  \"realSeconds\": null,\n" +
                 "  \"gameDaysPerRealMinute\": null,\n" +
+                "  \"runningDaysPerRealMinute\": null,\n" +
                 "  \"playerMapEvents\": null,\n" +
                 "  \"modules\": [],\n" +
                 "  \"exceptions\": {\n" +
                 "    \"total\": 0,\n" +
                 "    \"own\": 0,\n" +
+                "    \"harness\": 0,\n" +
+                "    \"vanilla\": 0,\n" +
                 "    \"unhandled\": 0,\n" +
+                "    \"classification\": {\n" +
+                "      \"walks\": 0,\n" +
+                "      \"walkMs\": 0.00,\n" +
+                "      \"handlerMs\": 0.00,\n" +
+                "      \"maxHandlerMs\": 0.00,\n" +
+                "      \"ownExact\": true\n" +
+                "    },\n" +
                 "    \"top\": []\n" +
                 "  },\n" +
                 "  \"scenarios\": [\n" +
@@ -233,9 +287,9 @@ namespace TestRig.Harness.Tests
         {
             string hostile = "\"\\/\b\f\n\r\t\u0000\u007fü\u2028}{],";
             var result = new RunResult(
-                RunStatus.Aborted, hostile, 1, hostile, 1, 0, 1, 0, 0,
+                RunStatus.Aborted, hostile, 1, hostile, 1, 0, 1, 0, 0, 0,
                 new[] { new ModuleEntry(hostile, hostile) },
-                new ExceptionSummary(1, 0, 0, new[] { new ExceptionKeyCount(hostile, 1) }),
+                new ExceptionSummary(1, 0, 0, 0, new[] { new ExceptionKeyCount(hostile, 1) }, ClassificationSummary.None),
                 new[] { new ScenarioResult(hostile, ScenarioStatus.Error, null) },
                 new[] { new CheckResult(hostile, hostile, hostile, hostile, false) });
 
@@ -256,8 +310,8 @@ namespace TestRig.Harness.Tests
         public void Write_NullStrings_AreWrittenAsJsonNull()
         {
             var result = new RunResult(
-                RunStatus.Aborted, null, null, null, null, null, null, null, null,
-                NoModules, new ExceptionSummary(0, 0, 0, new ExceptionKeyCount[0]),
+                RunStatus.Aborted, null, null, null, null, null, null, null, null, null,
+                NoModules, ExceptionSummary.Empty,
                 new ScenarioResult[0], new CheckResult[0]);
 
             string json = RunResultWriter.Write(result);
@@ -320,8 +374,8 @@ namespace TestRig.Harness.Tests
         public void Write_RunningStatus_IsAllowed()
         {
             var result = new RunResult(
-                RunStatus.Running, "", 1, "NoDlc", 1, 0, 0, 0, 0,
-                NoModules, new ExceptionSummary(0, 0, 0, new ExceptionKeyCount[0]),
+                RunStatus.Running, "", 1, "NoDlc", 1, 0, 0, 0, null, 0,
+                NoModules, ExceptionSummary.Empty,
                 new ScenarioResult[0], new CheckResult[0]);
 
             Assert.Contains("\"status\": \"Running\",", RunResultWriter.Write(result));
@@ -332,7 +386,7 @@ namespace TestRig.Harness.Tests
         private static RunResult ScenarioRecord(IReadOnlyList<ScenarioResult> scenarios, IReadOnlyList<CheckResult> checks)
         {
             return new RunResult(
-                RunStatus.Aborted, "tainted:b", 1, "NoDlc", 1, 0, 9, 0, 0,
+                RunStatus.Aborted, "tainted:b", 1, "NoDlc", 1, 0, 9, 0, null, 0,
                 NoModules, ExceptionSummary.Empty, scenarios, checks);
         }
 
@@ -458,14 +512,122 @@ namespace TestRig.Harness.Tests
         }
 
         [Fact]
-        public void Summary_Empty_IsAllZeros()
+        public void Summary_Empty_IsAllZerosAndExact()
         {
             ExceptionSummary summary = new ExceptionStats().Summary();
 
             Assert.Equal(0, summary.Total);
             Assert.Equal(0, summary.Own);
+            Assert.Equal(0, summary.Harness);
+            Assert.Equal(0, summary.Vanilla);
             Assert.Equal(0, summary.Unhandled);
             Assert.Empty(summary.Top);
+            Assert.Equal(0, summary.Classification.Walks);
+            Assert.Equal(0, summary.Classification.HandlerMs);
+            Assert.Equal(0, summary.Classification.MaxHandlerMs);
+            Assert.True(summary.Classification.OwnExact);
+        }
+
+        [Fact]
+        public void Summary_OwnHarnessAndVanilla_PartitionTheTotal()
+        {
+            var stats = new ExceptionStats();
+            stats.RecordFirstChance("own", own: true);
+            stats.RecordFirstChance("own-through-harness", own: true, harness: true);   // own wins
+            stats.RecordFirstChance("harness", own: false, harness: true);
+            stats.RecordFirstChance("vanilla", own: false);
+            stats.RecordFirstChance("vanilla", own: false, harness: false);
+
+            ExceptionSummary summary = stats.Summary();
+
+            Assert.Equal(5, summary.Total);
+            Assert.Equal(2, summary.Own);
+            Assert.Equal(1, summary.Harness);
+            Assert.Equal(2, summary.Vanilla);
+            Assert.Equal(summary.Total, summary.Own + summary.Harness + summary.Vanilla);
+        }
+
+        [Fact]
+        public void Summary_Classification_SumsHandlerTimeAndKeepsTheMaximum()
+        {
+            var stats = new ExceptionStats();
+            stats.RecordHandlerTime(1.0);
+            stats.RecordHandlerTime(2.5);
+            stats.RecordHandlerTime(0);
+
+            ClassificationSummary classification = stats.Summary().Classification;
+
+            Assert.Equal(3.5, classification.HandlerMs, 10);
+            Assert.Equal(2.5, classification.MaxHandlerMs, 10);
+            Assert.Equal(0, classification.WalkMs, 10);
+        }
+
+        [Fact]
+        public void Summary_Classification_WalkMsSumsOnlyTheWalkedHandlerCallsWhichStayInHandlerMs()
+        {
+            var stats = new ExceptionStats();
+            stats.RecordHandlerTime(1.0, walked: true);
+            stats.RecordHandlerTime(0.25);
+            stats.RecordHandlerTime(2.0, walked: true);
+
+            ClassificationSummary classification = stats.Summary().Classification;
+
+            Assert.Equal(3.0, classification.WalkMs, 10);
+            Assert.Equal(3.25, classification.HandlerMs, 10);
+            Assert.Equal(2.0, classification.MaxHandlerMs, 10);
+        }
+
+        [Theory]
+        [InlineData(-0.001)]
+        [InlineData(double.NaN)]
+        [InlineData(double.PositiveInfinity)]
+        public void RecordHandlerTime_NegativeOrNonFinite_Throws(double milliseconds)
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => new ExceptionStats().RecordHandlerTime(milliseconds));
+        }
+
+        [Fact]
+        public void Summary_Classification_ReportsWalksAndExactnessOfTheOwnCache()
+        {
+            var stats = new ExceptionStats(maxWalks: 1);
+            bool own;
+
+            stats.OwnCache.Lookup("k", out own);
+            ClassificationSummary withinBudget = stats.Summary().Classification;
+            stats.OwnCache.Lookup("k", out own);
+            ClassificationSummary afterBudget = stats.Summary().Classification;
+
+            Assert.Equal(1, withinBudget.Walks);
+            Assert.True(withinBudget.OwnExact);
+            Assert.Equal(1, afterBudget.Walks);
+            Assert.False(afterBudget.OwnExact);
+        }
+
+        [Fact]
+        public void OwnCache_DefaultsToTheDefaultWalkBudget()
+        {
+            var stats = new ExceptionStats();
+            bool own;
+            for (int i = 0; i < OwnClassificationCache.DefaultMaxWalks; i++)
+            {
+                Assert.Equal(OwnLookup.Walk, stats.OwnCache.Lookup("k", out own));
+            }
+
+            Assert.NotEqual(OwnLookup.Walk, stats.OwnCache.Lookup("k", out own));
+        }
+
+        [Theory]
+        [InlineData("TestRig.Harness", true)]
+        [InlineData("TestRig.SelfTest", true)]
+        [InlineData("testrig.harness", true)]
+        [InlineData("TestRig", false)]
+        [InlineData("TestRigX", false)]
+        [InlineData("SmithingSuite.Scenarios", false)]
+        [InlineData("", false)]
+        [InlineData(null, false)]
+        public void IsHarnessAssembly_MatchesTestRigDotPrefixCaseInsensitively(string simpleName, bool expected)
+        {
+            Assert.Equal(expected, ExceptionStats.IsHarnessAssembly(simpleName));
         }
 
         [Fact]

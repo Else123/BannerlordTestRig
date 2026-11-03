@@ -1,12 +1,14 @@
-# Build step of the test rig runner: builds the mod projects (seven; eight with -Suite RIG) into a staging folder, guards the
+# Build step of the test rig runner: builds the mod projects (seven; eight with -Suite RIG, ten with -Suite L1, only the
+# harness with -Suite L1-BASE) into a staging folder, guards the
 # tower (the game's own Modules folder) against changes and writes manifest.json.
 # Functions only; dot-sourced by Invoke-TestRig.ps1 (and by tests\runner\Build-Package.Tests.ps1).
 
-# The seven projects (eight with -Suite RIG), relative to the workspace root (the folder that contains the repo folders).
+# The seven projects (eight with -Suite RIG, ten with -Suite L1, one with -Suite L1-BASE), relative to the workspace root
+# (the folder that contains the repo folders), in build order: mods, harnesses, then the scenario modules.
 function Get-RigBuildProjects {
     param(
         [Parameter(Mandatory)][string]$WorkspaceRoot,
-        [string]$Suite   # RIG adds the self-test module (it holds deliberately crashing code: no other suite ships it)
+        [string]$Suite   # RIG adds the self-test module (it holds deliberately crashing code: no other suite ships it), L1 the health scenario modules
     )
     $table = @(
         @('BannerlordCoherentWarAI', 'src\CoherentWarAI\CoherentWarAI.csproj', 'CoherentWarAI'),
@@ -18,6 +20,16 @@ function Get-RigBuildProjects {
         @('BannerlordSmithingSuite', 'tests\InGame\SmithingSuite.Scenarios\SmithingSuite.Scenarios.csproj', 'SmithingSuite.Scenarios')
     )
     if ($Suite -eq 'RIG') { $table += , @('BannerlordTestRig', 'src\TestRig.SelfTest\TestRig.SelfTest.csproj', 'TestRig.SelfTest') }   # after the harness it references
+    # The health scenario modules of the other three mods (SmithingSuite.Scenarios is in the base table, built for every
+    # suite except L1-BASE, see below). Each references its
+    # mod and the harness from the stage (same BannerlordModulesPath), so it comes after both.
+    if ($Suite -eq 'L1') {
+        $table += , @('BannerlordCoherentWarAI', 'tests\InGame\CoherentWarAI.Scenarios\CoherentWarAI.Scenarios.csproj', 'CoherentWarAI.Scenarios')
+        $table += , @('BannerlordAutoTrader', 'tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj', 'AutoTraderSpeed.Scenarios')
+        $table += , @('CompanionManagementSuite', 'tests\InGame\CompanionManagementSuite.Scenarios\CompanionManagementSuite.Scenarios.csproj', 'CompanionManagementSuite.Scenarios')
+    }
+    # The vanilla baseline loads no mod and no scenario module: only the harness is built (and so only its repo recorded).
+    if ($Suite -eq 'L1-BASE') { $table = @($table | Where-Object { $_[2] -ceq 'TestRig.Harness' }) }
     foreach ($row in $table) {
         [pscustomobject]@{
             Repo        = $row[0]
@@ -182,7 +194,7 @@ function New-RigBuildManifest {
     $path
 }
 
-# Builds all projects (seven; eight with -Suite RIG) into <StageDir>\Modules against the game install at $TowerGamePath, verifies
+# Builds the projects of Get-RigBuildProjects into <StageDir>\Modules against the game install at $TowerGamePath, verifies
 # that <TowerGamePath>\Modules is untouched and that every module landed in the stage, then writes the
 # manifest. Throws on a missing prerequisite, a failed build, an incomplete stage or a tower change (no
 # manifest is written then). The MSBuild output goes to <StageDir>\build.log.

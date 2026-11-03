@@ -919,6 +919,23 @@ namespace TestRig.Harness.Tests
         }
 
         [Fact]
+        public void ScenarioRun_Taint_ClosesTheRateWindow()
+        {
+            HarnessRun run = NewScenarioRun(Scenario("a", ThrowAfterOneTick), Scenario("b", PassImmediately));
+            DriveToRunning(run, 0);
+            run.Tick(OnMap(30, days: 1));                  // a starts and waits a tick
+            run.Tick(OnMap(60, days: 2));                  // a throws: tainted at 60 s with 2 days
+            Assert.Equal(HarnessPhase.Ending, run.Phase);
+
+            run.Tick(OnMap(120, days: 4));                 // still ending; days keep counting
+
+            RunResult result = ToResult(run, 120);
+            Assert.Equal("tainted:a", result.Reason);
+            Assert.Equal(4, result.DaysReached);
+            Assert.Equal(2.0, result.RunningDaysPerRealMinute);   // window 0 s .. 60 s, 2 days
+        }
+
+        [Fact]
         public void ScenarioRun_StepProgressCountsAgainstStall()
         {
             // stall 1 min, no new days (time is stopped), but the scenario steps every tick.

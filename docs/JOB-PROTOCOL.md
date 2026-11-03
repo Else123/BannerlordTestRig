@@ -86,9 +86,17 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
   `WARN towerGamePath is not configured: game version and module versions not checked.` The agent checks
   it in preflight (see "Preflight"): `null` or `""` = not checked.
 - `kind`: `soak` (default shape above) or `scenarios`. A `scenarios` run needs harness `TestRig` and the extra field
-  `runs[].scenarios`: a non-empty JSON array of unique scenario ids matching `^[A-Za-z0-9._-]+$` (also with one
+  `runs[].scenarios`: a non-empty JSON array of unique (case-insensitive) scenario ids matching `^[A-Za-z0-9._-]+$` (also with one
   element). A `soak` run has no `scenarios` field. Anything else -> job `rejected` (schema check). The agent writes the
   ids to `run.cfg` (section "`run.cfg`"); the harness runs exactly these scenarios.
+- `health` (optional, `soak` runs only): the health bracket (F-S6-1), a non-empty JSON array of unique (case-insensitive)
+  scenario ids with the same pattern as `scenarios` (also with one element); only with harness `TestRig`. On a `scenarios` run, with
+  another harness, empty, not an array of strings or with an invalid or duplicate id -> job `rejected` (schema check).
+  The agent writes the ids to `run.cfg` as `health=` (section "`run.cfg`").
+- `ownAssemblies` (optional, any `kind`): a non-empty JSON array of unique (case-insensitive) simple DLL names matching
+  `^[A-Za-z0-9._-]+$` (also with one element); only with harness `TestRig`. With another harness, empty, not an array of
+  strings or with an invalid or duplicate name -> job `rejected` (schema check). The agent writes exactly this list to
+  `run.cfg` as `ownAssemblies=` instead of the derived one (section "`run.cfg`").
 - `harness`: selects the in-game harness; `run.cfg`, the result file and `harness.log` live in its folder
   below `<MyDocuments>\Mount and Blade II Bannerlord\`. Anything else -> run classified `SetupError`.
 
@@ -148,8 +156,23 @@ The versions found here go into every `agent-run.json` (`gameVersion`, `moduleVe
 ```
 
 `artifacts` lists what was copied to the run folder (only files that exist, written during the run):
-`run-result.json`, `result.txt`, `harness.log`, `CoherentWarAI.log` (mod log, if present) and the
-engine logs `rgl_log_<pid>.txt` / `rgl_log_errors_<pid>.txt` / `watchdog_log_<pid>.txt`.
+`run-result.json`, `result.txt`, `harness.log`, the mod logs (each only if present; a missing one is no error) and the
+engine logs `rgl_log_<pid>.txt` / `rgl_log_errors_<pid>.txt` / `watchdog_log_<pid>.txt`. The mod logs are copied
+under their file name, without a size cap, from below `<MyDocuments>\Mount and Blade II Bannerlord\`:
+
+| Artifact | Source (below the game's documents folder) | Mod |
+|----------|--------------------------------------------|-----|
+| `CoherentWarAI.log` | `CoherentWarAI\CoherentWarAI.log` | CoherentWarAI |
+| `AutoTrader.log` | `Configs\AutoTrader.log` (`EngineFilePaths.ConfigsPath`) | AutoTraderSpeed |
+| `smithingsuite.log` | `SmithingSuite\smithingsuite.log` | SmithingSuite |
+| `companion-suite.log` | `CompanionManagementSuite\companion-suite.log` | CompanionManagementSuite |
+
+A mod log is only copied if its last write time is not older than the run start (a stale log from an earlier session
+is skipped). That check only proves the file was touched during the run, not that it holds only this run:
+`smithingsuite.log` is appended across sessions (the mod rotates it to `smithingsuite.log.old` once it passes
+about 5 MB), so the copy can contain earlier sessions. `AutoTrader.log` and `companion-suite.log` are rewritten at every
+game start (the previous session moves to `AutoTrader.previous.log` / `companion-suite.prev.log`), so they hold
+the current session only.
 
 `baselineRestored`: `true` if the baseline was restored before this run, `false` if the restore failed or was not
 reached. `baselineSha256`: relative path (with `/`) -> uppercase hex SHA-256 of every restored file, `null` if not
@@ -298,9 +321,12 @@ writes `result.txt` (`key=value` lines, e.g. `status=Completed`, `daysReached=3`
 ```json
 {
   "schema": 1, "status": "Completed", "reason": "", "seed": 1, "mode": "WarSails",
-  "daysRequested": 1, "daysReached": 1, "realSeconds": 25, "gameDaysPerRealMinute": 2.41, "playerMapEvents": 0,
+  "daysRequested": 1, "daysReached": 1, "realSeconds": 25, "gameDaysPerRealMinute": 2.41,
+  "runningDaysPerRealMinute": 3.60, "playerMapEvents": 0,
   "modules": [ { "id": "Native", "version": "v1.4.8" } ],
-  "exceptions": { "total": 3, "own": 1, "unhandled": 0, "top": [ { "key": "KeyA", "count": 2 }, { "key": "KeyB", "count": 1 } ] },
+  "exceptions": { "total": 3, "own": 1, "harness": 0, "vanilla": 2, "unhandled": 0,
+    "classification": { "walks": 3, "walkMs": 0.42, "handlerMs": 0.42, "maxHandlerMs": 0.21, "ownExact": true },
+    "top": [ { "key": "KeyA", "count": 2 }, { "key": "KeyB", "count": 1 } ] },
   "scenarios": [ { "id": "soak", "status": "Passed", "seconds": 25 } ],
   "checks": [ { "name": "daysReached", "expected": ">= 1", "actual": "1", "passed": true } ]
 }
@@ -315,11 +341,35 @@ the harness's own (e.g. a retried file write); `top` lists the most frequent key
 10000 distinct keys are tracked, later new keys never enter `top`), so its counts add up to at most `total`.
 Exception counting starts when the harness module loads (`OnSubModuleLoad`, once `run.cfg` was read and accepted), by
 installing the first-chance and unhandled hooks; a later map window only restarts the log budget, not the counters.
-`exceptions.own` is an **estimate** and is only counted when `run.cfg` has `ownAssemblies`: exceptions are grouped by
-exception type and throw site (`<type> @ <declaring type>.<method>`, no message); each group is classified once, by one
-stack walk at its first occurrence, and every repeat gets the same answer, so `own` can be too high (a vanilla throw
-site first reached through an own mod) or too low (at most 1000 walks per run; groups first seen after that, and a
-failed classification, count as not own).
+`gameDaysPerRealMinute` is `daysReached` per real minute since the harness armed (includes loading and character
+creation, so it depends on the load time and on `days`). `runningDaysPerRealMinute` (two decimals) counts only the
+Running phase: the days gained from entering it (the tick after the map was reached) until it ends (completion, abort
+or taint; while it lasts, until the record is written), per real minute of that span; `null` when the run never
+reached Running or the span has no duration. In scenario runs the Running phase includes the time stopped between
+`Days` steps.
+`exceptions.own` is only counted when `run.cfg` has `ownAssemblies`. An exception is own when any frame of the
+throwing thread's live stack (harness frames skipped) comes from an `ownAssemblies` DLL. Every exception gets its own
+stack walk until 1000 walks are spent; within that budget `own` is exact. After it, exceptions are answered per group
+(exception type and throw site, `<type> @ <declaring type>.<method>`, no message) with the result of the first walked
+exception of that group, so `own` becomes an **estimate**: too high (a vanilla throw site whose first walk ran through
+an own mod), too low (the first walk of the group did not run through an own mod, but this exception did - a false
+negative of the cache), and groups never walked count as not own. A failed classification (logged once) also counts
+as not own and makes `own` an estimate (`ownExact` `false`). `exceptions.harness`: not own, and the throwing method (`TargetSite`) is declared in an assembly whose
+simple name starts with `TestRig.` (case-insensitive; `TestRig.Harness`, `TestRig.SelfTest`); own wins, so an exception
+of `TestRig.SelfTest` in a run that lists it in `ownAssemblies` is own. `exceptions.vanilla` = `total - own - harness`
+(everything else, including other Workshop mods). `exceptions.classification`: `walks` = stack walks used (at most
+1000), `ownExact` = `false` once an exception was answered without its own walk (budget spent) or a walk failed
+(`true` without `ownAssemblies`), `handlerMs` / `maxHandlerMs` = summed / longest time (milliseconds, two decimals,
+`Stopwatch`) the first-chance handler spent per exception on key building, the own/harness classification incl. stack
+capture and walk, and counting (the `harness.log` write is not included). `walkMs` = the part of `handlerMs` spent in
+the handler calls that were granted a walk (counted in `walks`, whether the walk succeeded or failed; stack capture
+included). So `walkMs / walks` is the mean handler time of a walked exception and `(handlerMs - walkMs) / (total -
+walks)` the mean of all other exceptions (cache hits, groups never walked, and every exception of a run without
+`ownAssemblies`; a stack capture for a full `harness.log` line of a new key is included there too). Each handler time is
+wall-clock time, so it also contains the wait for the harness lock (other threads' exceptions) and any preemption of
+the thread: the values are upper bounds of the pure classification cost. They cover the whole run from the hook
+installation on, including module loading and character creation, so `handlerMs` related to the Running phase alone
+overstates the share. The log budget is unchanged: it only limits `harness.log` lines, never the counting.
 `exceptions.unhandled`: on a terminating unhandled .NET exception the harness counts it and writes `run-result.json`
 at once (best effort, values read without a lock, so they can be one tick old). A run still in progress then ends as
 `status` `Aborted`, `reason` `unhandled:<phase>`, scenario `Failed` (runner exit `2`, a failure of the mods under test);
@@ -352,19 +402,127 @@ everything, was checked; this includes a missing, empty or invalid `scenarios` l
 
 A suite defines its own mod list. `-Suite L1` sets harness `TestRig`, mode `WarSails`, seed 1, `days` 30 and the `modules` load
 order `Bannerlord.Harmony, Bannerlord.ButterLib, Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore,
-Sandbox, StoryMode, NavalDLC, CoherentWarAI, AutoTraderSpeed, SmithingSuite, CompanionManagementSuite, TestRig.Harness`
-(`NavalDLC` is dropped with `-Mode NoDlc`). Explicit `-Days`, `-Seed`, `-Mode` win over the suite defaults; an explicit
+Sandbox, StoryMode, NavalDLC, CoherentWarAI, AutoTraderSpeed, SmithingSuite, CompanionManagementSuite, TestRig.Harness,
+CoherentWarAI.Scenarios, AutoTraderSpeed.Scenarios, SmithingSuite.Scenarios, CompanionManagementSuite.Scenarios`
+(`NavalDLC` is dropped with `-Mode NoDlc`; `Bannerlord.MBOptionScreen` is MCM v5, which CoherentWarAI needs). The four
+scenario modules hold one health scenario per mod and load after the harness they reference; `runs[0].health` is
+`["coherentwarai.health", "autotrader.health", "smithingsuite.health", "companionsuite.health"]` (the health bracket,
+see "`run.cfg`"). Explicit `-Days`, `-Seed`, `-Mode` win over the suite defaults; an explicit
 `-Harness` other than `TestRig` is a usage error (runner exit 1, nothing built or published). `job.json` keeps its
-schema: the suite only shapes `modules` and `runs[0]`, there is no suite key (the agent never sees it). The suite name
-appears in `job-result.json` as job-level `suite` (`"L1"`, `null` without `-Suite`); `scenarios[].id` stays `soak`.
+schema: the suite only shapes `modules` and `runs[]` (several runs for RIG and L1-BASE), there is no suite key (the agent never sees it). The suite name
+appears in `job-result.json` as job-level `suite` (`"L1"`, `null` without `-Suite`); `scenarios[].id` stays raw (`soak`,
+`autotrader.health@0`). With `-PackageFrom` the package must contain the four mods, `TestRig.Harness` and the four
+scenario modules. The build mode builds ten projects for L1: the seven of every job (see `-Suite SM`), then
+`BannerlordCoherentWarAI\tests\InGame\CoherentWarAI.Scenarios`, `BannerlordAutoTrader\tests\InGame\AutoTraderSpeed.Scenarios`
+and `CompanionManagementSuite\tests\InGame\CompanionManagementSuite.Scenarios` (each references its mod and the harness
+from the stage, so they build last); `repos` records the state of the five repos as built (`dirty` is `true` while a
+scenario project is uncommitted).
+
+Health lines (runner, any soak suite with health ids, today L1): the expected lines are `<id>@0` per id, then
+`<id>@<days>` per id, with `days` the job's days (30, or an explicit `-Days`). Each reported line gets its own console row
+(`L1-autotrader.health@0`, status, days, exit class) with its failed checks below it; an expected line the run did not
+report gets a row with status `missing` (when the run reported any line, and always for a `Completed` run, e.g. one with
+`scenarios: []`; a run that ended otherwise without any line keeps its single `soak` row). `job-result.json` holds per run `health`: one `{ "id", "expected": "Passed", "actual" }` per expected line
+(`actual` = the reported status, `null` when not reported); the field is absent for jobs without health ids. Exit code:
+the status rules of "Runner exit codes" stay (`Failed` = `2`, `Error`/unknown = `1`); in addition a run with exit class
+`Completed` must report every expected health line `Passed`, so a missing line or one with `Skipped` or `Timeout` is `1`
+(rig error: that health check did not run to a verdict, like a missing requested scenario). A run that is not
+`Completed` (e.g. a taint in health@0 ends `NotCompleted` with the rest `Skipped`) is judged by its exit class and
+statuses only. A suite with per-run expectations applies the same health rule to an expected `Completed` soak run
+(`Mismatch` for a `Failed` line, `RigError` for a missing or unchecked one). The verdict on the measurements
+(exceptions, tempo, modules) is separate from this structural check: see "L1 verdict".
+
+L1 verdict (runner, `-Suite L1` only, every run with exit class `Completed`; the harness only measures, the runner
+judges). Six checks on the run's `run-result.json`, each printed as a row after the run's result rows
+(`r1     L1-vanilla         Passed     expected <= 29 (1.5 x baseline max 6 + 20), actual 0`):
+
+| Check | Rule | Status when violated |
+|---|---|---|
+| `own` | `exceptions.own` = 0 | `Failed` (exit `2`); not a number = `ERROR` (exit `1`) |
+| `unhandled` | `exceptions.unhandled` = 0 | `Failed` (`2`); not a number = `ERROR` (`1`) |
+| `vanilla` | `exceptions.vanilla` <= 1.5 x max(base runs' `vanilla`) + 20 | `Failed` (`2`); not a number = `ERROR` (`1`) |
+| `tempo` | `runningDaysPerRealMinute` / median(base runs' `runningDaysPerRealMinute`) >= 0.7 | `Failed` (`2`) |
+| `modules` | `modules[].id` = `job.modules` (same ids, same order, case-sensitive) | `Failed` (`2`), naming missing/extra ids or the first position (1-based) that differs; not reported = `ERROR` (`1`) |
+| `playerMapEvents` | > 0 | `WARN` only, never changes the exit code |
+
+`vanilla` and `tempo` are `not judged` (row status `not judged`, `expected -`, plus a line
+`WARN L1 <run> vanilla and tempo not judged: <reason>`) when the baseline is missing (no file, or no base runs: the
+committed placeholder), invalid, or for another game version than the run's `agent-run.json` `gameVersion` (or the run
+reported none). A `null` (or missing) `runningDaysPerRealMinute` makes `tempo` `not judged` with
+`WARN L1 <run> tempo not judged: runningDaysPerRealMinute is null`. `own`, `unhandled` and `modules` are always judged.
+The tempo rule compares the ratio (7.00 / 10.00 = 0.7 passes). A violation adds `2`, an `ERROR` row `1` to the exit code
+(precedence as in "Runner exit codes"); a run that is not `Completed` gets no verdict (its exit class decides).
+`job-result.json` holds per run `l1` (absent for other suites, `null` for a run that is not `Completed`):
+`{ "outcome": "Met" | "Failed" | "RigError", "baseline": { "path", "status": "Ok" | "Missing" | "Invalid", "reason",
+"gameVersion", "jobIds": [...] }, "checks": [ { "name", "status": "Passed" | "Failed" | "Warn" | "NotJudged" | "Error",
+"expected", "actual" } ], "warnings": [ "WARN L1 ..." ] }` (`expected`/`actual` are the strings of the console row).
+
+The baseline is `runner/baselines/L1.json` (committed; UTF-8, LF), written only by `runner/Update-L1Baseline.ps1`:
+
+```json
+{
+  "schema": 1, "suite": "L1", "note": "...", "gameVersion": "v1.4.8", "updatedUtc": "2026-11-04T09:30:00Z",
+  "jobs": [ { "jobId": "20261103-063455-cd32", "suite": "L1-BASE", "exitCode": 0,
+              "modules": [ { "id": "Native", "version": "v1.4.8" } ] } ],
+  "baseRuns": [ { "jobId": "20261103-063455-cd32", "runId": "r1", "seed": 1, "daysReached": 30,
+                  "runningDaysPerRealMinute": 22.26, "playerMapEvents": 0,
+                  "exceptions": { "total": 0, "own": 0, "harness": 0, "vanilla": 0, "unhandled": 0 } } ],
+  "l1Runs": [ "same shape as baseRuns, from the L1 calibration jobs" ],
+  "derived": { "baseRunCount": 5, "tempoMedian": 22.26, "tempoMin": 22.23, "tempoMax": 22.27, "tempoSpread": 0.0018,
+               "tempoThreshold": 15.582, "vanillaMax": 6, "vanillaThreshold": 29, "l1TempoRatioMin": 0.8163 }
+}
+```
+
+`jobs[].modules` = the module versions the first run of that job reported. The runner recomputes the thresholds from
+`baseRuns` on every verdict (`derived` is for readers and is not read back); a file with base runs needs a non-empty
+`gameVersion`, and every base run a positive `runningDaysPerRealMinute` and `exceptions.vanilla` >= 0, else the baseline
+is invalid. The `l1Runs` do not enter the thresholds; they record the calibration (`l1TempoRatioMin` = slowest L1 run /
+base median). `runner/Update-L1Baseline.ps1 -BaseJobIds <id>[,<id>...] [-L1JobIds <id>,<id>,<id>]` reads
+`out\results\<jobId>\job-result.json` of each job and rewrites the whole file: base jobs must be `-Suite L1-BASE` with
+exit code `0`, L1 jobs `-Suite L1` (any exit code); every run must be `Completed` with a positive tempo and numeric
+exception counters, all runs must report the same game version, and no job may be listed twice; otherwise nothing is
+written (exit `1`). Several base jobs are pooled. It prints the derived values and warns (without failing) when the
+base-run tempo spread (max - min) / median exceeds 10 % or the slowest L1 run is below 0.8 x the base median.
 
 `-Suite SM` (SmithingSuite scenarios) sets harness `TestRig`, mode `WarSails`, seed 1, `days` 1, `kind` `scenarios`,
 `scenarios` `["smithing.smelt-then-refine"]` and the `modules` load order `Bannerlord.Harmony, Bannerlord.ButterLib,
 Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore, Sandbox, StoryMode, NavalDLC, SmithingSuite,
 TestRig.Harness, SmithingSuite.Scenarios` (no CoherentWarAI; the scenario module loads after the harness it references).
 With `-PackageFrom` the package must contain `SmithingSuite`, `TestRig.Harness` and `SmithingSuite.Scenarios`. The
-default build mode builds all seven projects for every job (also for L1), including
-`BannerlordSmithingSuite\tests\InGame\SmithingSuite.Scenarios`.
+default build mode builds seven projects for every job (eight with `-Suite RIG`, ten with `-Suite L1`, one with
+`-Suite L1-BASE`), including `BannerlordSmithingSuite\tests\InGame\SmithingSuite.Scenarios`.
+
+`-Suite L1-BASE` (vanilla baseline for L1) sets harness `TestRig`, mode `WarSails`, `days` 30, `kind` `soak` and the
+`modules` load order `Bannerlord.Harmony, Bannerlord.ButterLib, Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native,
+SandBoxCore, Sandbox, StoryMode, NavalDLC, TestRig.Harness` (the L1 list without the four mods and without scenario
+modules). It has per-run expectations (see "Runner exit codes"): five runs `r1`-`r5`, each expected `Completed`, with
+`hardTimeoutMinutes` 10 and their own `runs[].seed` 1, 1, 1, 2, 3; every run gets the job's `days` (30, or an explicit
+`-Days`). The 10 minutes hold for 30 days; a longer `-Days` scales them, `max(10, ceil(10 x days / 30))` (60 days: 20,
+90 days: 30), a shorter one keeps 10 (a 30-day soak took 2m20s-3m41s of agent time on the game PC). Because the runs fix
+seed and hard timeout, an explicit `-Seed` or `-HardTimeoutMinutes` is a usage error (runner exit 1). The build mode builds
+only `TestRig.Harness` (manifest and `repos` list only `BannerlordTestRig`); with `-PackageFrom` the package must contain
+`TestRig.Harness`. Overall deadline: per run its (scaled) hard timeout + 2 minutes, plus the claim wait rounded up to
+minutes, plus 5 minutes: 67 minutes with the defaults (167 with `-Days 90`), unless `-TimeoutMinutes` is given.
+
+Per-run seed: `job.json` carries `seed` (and `days`) per run, and the agent writes each run's own values to that run's
+`run.cfg`; nothing in the job schema or the agent is suite-specific. A suite run definition may set `Seed`; the runner
+then writes it to that run's `runs[].seed` instead of the `-Seed` value.
+
+`-Suite RIG` (rig self-test) sets harness `TestRig`, mode `WarSails`, seed 1, `days` 1, `kind` `scenarios` and the `modules`
+load order of the base modules, `TestRig.Harness`, `TestRig.SelfTest`. One job with four runs, each with
+`hardTimeoutMinutes` 5 and one scenario: `r1` `rig.selftest-throw` (expected `Crashed`), `r2` `rig.selftest-hang` (`Hung`),
+`r3` `rig.selftest-pass` (`Completed`), `r4` `rig.selftest-exception-storm` (`Completed`; R2). Only `r4` carries
+`runs[].ownAssemblies` `["TestRig.SelfTest"]` (a JSON array, also with this one name), so its 10,000 caught self-test
+exceptions count as own; its expectation also checks three values of its `run-result.json`: `exceptions.own` = 10000,
+`exceptions.classification.walks` = 1000 and `exceptions.classification.ownExact` = `false` (verdict: "Runner exit codes").
+Below the expectation row the runner prints one line per value check (`    exceptions.own: expected 10000, actual 10000
+met`, `MISMATCH` or `ERROR`; only when `r4` ended `Completed`) and always the R2 timing line of
+`exceptions.classification`: `    R2 timing: walk mean <walkMs / walks> ms (<walks> walks); cache hit at most <(handlerMs -
+walkMs) / (total - walks)> us (mean of <total - walks> other exceptions)` (`n/a` for a mean without exceptions, `not
+measured` when a value is missing). Above the R2 start values [A] (walk mean > 1 ms, cache hit > 50 us) it adds
+`WARN r4 R2 walk mean ...` / `WARN r4 R2 cache hit at most ...`; warnings never change the exit code. With `-PackageFrom`
+the package must contain `TestRig.Harness` and `TestRig.SelfTest`. Overall deadline (formula as for `-Suite L1-BASE`):
+35 minutes with the defaults.
 
 ### Version warnings (runner)
 
@@ -385,9 +543,12 @@ parsed object as written by the harness (nested, typed values as above); from le
 (missing file, or invalid `run-result.json`). Per run it also holds `gameVersion` and `moduleVersions`, copied from
 `agent-run.json` (`moduleVersions` is always a JSON array when present, also with 0 or 1 entry; `null` only for an old
 agent); on job level `versionWarnings` is an array of the warning lines above and `suite` is the runner's `-Suite`
-value or `null`. Only for a suite with per-run expectations (`-Suite RIG`) every run also holds `expected`
-(`{ "exitClass": "...", "messagePattern": "<regex>" | null }`, `null` for a run the suite does not define) and
-`verdict` (`Met`, `Mismatch` or `RigError`, see the exit codes; `null` when `expected` is `null`).
+value or `null`. Only for a suite with per-run expectations (`-Suite RIG`, `-Suite L1-BASE`) every run also holds `expected`
+(`{ "exitClass": "...", "messagePattern": "<regex>" | null, "values": [ { "name": "<path>", "expected": <number|boolean> } ] }`,
+`values` = the value checks of the run, an empty array for runs without, e.g. `RIG` `r4`: `exceptions.own` 10000; `null`
+for a run the suite does not define) and `verdict` (`Met`, `Mismatch`, `Inconclusive` or `RigError`, see the exit codes;
+`null` when `expected` is `null`; the actual values are in `result`). For `-Suite L1` every
+run also holds `l1` (see "L1 verdict").
 
 ### `run.cfg`
 
@@ -396,11 +557,38 @@ value or `null`. Only for a suite with per-run expectations (`-Suite RIG`) every
 harness module (`CoherentWarAI.TestHarness`, `TestRig.Harness`), the `SubModules/SubModule/DLLName/@value` entries of its
 installed `SubModule.xml`, in order, de-duplicated case-insensitively. A module with a missing or unparseable
 `SubModule.xml` is skipped (logged); a name that does not match `[A-Za-z0-9_.-]+` (after stripping `.dll`) is skipped
-(logged); no names = no line. The `CoherentWarAI` harness never gets this key (its parser rejects unknown keys).
+(logged); no names = no line. A run with `runs[].ownAssemblies` skips this derivation: exactly that list is written
+(needed e.g. for `TestRig.SelfTest`, which depends on a harness module and so never appears in the derived list). The
+`CoherentWarAI` harness never gets this key (its parser rejects unknown keys).
 
 `scenarios=<comma-separated scenario ids>` - only for harness `TestRig` with run `kind` `scenarios`, taken from
 `runs[].scenarios` (ids contain no `,` or line breaks, see the schema check); soak runs and the `CoherentWarAI`
 harness never get this key. Written after the numeric keys and before `ownAssemblies`.
+
+`health=<comma-separated scenario ids>` (harness `TestRig`, soak runs only; health bracket, F-S6-1) - the agent writes it
+from `runs[].health` (only for harness `TestRig` with run `kind` `soak`; never together with `scenarios`, which the schema
+check already rules out), after the numeric keys and before `ownAssemblies`; without `runs[].health` no line. The harness parses
+it like `scenarios` (trimmed, at least one id, an id twice or the key twice = config error) and rejects it together with
+`scenarios` (config error). The ids are resolved against the discovered scenarios like `scenarios`; an unknown or
+ambiguous id is a config error (`reason` `config:health: unknown scenario id '<id>'`, every expected line below
+`Error`). Flow of the Running phase: health@0 (all health scenarios in order, game time stopped) -> soak (time runs until
+`days`, watchdog and `daysReached` check as in a plain soak) -> health@N (the same scenario instances again, time
+stopped) -> end game. Result lines, in this order: `<id>@0` per id, `soak`, `<id>@<days>` per id (e.g.
+`autotrader.health@0`, `soak`, `autotrader.health@30`); checks carry the same ids in `checks[].scenario`, the
+`daysReached` check belongs to `soak`. A health scenario that yields `Days(n)` ends as `Error` (does not taint). A taint
+in health@0 (throw, timeout) ends the run as `Aborted`, `reason` `tainted:<id>@0`: the rest of health@0, `soak` and all
+of health@N are `Skipped` (no `daysReached` check), no game time runs. A taint in health@N keeps the passed `soak`. A
+stall or budget abort during the soak makes `soak` `Timeout` and health@N `Skipped`; a crash during the soak makes it
+`Failed`. A budget abort during health@N (a running health scenario counts as progress for the stall watchdog) keeps
+the passed `soak`: the current `<id>@<days>` is `Timeout`, the rest of health@N `Skipped`. An abort before the Running phase (e.g. `stall:CharacterCreation`) lists every line
+`Skipped`, `soak` with `seconds` `null`, and no checks (no `daysReached` check). An end-stall after a completed run
+(`status` `Aborted`, `reason` `end-stall`) keeps every line as it was, so `soak` stays `Passed`; this differs from a
+plain soak, whose single `soak` line then reports `Timeout`. `soak.seconds` is the soak segment only; `runningDaysPerRealMinute` covers only the soak segment (health
+time excluded, comparable with a soak without health). An interim `run-result.json` (status `Running`) lists only the
+lines that already have a result. Scenarios read `ctx.Day`: the harness day counter of the current tick (daily ticks
+since the campaign session launched, the counter behind `daysReached`), normally `0` in health@0 and `>= days` in
+health@N; a health scenario can keep state on its instance from the @0 call to the @N call (e.g. a mod-log length,
+F-S6-6). Without `health=` the run is a plain soak, unchanged by this key.
 
 ## `results\<jobId>\done.json`
 
@@ -425,8 +613,10 @@ runs are skipped because the game could not be stopped).
 `0` every run `Completed` and `daysReached >= days` (kind `scenarios`: every requested scenario reported and none
 `Skipped`) - `1` rig or infrastructure error
 (`blocked`, `rejected`, `failed`, `SetupError`, `LaunchFailed`, `CleanupFailed`, transport error,
-open job, a scenario with status `Error`, a `Completed` scenarios run with a missing or `Skipped` requested scenario) - `2` test failure (`NotCompleted`, `Crashed`, `Completed` with too few days,
-a scenario with status `Failed`) -
+open job, a scenario with status `Error`, a `Completed` scenarios run with a missing or `Skipped` requested scenario, a
+`Completed` soak run with a missing, `Skipped` or `Timeout` health line, see "Health lines"; an `ERROR` row of the L1
+verdict) - `2` test failure (`NotCompleted`, `Crashed`, `Completed` with too few days,
+a scenario with status `Failed`, a `Failed` row of the L1 verdict, see "L1 verdict") -
 `3` time limit, hang or agent not responding (`HardTimeout`, `Hung`, `Aborted`, done status `aborted`, claim
 timeout, stale heartbeat, overall deadline; the runner aborts at its deadline and, best effort,
 on a stale heartbeat). Precedence:
@@ -435,9 +625,13 @@ on a stale heartbeat). Precedence:
 string, empty, `null`, non-string) give `1`.
 
 Suites with per-run expectations (`Runs` in the suite definition, e.g. `-Suite RIG`: r1 must end `Crashed`, r2 `Hung`,
-r3 `Completed` with its scenario `Passed`) replace the per-run rules above with a verdict per run: `0` if every run
+r3 and r4 `Completed` with their scenario `Passed`) replace the per-run rules above with a verdict per run: `0` if every run
 meets its expectation (exact `exitClass`; an expected `Completed` also needs every scenario of the run reported
-`Passed`; an expectation with a message pattern also needs the run's `agent-run.json` `message` to match it,
+`Passed` and every value check of the expectation met: the value at that path of `run-result.json` equal to the expected
+number or boolean, e.g. r4 `exceptions.own` 10000, `exceptions.classification.walks` 1000,
+`exceptions.classification.ownExact` `false`; another value is a mismatch, `2`; a missing value or one of another JSON
+type is `RigError`, `1`, the harness did not measure it; an expectation with a message pattern also needs the run's
+`agent-run.json` `message` to match it,
 case-sensitive: r1
 `^(Harness reported: |Crash occurred \(watchdog_log_\d+\.txt\); last line: ).*System\.InvalidOperationException: rig\.selftest-throw`,
 so the crash is the self-test throw (the exception itself under its full type name, as the harness's `FirstChance` and
@@ -447,7 +641,16 @@ whether the harness reported it or the throw escaped to native and the watchdog 
 `1` a run missing from a `completed` job, or an unexpected
 `SetupError`, `LaunchFailed` or `CleanupFailed` - `3` job status `aborted` or the runner's deadline. The job-status
 rules (`blocked`, `rejected`, `failed` = `1`) and the precedence 1 > 3 > 2 > 0 stay. An expected `Crashed` or `Hung`
-is therefore a pass (`0`), not a test failure.
+is therefore a pass (`0`), not a test failure. Every rule of an expected `Completed` is checked, so a `RigError` found
+after a mismatch (e.g. an `Error` row after a `Failed` one, or a missing health line next to a `Failed` one) still
+gives `1`.
+
+For a `soak` run (e.g. `-Suite L1-BASE`) an expected `Completed` also needs `daysReached >= days` (else mismatch, `2`)
+and no `soak` result row `Failed` (mismatch, `2`) or `Error`/unknown (`RigError`, `1`). If it ends `HardTimeout`, `Hung`
+or `Aborted` instead, the verdict is `Inconclusive` (row `INCONCLUSIVE`, exit `3`: a time limit or hang, as without a
+suite), unless a `soak` result row is `Error`/unknown (`RigError`, `1`, as without a suite); a `scenarios` run that ends so instead of its expected class stays a mismatch (`2`; e.g. RIG r2 `HardTimeout`
+instead of `Hung` means the hang detection failed). Such a soak run keeps its `soak` row (`<Suite>-soak`, status and
+days reached, failed checks below it) next to its expectation row; a run without a result shows `?` there.
 
 ## Agent restart
 

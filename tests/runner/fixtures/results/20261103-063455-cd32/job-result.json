@@ -1,0 +1,768 @@
+{
+    "jobId":  "20261103-063455-cd32",
+    "suite":  "L1-BASE",
+    "status":  "completed",
+    "exitCode":  0,
+    "runs":  [
+                 {
+                     "runId":  "r1",
+                     "exitClass":  "Completed",
+                     "result":  {
+                                    "schema":  1,
+                                    "status":  "Completed",
+                                    "reason":  "",
+                                    "seed":  1,
+                                    "mode":  "WarSails",
+                                    "daysRequested":  30,
+                                    "daysReached":  30,
+                                    "realSeconds":  100,
+                                    "gameDaysPerRealMinute":  18.09,
+                                    "runningDaysPerRealMinute":  22.26,
+                                    "playerMapEvents":  0,
+                                    "modules":  [
+                                                    {
+                                                        "id":  "Bannerlord.Harmony",
+                                                        "version":  "v2.4.2"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.ButterLib",
+                                                        "version":  "v2.12.0"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.UIExtenderEx",
+                                                        "version":  "v3.0.3"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.MBOptionScreen",
+                                                        "version":  "v5.12.3"
+                                                    },
+                                                    {
+                                                        "id":  "Native",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "SandBoxCore",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "Sandbox",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "StoryMode",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "NavalDLC",
+                                                        "version":  "v1.2.8"
+                                                    },
+                                                    {
+                                                        "id":  "TestRig.Harness",
+                                                        "version":  "v1.4.8"
+                                                    }
+                                                ],
+                                    "exceptions":  {
+                                                       "total":  0,
+                                                       "own":  0,
+                                                       "harness":  0,
+                                                       "vanilla":  0,
+                                                       "unhandled":  0,
+                                                       "classification":  {
+                                                                              "walks":  0,
+                                                                              "walkMs":  0.00,
+                                                                              "handlerMs":  0.00,
+                                                                              "maxHandlerMs":  0.00,
+                                                                              "ownExact":  true
+                                                                          },
+                                                       "top":  [
+
+                                                               ]
+                                                   },
+                                    "scenarios":  [
+                                                      {
+                                                          "id":  "soak",
+                                                          "status":  "Passed",
+                                                          "seconds":  100
+                                                      }
+                                                  ],
+                                    "checks":  [
+                                                   {
+                                                       "scenario":  "soak",
+                                                       "name":  "daysReached",
+                                                       "expected":  "\u003e= 30",
+                                                       "actual":  "30",
+                                                       "passed":  true
+                                                   }
+                                               ]
+                                },
+                     "gameVersion":  "v1.4.8",
+                     "moduleVersions":  [
+                                            {
+                                                "id":  "Bannerlord.Harmony",
+                                                "version":  "v2.4.2.248",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.ButterLib",
+                                                "version":  "v2.12.0",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.UIExtenderEx",
+                                                "version":  "v3.0.3",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.MBOptionScreen",
+                                                "version":  "v5.12.3",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Native",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "SandBoxCore",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Sandbox",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "StoryMode",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "NavalDLC",
+                                                "version":  "v1.2.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "TestRig.Harness",
+                                                "version":  "v1.4.8",
+                                                "source":  "package"
+                                            }
+                                        ],
+                     "expected":  {
+                                      "exitClass":  "Completed",
+                                      "messagePattern":  null
+                                  },
+                     "verdict":  "Met"
+                 },
+                 {
+                     "runId":  "r2",
+                     "exitClass":  "Completed",
+                     "result":  {
+                                    "schema":  1,
+                                    "status":  "Completed",
+                                    "reason":  "",
+                                    "seed":  1,
+                                    "mode":  "WarSails",
+                                    "daysRequested":  30,
+                                    "daysReached":  30,
+                                    "realSeconds":  100,
+                                    "gameDaysPerRealMinute":  17.95,
+                                    "runningDaysPerRealMinute":  22.26,
+                                    "playerMapEvents":  0,
+                                    "modules":  [
+                                                    {
+                                                        "id":  "Bannerlord.Harmony",
+                                                        "version":  "v2.4.2"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.ButterLib",
+                                                        "version":  "v2.12.0"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.UIExtenderEx",
+                                                        "version":  "v3.0.3"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.MBOptionScreen",
+                                                        "version":  "v5.12.3"
+                                                    },
+                                                    {
+                                                        "id":  "Native",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "SandBoxCore",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "Sandbox",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "StoryMode",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "NavalDLC",
+                                                        "version":  "v1.2.8"
+                                                    },
+                                                    {
+                                                        "id":  "TestRig.Harness",
+                                                        "version":  "v1.4.8"
+                                                    }
+                                                ],
+                                    "exceptions":  {
+                                                       "total":  0,
+                                                       "own":  0,
+                                                       "harness":  0,
+                                                       "vanilla":  0,
+                                                       "unhandled":  0,
+                                                       "classification":  {
+                                                                              "walks":  0,
+                                                                              "walkMs":  0.00,
+                                                                              "handlerMs":  0.00,
+                                                                              "maxHandlerMs":  0.00,
+                                                                              "ownExact":  true
+                                                                          },
+                                                       "top":  [
+
+                                                               ]
+                                                   },
+                                    "scenarios":  [
+                                                      {
+                                                          "id":  "soak",
+                                                          "status":  "Passed",
+                                                          "seconds":  100
+                                                      }
+                                                  ],
+                                    "checks":  [
+                                                   {
+                                                       "scenario":  "soak",
+                                                       "name":  "daysReached",
+                                                       "expected":  "\u003e= 30",
+                                                       "actual":  "30",
+                                                       "passed":  true
+                                                   }
+                                               ]
+                                },
+                     "gameVersion":  "v1.4.8",
+                     "moduleVersions":  [
+                                            {
+                                                "id":  "Bannerlord.Harmony",
+                                                "version":  "v2.4.2.248",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.ButterLib",
+                                                "version":  "v2.12.0",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.UIExtenderEx",
+                                                "version":  "v3.0.3",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.MBOptionScreen",
+                                                "version":  "v5.12.3",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Native",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "SandBoxCore",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Sandbox",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "StoryMode",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "NavalDLC",
+                                                "version":  "v1.2.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "TestRig.Harness",
+                                                "version":  "v1.4.8",
+                                                "source":  "package"
+                                            }
+                                        ],
+                     "expected":  {
+                                      "exitClass":  "Completed",
+                                      "messagePattern":  null
+                                  },
+                     "verdict":  "Met"
+                 },
+                 {
+                     "runId":  "r3",
+                     "exitClass":  "Completed",
+                     "result":  {
+                                    "schema":  1,
+                                    "status":  "Completed",
+                                    "reason":  "",
+                                    "seed":  1,
+                                    "mode":  "WarSails",
+                                    "daysRequested":  30,
+                                    "daysReached":  30,
+                                    "realSeconds":  100,
+                                    "gameDaysPerRealMinute":  18.04,
+                                    "runningDaysPerRealMinute":  22.23,
+                                    "playerMapEvents":  0,
+                                    "modules":  [
+                                                    {
+                                                        "id":  "Bannerlord.Harmony",
+                                                        "version":  "v2.4.2"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.ButterLib",
+                                                        "version":  "v2.12.0"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.UIExtenderEx",
+                                                        "version":  "v3.0.3"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.MBOptionScreen",
+                                                        "version":  "v5.12.3"
+                                                    },
+                                                    {
+                                                        "id":  "Native",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "SandBoxCore",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "Sandbox",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "StoryMode",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "NavalDLC",
+                                                        "version":  "v1.2.8"
+                                                    },
+                                                    {
+                                                        "id":  "TestRig.Harness",
+                                                        "version":  "v1.4.8"
+                                                    }
+                                                ],
+                                    "exceptions":  {
+                                                       "total":  6,
+                                                       "own":  0,
+                                                       "harness":  0,
+                                                       "vanilla":  6,
+                                                       "unhandled":  0,
+                                                       "classification":  {
+                                                                              "walks":  0,
+                                                                              "walkMs":  0.00,
+                                                                              "handlerMs":  1.99,
+                                                                              "maxHandlerMs":  1.72,
+                                                                              "ownExact":  true
+                                                                          },
+                                                       "top":  [
+                                                                   {
+                                                                       "key":  "System.Net.WebException: The remote name could not be resolved: \u0027taleworldswebsiteassets.blob.core.windows.net\u0027 @ System.Net.ServicePoint.GetConnection",
+                                                                       "count":  4
+                                                                   },
+                                                                   {
+                                                                       "key":  "System.Net.Http.HttpRequestException: An error occurred while sending the request. @ System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw",
+                                                                       "count":  2
+                                                                   }
+                                                               ]
+                                                   },
+                                    "scenarios":  [
+                                                      {
+                                                          "id":  "soak",
+                                                          "status":  "Passed",
+                                                          "seconds":  100
+                                                      }
+                                                  ],
+                                    "checks":  [
+                                                   {
+                                                       "scenario":  "soak",
+                                                       "name":  "daysReached",
+                                                       "expected":  "\u003e= 30",
+                                                       "actual":  "30",
+                                                       "passed":  true
+                                                   }
+                                               ]
+                                },
+                     "gameVersion":  "v1.4.8",
+                     "moduleVersions":  [
+                                            {
+                                                "id":  "Bannerlord.Harmony",
+                                                "version":  "v2.4.2.248",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.ButterLib",
+                                                "version":  "v2.12.0",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.UIExtenderEx",
+                                                "version":  "v3.0.3",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.MBOptionScreen",
+                                                "version":  "v5.12.3",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Native",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "SandBoxCore",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Sandbox",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "StoryMode",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "NavalDLC",
+                                                "version":  "v1.2.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "TestRig.Harness",
+                                                "version":  "v1.4.8",
+                                                "source":  "package"
+                                            }
+                                        ],
+                     "expected":  {
+                                      "exitClass":  "Completed",
+                                      "messagePattern":  null
+                                  },
+                     "verdict":  "Met"
+                 },
+                 {
+                     "runId":  "r4",
+                     "exitClass":  "Completed",
+                     "result":  {
+                                    "schema":  1,
+                                    "status":  "Completed",
+                                    "reason":  "",
+                                    "seed":  2,
+                                    "mode":  "WarSails",
+                                    "daysRequested":  30,
+                                    "daysReached":  30,
+                                    "realSeconds":  100,
+                                    "gameDaysPerRealMinute":  18.03,
+                                    "runningDaysPerRealMinute":  22.27,
+                                    "playerMapEvents":  0,
+                                    "modules":  [
+                                                    {
+                                                        "id":  "Bannerlord.Harmony",
+                                                        "version":  "v2.4.2"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.ButterLib",
+                                                        "version":  "v2.12.0"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.UIExtenderEx",
+                                                        "version":  "v3.0.3"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.MBOptionScreen",
+                                                        "version":  "v5.12.3"
+                                                    },
+                                                    {
+                                                        "id":  "Native",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "SandBoxCore",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "Sandbox",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "StoryMode",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "NavalDLC",
+                                                        "version":  "v1.2.8"
+                                                    },
+                                                    {
+                                                        "id":  "TestRig.Harness",
+                                                        "version":  "v1.4.8"
+                                                    }
+                                                ],
+                                    "exceptions":  {
+                                                       "total":  0,
+                                                       "own":  0,
+                                                       "harness":  0,
+                                                       "vanilla":  0,
+                                                       "unhandled":  0,
+                                                       "classification":  {
+                                                                              "walks":  0,
+                                                                              "walkMs":  0.00,
+                                                                              "handlerMs":  0.00,
+                                                                              "maxHandlerMs":  0.00,
+                                                                              "ownExact":  true
+                                                                          },
+                                                       "top":  [
+
+                                                               ]
+                                                   },
+                                    "scenarios":  [
+                                                      {
+                                                          "id":  "soak",
+                                                          "status":  "Passed",
+                                                          "seconds":  100
+                                                      }
+                                                  ],
+                                    "checks":  [
+                                                   {
+                                                       "scenario":  "soak",
+                                                       "name":  "daysReached",
+                                                       "expected":  "\u003e= 30",
+                                                       "actual":  "30",
+                                                       "passed":  true
+                                                   }
+                                               ]
+                                },
+                     "gameVersion":  "v1.4.8",
+                     "moduleVersions":  [
+                                            {
+                                                "id":  "Bannerlord.Harmony",
+                                                "version":  "v2.4.2.248",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.ButterLib",
+                                                "version":  "v2.12.0",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.UIExtenderEx",
+                                                "version":  "v3.0.3",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.MBOptionScreen",
+                                                "version":  "v5.12.3",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Native",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "SandBoxCore",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Sandbox",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "StoryMode",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "NavalDLC",
+                                                "version":  "v1.2.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "TestRig.Harness",
+                                                "version":  "v1.4.8",
+                                                "source":  "package"
+                                            }
+                                        ],
+                     "expected":  {
+                                      "exitClass":  "Completed",
+                                      "messagePattern":  null
+                                  },
+                     "verdict":  "Met"
+                 },
+                 {
+                     "runId":  "r5",
+                     "exitClass":  "Completed",
+                     "result":  {
+                                    "schema":  1,
+                                    "status":  "Completed",
+                                    "reason":  "",
+                                    "seed":  3,
+                                    "mode":  "WarSails",
+                                    "daysRequested":  30,
+                                    "daysReached":  30,
+                                    "realSeconds":  100,
+                                    "gameDaysPerRealMinute":  18.07,
+                                    "runningDaysPerRealMinute":  22.26,
+                                    "playerMapEvents":  0,
+                                    "modules":  [
+                                                    {
+                                                        "id":  "Bannerlord.Harmony",
+                                                        "version":  "v2.4.2"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.ButterLib",
+                                                        "version":  "v2.12.0"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.UIExtenderEx",
+                                                        "version":  "v3.0.3"
+                                                    },
+                                                    {
+                                                        "id":  "Bannerlord.MBOptionScreen",
+                                                        "version":  "v5.12.3"
+                                                    },
+                                                    {
+                                                        "id":  "Native",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "SandBoxCore",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "Sandbox",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "StoryMode",
+                                                        "version":  "v1.4.8"
+                                                    },
+                                                    {
+                                                        "id":  "NavalDLC",
+                                                        "version":  "v1.2.8"
+                                                    },
+                                                    {
+                                                        "id":  "TestRig.Harness",
+                                                        "version":  "v1.4.8"
+                                                    }
+                                                ],
+                                    "exceptions":  {
+                                                       "total":  0,
+                                                       "own":  0,
+                                                       "harness":  0,
+                                                       "vanilla":  0,
+                                                       "unhandled":  0,
+                                                       "classification":  {
+                                                                              "walks":  0,
+                                                                              "walkMs":  0.00,
+                                                                              "handlerMs":  0.00,
+                                                                              "maxHandlerMs":  0.00,
+                                                                              "ownExact":  true
+                                                                          },
+                                                       "top":  [
+
+                                                               ]
+                                                   },
+                                    "scenarios":  [
+                                                      {
+                                                          "id":  "soak",
+                                                          "status":  "Passed",
+                                                          "seconds":  100
+                                                      }
+                                                  ],
+                                    "checks":  [
+                                                   {
+                                                       "scenario":  "soak",
+                                                       "name":  "daysReached",
+                                                       "expected":  "\u003e= 30",
+                                                       "actual":  "30",
+                                                       "passed":  true
+                                                   }
+                                               ]
+                                },
+                     "gameVersion":  "v1.4.8",
+                     "moduleVersions":  [
+                                            {
+                                                "id":  "Bannerlord.Harmony",
+                                                "version":  "v2.4.2.248",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.ButterLib",
+                                                "version":  "v2.12.0",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.UIExtenderEx",
+                                                "version":  "v3.0.3",
+                                                "source":  "workshop"
+                                            },
+                                            {
+                                                "id":  "Bannerlord.MBOptionScreen",
+                                                "version":  "v5.12.3",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Native",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "SandBoxCore",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "Sandbox",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "StoryMode",
+                                                "version":  "v1.4.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "NavalDLC",
+                                                "version":  "v1.2.8",
+                                                "source":  "game"
+                                            },
+                                            {
+                                                "id":  "TestRig.Harness",
+                                                "version":  "v1.4.8",
+                                                "source":  "package"
+                                            }
+                                        ],
+                     "expected":  {
+                                      "exitClass":  "Completed",
+                                      "messagePattern":  null
+                                  },
+                     "verdict":  "Met"
+                 }
+             ],
+    "versionWarnings":  [
+                            "WARN version differs: Bannerlord.UIExtenderEx tower v3.0.2, .20 v3.0.3"
+                        ]
+}

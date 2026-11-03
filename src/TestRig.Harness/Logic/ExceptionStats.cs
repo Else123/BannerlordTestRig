@@ -5,7 +5,9 @@ namespace TestRig.Harness.Logic
 {
     /// <summary>
     /// Run-wide exception counters for run-result.json. Unlike <see cref="ExceptionLogBudget"/> it
-    /// never starts a new window: it covers the whole run. Not thread-safe; the caller serializes.
+    /// never starts a new window: it covers the whole run. It also holds the run's
+    /// <see cref="OwnCache"/> and the handler timing, so one summary reports the counts together with
+    /// the cost and accuracy of their classification. Not thread-safe; the caller serializes.
     /// </summary>
     public sealed class ExceptionStats
     {
@@ -17,13 +19,20 @@ namespace TestRig.Harness.Logic
         /// </summary>
         public const int DefaultMaxTrackedKeys = 10000;
 
+        /// <summary>Simple-name prefix of the rig's own assemblies (TestRig.Harness, TestRig.SelfTest).</summary>
+        public const string HarnessAssemblyPrefix = "TestRig.";
+
         private readonly Dictionary<string, int> _counts = new Dictionary<string, int>(StringComparer.Ordinal);
         private readonly int _maxTrackedKeys;
         private int _total;
         private int _own;
+        private int _harness;
         private int _unhandled;
+        private double _handlerMs;
+        private double _walkMs;
+        private double _maxHandlerMs;
 
-        public ExceptionStats(int maxTrackedKeys = DefaultMaxTrackedKeys)
+        public ExceptionStats(int maxTrackedKeys = DefaultMaxTrackedKeys, int maxWalks = OwnClassificationCache.DefaultMaxWalks)
         {
             if (maxTrackedKeys < 0)
             {
@@ -31,15 +40,36 @@ namespace TestRig.Harness.Logic
             }
 
             _maxTrackedKeys = maxTrackedKeys;
+            OwnCache = new OwnClassificationCache(maxWalks);
         }
 
-        /// <summary>Records one first-chance exception; <paramref name="own"/> per <see cref="OwnAssemblyClassifier"/>.</summary>
-        public void RecordFirstChance(string key, bool own)
+        /// <summary>Walk budget and per-key fallback of the own classification; its walks and exactness enter <see cref="Summary"/>.</summary>
+        public OwnClassificationCache OwnCache { get; }
+
+        /// <summary>
+        /// Whether an assembly simple name belongs to the rig itself ("TestRig." prefix, case-insensitive).
+        /// An exception whose throw site lies in such an assembly counts as harness unless it is own.
+        /// </summary>
+        public static bool IsHarnessAssembly(string simpleName)
+        {
+            return simpleName != null && simpleName.StartsWith(HarnessAssemblyPrefix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Records one first-chance exception: <paramref name="own"/> per <see cref="OwnAssemblyClassifier"/>,
+        /// <paramref name="harness"/> when its throw site is in a harness assembly (<see cref="IsHarnessAssembly"/>).
+        /// Own wins, so own, harness and vanilla partition the total.
+        /// </summary>
+        public void RecordFirstChance(string key, bool own, bool harness = false)
         {
             _total++;
             if (own)
             {
                 _own++;
+            }
+            else if (harness)
+            {
+                _harness++;
             }
 
             string safeKey = key ?? string.Empty;
@@ -59,6 +89,30 @@ namespace TestRig.Harness.Logic
             _unhandled++;
         }
 
+        /// <summary>
+        /// Records the time one first-chance handler call spent classifying and counting;
+        /// <paramref name="walked"/> when the call was granted a walk (<see cref="OwnLookup.Walk"/>),
+        /// whether or not the walk succeeded.
+        /// </summary>
+        public void RecordHandlerTime(double milliseconds, bool walked = false)
+        {
+            if (!(milliseconds >= 0) || double.IsInfinity(milliseconds))
+            {
+                throw new ArgumentOutOfRangeException(nameof(milliseconds), "Must be finite and not negative.");
+            }
+
+            _handlerMs += milliseconds;
+            if (walked)
+            {
+                _walkMs += milliseconds;
+            }
+
+            if (milliseconds > _maxHandlerMs)
+            {
+                _maxHandlerMs = milliseconds;
+            }
+        }
+
         /// <summary>Snapshot: later records do not change the returned summary.</summary>
         public ExceptionSummary Summary()
         {
@@ -76,7 +130,8 @@ namespace TestRig.Harness.Logic
                 top[i] = new ExceptionKeyCount(entries[i].Key, entries[i].Value);
             }
 
-            return new ExceptionSummary(_total, _own, _unhandled, top);
+            var classification = new ClassificationSummary(OwnCache.Walks, _walkMs, _handlerMs, _maxHandlerMs, OwnCache.OwnExact);
+            return new ExceptionSummary(_total, _own, _harness, _unhandled, top, classification);
         }
     }
 

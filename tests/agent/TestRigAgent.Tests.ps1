@@ -432,6 +432,114 @@ Describe 'run.cfg scenarios line (S4)' {
     }
 }
 
+Describe 'Test-JobSchema: health (S6)' {
+    # $HealthJson (raw JSON text) is spliced into the run object as "health"; $ScenariosJson likewise as "scenarios".
+    function New-HealthJob([string]$Kind, $HealthJson, [string]$Harness = 'TestRig', $ScenariosJson = $null) {
+        $extra = ',"health":' + $HealthJson
+        if ($null -ne $ScenariosJson) { $extra += ',"scenarios":' + $ScenariosJson }
+        return ('{"schema":1,"jobId":"20261103-120000-aaaa","createdUtc":"x","package":{"file":"package.zip","sha256":"' + ('A' * 64) + '"},"modules":["Native"],"runs":[{"runId":"r1","kind":"' + $Kind + '","harness":"' + $Harness + '","seed":1,"days":30,"mode":"WarSails","stallMinutes":5,"budgetMinutes":60,"hardTimeoutMinutes":20' + $extra + '}]}') | ConvertFrom-Json
+    }
+    function Get-SchemaErrors($Job) { @(Test-JobSchema $Job '20261103-120000-aaaa') }
+
+    It 'accepts a TestRig soak run with health ids (also a single one)' {
+        (Get-SchemaErrors (New-HealthJob 'soak' '["coherentwarai.health","autotrader.health"]')).Count | Should Be 0
+        (Get-SchemaErrors (New-HealthJob 'soak' '["autotrader.health"]')).Count | Should Be 0
+    }
+    It 'rejects health with the CoherentWarAI harness' {
+        (Get-SchemaErrors (New-HealthJob 'soak' '["autotrader.health"]' 'CoherentWarAI')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects health on a scenarios run (also next to valid scenarios)' {
+        (Get-SchemaErrors (New-HealthJob 'scenarios' '["autotrader.health"]' 'TestRig' '["a.one"]')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects an empty, non-array or non-string health list' {
+        foreach ($bad in '[]', '"autotrader.health"', '[1]', '[null]', '[""]', 'null') {
+            (Get-SchemaErrors (New-HealthJob 'soak' $bad)).Count | Should BeGreaterThan 0
+        }
+    }
+    It 'rejects health ids outside ^[A-Za-z0-9._-]+$ and duplicates' {
+        foreach ($bad in '["a,b"]', '["a b"]', '["a\nb=1"]', '["a@0"]', '["a","a"]') {
+            (Get-SchemaErrors (New-HealthJob 'soak' $bad)).Count | Should BeGreaterThan 0
+        }
+    }
+}
+
+Describe 'run.cfg health line (S6)' {
+    $base = "seed=7`ndays=30`nmode=WarSails`nstallMinutes=5`nbudgetMinutes=60`n"
+    function New-HealthCfgRun([string]$Harness, [string]$Kind, $Health) {
+        $r = [pscustomobject]@{ runId = 'r1'; kind = $Kind; harness = $Harness; seed = 7; days = 30; mode = 'WarSails'; stallMinutes = 5; budgetMinutes = 60; hardTimeoutMinutes = 20 }
+        if ($null -ne $Health) { $r | Add-Member -NotePropertyName health -NotePropertyValue $Health }
+        return $r
+    }
+    It 'writes health=<id>,<id> for TestRig + kind soak, before ownAssemblies' {
+        $run = New-HealthCfgRun 'TestRig' 'soak' @('coherentwarai.health', 'autotrader.health')
+        Get-RunCfgText $run -OwnAssemblies @('A') | Should Be ($base + "health=coherentwarai.health,autotrader.health`nownAssemblies=A`n")
+    }
+    It 'writes a single health id without a comma' {
+        Get-RunCfgText (New-HealthCfgRun 'TestRig' 'soak' @('autotrader.health')) | Should Be ($base + "health=autotrader.health`n")
+    }
+    It 'never writes health for the CoherentWarAI harness or a scenarios run' {
+        Get-RunCfgText (New-HealthCfgRun 'CoherentWarAI' 'soak' @('autotrader.health')) | Should Be $base
+        $scenariosRun = New-HealthCfgRun 'TestRig' 'scenarios' @('autotrader.health')
+        $scenariosRun | Add-Member -NotePropertyName scenarios -NotePropertyValue @('a.one')
+        Get-RunCfgText $scenariosRun | Should Be ($base + "scenarios=a.one`n")
+    }
+    It 'writes no health line for a soak run without health' {
+        Get-RunCfgText (New-HealthCfgRun 'TestRig' 'soak' $null) | Should Be $base
+    }
+}
+
+Describe 'Test-JobSchema: ownAssemblies' {
+    # $OwnJson (raw JSON text) is spliced into the run object as "ownAssemblies"; $null leaves the field out.
+    function New-OwnJob([string]$Kind, $OwnJson, [string]$Harness = 'TestRig') {
+        $extra = ''
+        if ($null -ne $OwnJson) { $extra += ',"ownAssemblies":' + $OwnJson }
+        if ($Kind -eq 'scenarios') { $extra += ',"scenarios":["a.one"]' }
+        return ('{"schema":1,"jobId":"20261103-120000-aaaa","createdUtc":"x","package":{"file":"package.zip","sha256":"' + ('A' * 64) + '"},"modules":["Native"],"runs":[{"runId":"r1","kind":"' + $Kind + '","harness":"' + $Harness + '","seed":1,"days":30,"mode":"WarSails","stallMinutes":5,"budgetMinutes":60,"hardTimeoutMinutes":20' + $extra + '}]}') | ConvertFrom-Json
+    }
+    function Get-SchemaErrors($Job) { @(Test-JobSchema $Job '20261103-120000-aaaa') }
+
+    It 'accepts a missing field' {
+        (Get-SchemaErrors (New-OwnJob 'soak' $null)).Count | Should Be 0
+    }
+    It 'accepts ids on a TestRig soak and scenarios run (also a single one)' {
+        (Get-SchemaErrors (New-OwnJob 'soak' '["TestRig.SelfTest"]')).Count | Should Be 0
+        (Get-SchemaErrors (New-OwnJob 'soak' '["CoherentWarAI","Extra_1"]')).Count | Should Be 0
+        (Get-SchemaErrors (New-OwnJob 'scenarios' '["TestRig.SelfTest"]')).Count | Should Be 0
+    }
+    It 'rejects the field with the CoherentWarAI harness' {
+        (Get-SchemaErrors (New-OwnJob 'soak' '["A"]' 'CoherentWarAI')).Count | Should BeGreaterThan 0
+    }
+    It 'rejects an empty, non-array or non-string list' {
+        foreach ($bad in '[]', '"TestRig.SelfTest"', '[1]', '[null]', '[""]', 'null') {
+            (Get-SchemaErrors (New-OwnJob 'soak' $bad)).Count | Should BeGreaterThan 0
+        }
+    }
+    It 'rejects ids outside ^[A-Za-z0-9._-]+$ and duplicates' {
+        foreach ($bad in '["a,b"]', '["a b"]', '["a\nb=1"]', '["a.dll/x"]', '["A","A"]') {
+            (Get-SchemaErrors (New-OwnJob 'soak' $bad)).Count | Should BeGreaterThan 0
+        }
+    }
+}
+
+Describe 'run.cfg ownAssemblies from the job' {
+    $base = "seed=7`ndays=30`nmode=WarSails`nstallMinutes=5`nbudgetMinutes=60`n"
+    function New-OwnCfgRun([string]$Harness, $Own) {
+        $r = [pscustomobject]@{ runId = 'r1'; kind = 'soak'; harness = $Harness; seed = 7; days = 30; mode = 'WarSails'; stallMinutes = 5; budgetMinutes = 60; hardTimeoutMinutes = 20 }
+        if ($null -ne $Own) { $r | Add-Member -NotePropertyName ownAssemblies -NotePropertyValue $Own }
+        return $r
+    }
+    It 'writes the job list instead of the derived one' {
+        Get-RunCfgText (New-OwnCfgRun 'TestRig' @('TestRig.SelfTest')) -OwnAssemblies @('A', 'B') | Should Be ($base + "ownAssemblies=TestRig.SelfTest`n")
+        Get-RunCfgText (New-OwnCfgRun 'TestRig' @('X', 'Y')) | Should Be ($base + "ownAssemblies=X,Y`n")
+    }
+    It 'keeps the derived list without the field' {
+        Get-RunCfgText (New-OwnCfgRun 'TestRig' $null) -OwnAssemblies @('A', 'B') | Should Be ($base + "ownAssemblies=A,B`n")
+    }
+    It 'never writes the field for the CoherentWarAI harness' {
+        Get-RunCfgText (New-OwnCfgRun 'CoherentWarAI' @('X')) | Should Be $base
+    }
+}
+
 Describe 'run.cfg and launch arguments' {
     $run = [pscustomobject]@{ runId = 'r1'; seed = 7; days = 3; mode = 'NoDlc'; stallMinutes = 5; budgetMinutes = 60.5; hardTimeoutMinutes = 20 }
     It 'builds run.cfg with LF line endings and invariant numbers' {
@@ -545,6 +653,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
         Remove-Item Env:\FAKEGAME_HARNESS -ErrorAction SilentlyContinue
         Remove-Item Env:\FAKEGAME_NOMODLOG -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_MODLOGS -ErrorAction SilentlyContinue
     }
 
     It 'completes: installs, patches, runs, collects and writes done.json last' {
@@ -757,6 +866,48 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
         $run.artifacts -contains 'CoherentWarAI.log' | Should Be $false
         $run.artifacts -contains 'run-result.json' | Should Be $true
+        foreach ($name in @('AutoTrader.log', 'smithingsuite.log', 'companion-suite.log')) {   # missing mod logs are no error
+            $run.artifacts -contains $name | Should Be $false
+        }
+    }
+
+    It 'collects the logs of AutoTraderSpeed, SmithingSuite and CompanionManagementSuite' {
+        $env:FAKEGAME_MODLOGS = '1'
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestRigHarnessJob $rig
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $runDir = Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1'
+        $run = Get-Content -Raw (Join-Path $runDir 'agent-run.json') | ConvertFrom-Json
+        $expected = [ordered]@{
+            'AutoTrader.log'      = 'Configs\AutoTrader.log'
+            'smithingsuite.log'   = 'SmithingSuite\smithingsuite.log'
+            'companion-suite.log' = 'CompanionManagementSuite\companion-suite.log'
+        }
+        foreach ($name in $expected.Keys) {
+            $run.artifacts -contains $name | Should Be $true
+            [System.IO.File]::ReadAllText((Join-Path $runDir $name)) | Should Be "fake $($expected[$name])`r`n"
+        }
+    }
+
+    It 'does not copy a mod log last written before the run started (stale log of an earlier session)' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $stale = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\Configs\AutoTrader.log'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $stale) -Force | Out-Null
+        [System.IO.File]::WriteAllText($stale, "stale`r`n", $utf8NoBom)
+        [System.IO.File]::SetLastWriteTimeUtc($stale, [datetime]::UtcNow.AddDays(-1))
+        $null = New-TestRigHarnessJob $rig
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $runDir = Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1'
+        $run = Get-Content -Raw (Join-Path $runDir 'agent-run.json') | ConvertFrom-Json
+        $run.artifacts -contains 'AutoTrader.log' | Should Be $false
+        Test-Path (Join-Path $runDir 'AutoTrader.log') | Should Be $false
+        $run.artifacts -contains 'run-result.json' | Should Be $true
     }
 
     It 'processes one job with Invoke-AgentMain -Once' {
@@ -935,6 +1086,26 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
         $run.artifacts -contains 'result.txt' | Should Be $false
         Test-Path (Join-Path (Get-TrDir $rig) 'run-result.json.tmp') | Should Be $false
     }
+    It 'writes the health line of a soak run to run.cfg and collects the health bracket lines (S6)' {
+        $env:FAKEGAME_BEHAVIOR = 'complete'
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $null = New-TestJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml') -Mutate {
+            param($j)
+            $j['runs'][0]['harness'] = 'TestRig'
+            $j['runs'][0]['days'] = 2
+            $j['runs'][0]['health'] = @('coherentwarai.health', 'autotrader.health')
+            $j['modules'] = @('Native', 'CoherentWarAI', 'TestRig.Harness')
+        }
+        (Invoke-AgentCycle -Config (Get-ConfigFor $rig)) | Should Be $true
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        $cfgLines = @((Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) -split "`n")
+        ($cfgLines -contains 'health=coherentwarai.health,autotrader.health') | Should Be $true
+        ($cfgLines -contains 'days=2') | Should Be $true
+        $json = Get-Content -Raw (Join-Path (Get-RunDir $rig) 'run-result.json') | ConvertFrom-Json
+        (@($json.scenarios | ForEach-Object { $_.id }) -join ' ') | Should Be 'coherentwarai.health@0 autotrader.health@0 soak coherentwarai.health@2 autotrader.health@2'
+    }
     It 'falls back to result.txt for a TestRig run without run-result.json' {
         $rig = Start-TrRig 'txtonly'
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
@@ -982,6 +1153,22 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-ownassemblies.txt')).Trim() | Should Be 'ownAssemblies=CoherentWarAI,Extra'
+    }
+    It 'writes exactly runs[].ownAssemblies instead of the derived list (TestRig.SelfTest depends on the harness)' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $env:FAKEGAME_HARNESS = 'TestRig'
+        $jobDir = New-TestJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml') -Mutate {
+            param($j)
+            $j['runs'][0]['harness'] = 'TestRig'
+            $j['runs'][0]['ownAssemblies'] = @('TestRig.SelfTest')
+            $j['modules'] = @('Native', 'CoherentWarAI', 'TestRig.Harness')
+        }
+        Set-JobPackageWithValidXml $jobDir
+
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+        (Get-Content -Raw (Join-Path $rig.Docs 'fake-ownassemblies.txt')).Trim() | Should Be 'ownAssemblies=TestRig.SelfTest'
     }
     It 'does not give the CoherentWarAI harness an ownAssemblies line' {
         $rig = New-Rig
