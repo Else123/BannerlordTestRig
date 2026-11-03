@@ -2,7 +2,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $here '..\..\runner\Invoke-TestRig.ps1')
 
 # L1 verdict on the run's measurements (#21): own, unhandled, vanilla vs. baseline threshold, tempo vs. baseline median,
-# modules vs. job.modules, playerMapEvents (warning only), and the baseline file runner/baselines/L1.json.
+# modules vs. job.modules, playerMapEvents and ownExact (warnings only), and the baseline file runner/baselines/L1.json.
 
 $script:verdictModules = @('Native', 'SandBoxCore', 'CoherentWarAI', 'TestRig.Harness')
 
@@ -16,11 +16,15 @@ function New-VerdictTempDir {
 function New-L1ResultJson {
     param(
         [string]$Own = '0', [string]$Unhandled = '0', [string]$Vanilla = '0', [string]$Tempo = '18.17', [string]$MapEvents = '3',
-        [string[]]$Modules = $script:verdictModules, [switch]$NoExceptions, [switch]$NoModules, [string]$ScenariosJson = ''
+        [string[]]$Modules = $script:verdictModules, [switch]$NoExceptions, [switch]$NoModules, [string]$ScenariosJson = '',
+        [string]$OwnExact = 'true', [switch]$NoClassification
     )
     $modulesJson = '[' + (@($Modules | ForEach-Object { '{"id":"' + $_ + '","version":"v1.4.8"}' }) -join ',') + ']'
+    $classificationJson = if ($NoClassification) { '' } else {
+        ',"classification":{"walks":0,"walkMs":0.00,"handlerMs":0.00,"maxHandlerMs":0.00,"ownExact":' + $OwnExact + '}'
+    }
     $exceptionsJson = '{"total":0,"own":' + $Own + ',"harness":0,"vanilla":' + $Vanilla + ',"unhandled":' + $Unhandled +
-        ',"classification":{"walks":0,"walkMs":0.00,"handlerMs":0.00,"maxHandlerMs":0.00,"ownExact":true},"top":[]}'
+        $classificationJson + ',"top":[]}'
     $text = '{"schema":1,"status":"Completed","seed":1,"daysRequested":3,"daysReached":3,"gameDaysPerRealMinute":5.36,' +
         '"runningDaysPerRealMinute":' + $Tempo + ',"playerMapEvents":' + $MapEvents
     if (-not $NoModules) { $text += ',"modules":' + $modulesJson }
@@ -126,10 +130,10 @@ Describe 'Get-RigL1Verdict' {
         Get-RigL1Verdict -RunId r1 -Result (New-L1Result $Arguments) -ExpectedModules $Expected -GameVersion $GameVersion -Baseline $Baseline
     }
 
-    It 'all values within the rules: Met, every check Passed (six checks in a fixed order)' {
+    It 'all values within the rules: Met, every check Passed (seven checks in a fixed order)' {
         $v = Judge @{ Tempo = '10.00'; Vanilla = '0' }
         $v.Outcome | Should Be 'Met'
-        (@($v.Checks | ForEach-Object { $_.name }) -join ',') | Should Be 'own,unhandled,vanilla,tempo,modules,playerMapEvents'
+        (@($v.Checks | ForEach-Object { $_.name }) -join ',') | Should Be 'own,unhandled,vanilla,tempo,modules,playerMapEvents,ownExact'
         foreach ($c in $v.Checks) { $c.status | Should Be 'Passed' }
         @($v.Warnings).Count | Should Be 0
     }
@@ -246,6 +250,30 @@ Describe 'Get-RigL1Verdict' {
         (Get-Check $v 'playerMapEvents').status | Should Be 'Warn'
         @($v.Warnings | Where-Object { $_ -match '^WARN L1 r1 playerMapEvents is 0' }).Count | Should Be 1
     }
+    It 'ownExact true: Passed, no warning' {
+        $v = Judge @{ OwnExact = 'true' }
+        $c = Get-Check $v 'ownExact'
+        $c.status | Should Be 'Passed'; $c.expected | Should Be 'true'; $c.actual | Should Be 'true'
+        @($v.Warnings).Count | Should Be 0
+    }
+    It 'ownExact false: WARN only (outcome Met), with a warning line saying own is an estimate' {
+        $v = Judge @{ OwnExact = 'false' }
+        $v.Outcome | Should Be 'Met'
+        $c = Get-Check $v 'ownExact'
+        $c.status | Should Be 'Warn'; $c.expected | Should Be 'true'; $c.actual | Should Be 'false'
+        @($v.Warnings | Where-Object { $_ -match '^WARN L1 r1 ownExact is false: exceptions\.own is an estimate' }).Count | Should Be 1
+    }
+    It 'ownExact false does not hide a failed check (own 1 stays Failed)' {
+        (Judge @{ OwnExact = 'false'; Own = '1' }).Outcome | Should Be 'Failed'
+    }
+    It 'ownExact missing, null or not a boolean: NotJudged with a WARN, never a failure or rig error' {
+        foreach ($arguments in @{ NoClassification = $true }, @{ OwnExact = 'null' }, @{ OwnExact = '"false"' }, @{ OwnExact = '0' }, @{ OwnExact = '[true]' }) {
+            $v = Judge $arguments
+            $v.Outcome | Should Be 'Met'
+            (Get-Check $v 'ownExact').status | Should Be 'NotJudged'
+            @($v.Warnings | Where-Object { $_ -match '^WARN L1 r1 ownExact not judged: ' }).Count | Should Be 1
+        }
+    }
     It 'a result without any field (result.txt run): rig error' {
         $v = Get-RigL1Verdict -RunId r1 -Result ([ordered]@{}) -ExpectedModules $script:verdictModules -GameVersion 'v1.4.8' -Baseline $script:ok
         $v.Outcome | Should Be 'RigError'
@@ -259,16 +287,17 @@ Describe 'Format-RigL1Lines' {
             Checks = @(
                 (New-RigL1Check 'own' 'Passed' '0' '0'), (New-RigL1Check 'tempo' 'Failed' 'ratio >= 0.7' '1.00 days/min, ratio 0.100'),
                 (New-RigL1Check 'vanilla' 'NotJudged' '-' '3'), (New-RigL1Check 'playerMapEvents' 'Warn' '> 0' '0'),
-                (New-RigL1Check 'modules' 'Error' 'job.modules (4)' 'null'))
+                (New-RigL1Check 'modules' 'Error' 'job.modules (4)' 'null'), (New-RigL1Check 'ownExact' 'Warn' 'true' 'false'))
         }
         $lines = @(Format-RigL1Lines -RunId r1 -Verdict $verdict)
-        $lines.Count | Should Be 6
+        $lines.Count | Should Be 7
+        $lines[5] | Should Match '^r1\s+L1-ownExact\s+WARN\s+expected true, actual false$'
         $lines[0] | Should Match '^r1\s+L1-own\s+Passed\s+expected 0, actual 0$'
         $lines[1] | Should Match '^r1\s+L1-tempo\s+Failed\s+expected ratio >= 0\.7, actual 1\.00 days/min, ratio 0\.100$'
         $lines[2] | Should Match '^r1\s+L1-vanilla\s+not judged\s+expected -, actual 3$'
         $lines[3] | Should Match '^r1\s+L1-playerMapEvents\s+WARN\s+'
         $lines[4] | Should Match '^r1\s+L1-modules\s+ERROR\s+'
-        $lines[5] | Should Be 'WARN L1 r1 something'
+        $lines[6] | Should Be 'WARN L1 r1 something'
     }
 }
 
@@ -326,9 +355,19 @@ Describe 'Publish-RigResult -Suite L1 verdict' {
         $l1.baseline.status | Should Be 'Ok'
         $l1.baseline.gameVersion | Should Be 'v1.4.8'
         (@($l1.baseline.jobIds) -join ',') | Should Be '20261103-100000-aaaa'
-        @($l1.checks).Count | Should Be 6
+        @($l1.checks).Count | Should Be 7
         (@($l1.checks) | Where-Object { $_.name -eq 'vanilla' }).expected | Should Be '<= 26 (1.5 x baseline max 4 + 20)'
         @($l1.warnings).Count | Should Be 0
+    }
+    It 'ownExact false: exit code stays 0, a WARN row and a warning line, outcome Met' {
+        Write-Job Completed (New-L1ResultJson -Vanilla '3' -Tempo '9.50' -OwnExact 'false' -ScenariosJson $scenarios)
+        (Publish) | Should Be 0
+        @($script:lines | Where-Object { $_ -match '^r1\s+L1-ownExact\s+WARN\s+expected true, actual false$' }).Count | Should Be 1
+        @($script:lines | Where-Object { $_ -match '^WARN L1 r1 ownExact is false' }).Count | Should Be 1
+        $l1 = (Get-JobResult).runs[0].l1
+        $l1.outcome | Should Be 'Met'
+        (@($l1.checks) | Where-Object { $_.name -eq 'ownExact' }).status | Should Be 'Warn'
+        (Get-JobResult).exitCode | Should Be 0
     }
     It 'tempo below 0.7 x median: exit 2 with a Failed row showing expected and actual' {
         Write-Job Completed (New-L1ResultJson -Tempo '6.99' -ScenariosJson $scenarios)

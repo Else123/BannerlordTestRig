@@ -872,7 +872,8 @@ function New-RigL1Check {
 # $ExpectedModules = job.modules ($null = unknown), $GameVersion = the run's game version (agent-run.json), $Baseline =
 # Read-RigL1Baseline. Checks, in this order: own = 0, unhandled = 0, vanilla <= baseline threshold, tempo
 # (runningDaysPerRealMinute) / baseline median >= 0.7, modules[].id = job.modules (same ids, same order, case-sensitive),
-# playerMapEvents > 0 (Warn only). A missing own, unhandled or modules value is a rig error (the harness did not
+# playerMapEvents > 0 (Warn only), exceptions.classification.ownExact = true (Warn only when false; NotJudged with a
+# WARN when missing or not a boolean). A missing own, unhandled or modules value is a rig error (the harness did not
 # measure). Vanilla and tempo are NotJudged (with a WARN line) when the baseline is missing or invalid or its game
 # version differs from the run's (or the run has none); a null tempo is NotJudged with a WARN line too.
 # Returns Outcome ('RigError' if a check is Error, else 'Failed' if one is Failed, else 'Met'), Checks and Warnings.
@@ -961,6 +962,22 @@ function Get-RigL1Verdict {
     } else {
         $checks.Add((New-RigL1Check 'playerMapEvents' 'Warn' '> 0' (Format-RigMeasuredValue $mapEvents)))
         $warnings.Add("WARN L1 $RunId playerMapEvents is $(Format-RigMeasuredValue $mapEvents): the player party had no map event (warning only)")
+    }
+
+    # ownExact (T-0106): false = exceptions.own is only an estimate (walk budget spent or a walk failed). Warn only. A
+    # missing or non-boolean value is NotJudged with a WARN (like a null tempo): older harness output must not fail.
+    $classification = if ($null -ne $exceptions) { $exceptions.classification } else { $null }
+    # Not "$x = if": that unrolls a one-element array, so "ownExact":[true] would pass as a boolean.
+    $ownExact = $null
+    if ($classification -is [System.Management.Automation.PSCustomObject]) { $ownExact = $classification.ownExact }
+    if ($ownExact -isnot [bool]) {
+        $checks.Add((New-RigL1Check 'ownExact' 'NotJudged' 'true' (Format-RigMeasuredValue $ownExact)))
+        $warnings.Add("WARN L1 $RunId ownExact not judged: exceptions.classification.ownExact is $(Format-RigMeasuredValue $ownExact)")
+    } elseif ($ownExact) {
+        $checks.Add((New-RigL1Check 'ownExact' 'Passed' 'true' 'true'))
+    } else {
+        $checks.Add((New-RigL1Check 'ownExact' 'Warn' 'true' 'false'))
+        $warnings.Add("WARN L1 $RunId ownExact is false: exceptions.own is an estimate (walk budget spent or a walk failed; warning only)")
     }
 
     $statuses = @($checks | ForEach-Object { $_.status })

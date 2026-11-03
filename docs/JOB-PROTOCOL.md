@@ -87,8 +87,9 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
   it in preflight (see "Preflight"): `null` or `""` = not checked.
 - `kind`: `soak` (default shape above) or `scenarios`. A `scenarios` run needs harness `TestRig` and the extra field
   `runs[].scenarios`: a non-empty JSON array of unique (case-insensitive) scenario ids matching `^[A-Za-z0-9._-]+$` (also with one
-  element). A `soak` run has no `scenarios` field. Anything else -> job `rejected` (schema check). The agent writes the
-  ids to `run.cfg` (section "`run.cfg`"); the harness runs exactly these scenarios.
+  element). A `soak` run has no `scenarios` field. Anything else (missing, empty, not an array of strings, an empty,
+  invalid or duplicate id) -> job `rejected` (schema check, like an invalid `health`), so the agent never writes an empty
+  `scenarios=` line. The agent writes the ids to `run.cfg` (section "`run.cfg`"); the harness runs exactly these scenarios.
 - `health` (optional, `soak` runs only): the health bracket (F-S6-1), a non-empty JSON array of unique (case-insensitive)
   scenario ids with the same pattern as `scenarios` (also with one element); only with harness `TestRig`. On a `scenarios` run, with
   another harness, empty, not an array of strings or with an invalid or duplicate id -> job `rejected` (schema check).
@@ -433,7 +434,7 @@ statuses only. A suite with per-run expectations applies the same health rule to
 (exceptions, tempo, modules) is separate from this structural check: see "L1 verdict".
 
 L1 verdict (runner, `-Suite L1` only, every run with exit class `Completed`; the harness only measures, the runner
-judges). Six checks on the run's `run-result.json`, each printed as a row after the run's result rows
+judges). Seven checks on the run's `run-result.json`, each printed as a row after the run's result rows
 (`r1     L1-vanilla         Passed     expected <= 29 (1.5 x baseline max 6 + 20), actual 0`):
 
 | Check | Rule | Status when violated |
@@ -444,6 +445,7 @@ judges). Six checks on the run's `run-result.json`, each printed as a row after 
 | `tempo` | `runningDaysPerRealMinute` / median(base runs' `runningDaysPerRealMinute`) >= 0.7 | `Failed` (`2`) |
 | `modules` | `modules[].id` = `job.modules` (same ids, same order, case-sensitive) | `Failed` (`2`), naming missing/extra ids or the first position (1-based) that differs; not reported = `ERROR` (`1`) |
 | `playerMapEvents` | > 0 | `WARN` only, never changes the exit code |
+| `ownExact` | `exceptions.classification.ownExact` = `true` | `false`: `WARN` only (`exceptions.own` is an estimate), never changes the exit code; missing or not a boolean: `not judged` with `WARN L1 <run> ownExact not judged: ...` |
 
 `vanilla` and `tempo` are `not judged` (row status `not judged`, `expected -`, plus a line
 `WARN L1 <run> vanilla and tempo not judged: <reason>`) when the baseline is missing (no file, or no base runs: the

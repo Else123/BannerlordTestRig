@@ -40,6 +40,7 @@ of a completed run gives exit 1 (details: "Health lines" in `docs/JOB-PROTOCOL.m
 A completed L1 run is also judged on its measurements, one row each: own and unhandled exceptions 0, vanilla exceptions
 at most 1.5 x the baseline maximum + 20, running-phase tempo at least 0.7 x the baseline median, the reported modules
 equal to the job's module list, and a player map event (`playerMapEvents` 0 is a WARN only). A violation gives exit 2.
+`ownExact` false (`own` is only an estimate) is a WARN only; the exit code is unchanged.
 The baseline is `runner/baselines/L1.json`; until it holds base runs (or when its game version differs from the run's),
 vanilla and tempo are not judged and a WARN line says so. Fill or refresh it from finished jobs, never by hand:
 `runner\Update-L1Baseline.ps1 -BaseJobIds <L1-BASE jobId> -L1JobIds <L1 jobId>, <L1 jobId>, <L1 jobId>` (details:

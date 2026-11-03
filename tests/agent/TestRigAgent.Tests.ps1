@@ -390,6 +390,26 @@ Describe 'Test-JobSchema: kind and scenarios (S4)' {
     It 'rejects scenarios on a soak run' {
         (Get-SchemaErrors (New-KindJob 'soak' '["smithing.smelt-then-refine"]')).Count | Should BeGreaterThan 0
     }
+    It 'T-0105: no scenarios shape the schema accepts can reach run.cfg as an empty or odd scenarios line' {
+        # Get-RunCfgText trusts the schema (Invoke-JobSteps rejects the job first), so every shape that would write
+        # "scenarios=" with no usable id must be a schema error: that is the same path as an invalid health list.
+        $invalid = '[]', '[[]]', '[[""]]', '[["a"]]', '[{}]', '[[],[]]', '[" "]', '[""]', '[null]', '"a"', '""', 'null', '{}', '[true]', '["a\n"]', '[0]'
+        foreach ($shape in $invalid) {
+            $job = New-KindJob 'scenarios' $shape
+            @(Get-SchemaErrors $job).Count | Should BeGreaterThan 0
+        }
+        $valid = New-KindJob 'scenarios' '["a.one","b-two"]'
+        @(Get-SchemaErrors $valid).Count | Should Be 0
+        Get-RunCfgText $valid.runs[0] | Should Match '(?m)^scenarios=a\.one,b-two$'
+    }
+    It 'T-0105: an invalid scenarios list is reported like an invalid health list (same message shape)' {
+        $scenarios = @(Get-SchemaErrors (New-KindJob 'scenarios' '[""]'))
+        $scenarios[0] | Should Match "^Run r1: invalid id '' in 'scenarios'"
+        @(Get-SchemaErrors (New-KindJob 'scenarios' '[]'))[0] | Should Be "Run r1: 'scenarios' must be a non-empty array of ids."
+        foreach ($duplicate in '["a","a"]', '["a","A"]') {
+            (@(Get-SchemaErrors (New-KindJob 'scenarios' $duplicate)) -join "`n") | Should Match 'duplicate id'
+        }
+    }
     It 'rejects kind scenarios with the CoherentWarAI harness' {
         (Get-SchemaErrors (New-KindJob 'scenarios' '["smithing.smelt-then-refine"]' 'CoherentWarAI')).Count | Should BeGreaterThan 0
     }
