@@ -66,6 +66,7 @@ namespace TestRig.Harness.Logic
 
         private int _nextIndex;
         private int _day;
+        private readonly int _daysRequested;
 
         // State of the current scenario; _current is null between scenarios.
         private Context _current;
@@ -78,12 +79,13 @@ namespace TestRig.Harness.Logic
 
         /// <param name="scenarios">Scenarios in run order, typically from <see cref="Resolve"/>.</param>
         /// <param name="log">Receives one line per runner event and per <see cref="IScenarioContext.Log"/> call.</param>
-        public ScenarioRunner(IReadOnlyList<IScenario> scenarios, Action<string> log)
-            : this(scenarios, log, null)
+        /// <param name="daysRequested">Reported as <see cref="IScenarioContext.DaysRequested"/>; 0 when unknown.</param>
+        public ScenarioRunner(IReadOnlyList<IScenario> scenarios, Action<string> log, int daysRequested = 0)
+            : this(scenarios, log, null, daysRequested)
         {
         }
 
-        private ScenarioRunner(IReadOnlyList<IScenario> scenarios, Action<string> log, int? healthDay)
+        private ScenarioRunner(IReadOnlyList<IScenario> scenarios, Action<string> log, int? healthDay, int daysRequested)
         {
             if (scenarios == null)
             {
@@ -93,6 +95,11 @@ namespace TestRig.Harness.Logic
             if (log == null)
             {
                 throw new ArgumentNullException(nameof(log));
+            }
+
+            if (daysRequested < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(daysRequested), daysRequested, "must not be negative");
             }
 
             foreach (IScenario scenario in scenarios)
@@ -106,6 +113,7 @@ namespace TestRig.Harness.Logic
             _scenarios = scenarios;
             _log = log;
             _healthDay = healthDay;
+            _daysRequested = daysRequested;
             Results = _results.AsReadOnly();
             Checks = _checks.AsReadOnly();
         }
@@ -117,14 +125,15 @@ namespace TestRig.Harness.Logic
         /// stopped inside a bracket.
         /// </summary>
         /// <param name="day">0 for the bracket before the soak, the requested days for the one after it.</param>
-        public static ScenarioRunner ForHealth(IReadOnlyList<IScenario> scenarios, int day, Action<string> log)
+        /// <param name="daysRequested">Reported as <see cref="IScenarioContext.DaysRequested"/> in both brackets; 0 when unknown.</param>
+        public static ScenarioRunner ForHealth(IReadOnlyList<IScenario> scenarios, int day, Action<string> log, int daysRequested = 0)
         {
             if (day < 0)
             {
                 throw new ArgumentOutOfRangeException(nameof(day), day, "must not be negative");
             }
 
-            return new ScenarioRunner(scenarios, log, day);
+            return new ScenarioRunner(scenarios, log, day, daysRequested);
         }
 
         /// <summary>Result id of health scenario <paramref name="id"/> in the bracket at <paramref name="day"/>: "&lt;id&gt;@&lt;day&gt;".</summary>
@@ -487,6 +496,11 @@ namespace TestRig.Harness.Logic
             public int Day
             {
                 get { return _runner._day; }
+            }
+
+            public int DaysRequested
+            {
+                get { return _runner._daysRequested; }
             }
 
             public int CheckCount { get; private set; }

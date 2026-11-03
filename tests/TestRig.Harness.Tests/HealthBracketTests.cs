@@ -278,6 +278,49 @@ namespace TestRig.Harness.Tests
             Assert.Equal(ScenarioStatus.Passed, Assert.Single(runner.Results).Status);
         }
 
+        [Fact]
+        public void ContextDaysRequested_IsTheValueGivenToTheRunnerAndDefaultsToZero()
+        {
+            var seen = new List<int>();
+            IEnumerable<ScenarioStep> Body(IScenarioContext ctx)
+            {
+                seen.Add(ctx.DaysRequested);
+                ctx.Check("ok", true, "x", "x");
+                yield break;
+            }
+
+            var requested = new ScenarioRunner(new IScenario[] { Scenario("a", Body) }, _log.Add, 7);
+            requested.Tick(1, 0);
+            var unknown = new ScenarioRunner(new IScenario[] { Scenario("b", Body) }, _log.Add);
+            unknown.Tick(1, 0);
+
+            Assert.Equal(new[] { 7, 0 }, seen);
+        }
+
+        [Fact]
+        public void ContextDaysRequested_IsTheSameInBothHealthBrackets()
+        {
+            var seen = new List<int>();
+            IEnumerable<ScenarioStep> Body(IScenarioContext ctx)
+            {
+                seen.Add(ctx.DaysRequested);
+                ctx.Check("ok", true, "x", "x");
+                yield break;
+            }
+
+            var scenarios = new IScenario[] { Scenario("a", Body) };
+            ScenarioRunner.ForHealth(scenarios, 0, _log.Add, 5).Tick(1, 0);
+            ScenarioRunner.ForHealth(scenarios, 5, _log.Add, 5).Tick(1, 5);
+
+            Assert.Equal(new[] { 5, 5 }, seen);
+        }
+
+        [Fact]
+        public void Constructor_NegativeDaysRequested_Throws()
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => new ScenarioRunner(new IScenario[0], _log.Add, -1));
+        }
+
         // ------------------------------------------------- HarnessRun construction
 
         [Fact]

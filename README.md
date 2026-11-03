@@ -20,7 +20,7 @@ not implemented yet; the layout below is the plan.
 
 ```powershell
 copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key, towerGamePath
-runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects (eight with -Suite RIG, ten with -Suite L1), packs them, publishes the job
+runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects (eight with -Suite RIG/CS/AT/CW1, ten with -Suite L1), packs them, publishes the job
 runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait   # diagnosis: skip the build
 ```
 
@@ -33,6 +33,7 @@ SmithingSuite.Scenarios, CompanionManagementSuite.Scenarios. Without an explicit
 `-Days`, `-Seed` and `-Mode` keep an explicit value; the suite fixes the harness, so an explicit `-Harness` other than
 `TestRig` is a usage error (exit 1 before anything is built or published). With `-PackageFrom` the package must contain
 all suite modules. The result rows show `<Suite>-<scenario id>` (e.g. `L1-soak Passed 3/3`). Without `-Suite` nothing changes.
+Suite names are case-insensitive (`-Suite l1` is `L1`).
 The L1 run also asks for the four mod health scenarios (`coherentwarai.health`, `autotrader.health`, `smithingsuite.health`,
 `companionsuite.health`), each checked before the soak (`<id>@0`) and after it (`<id>@<days>`); the rows show them as e.g.
 `L1-autotrader.health@0`. Every health line must be Passed: a Failed line gives exit 2, a missing, Skipped or Timeout line
@@ -52,7 +53,40 @@ mode `WarSails`, seed 1, 1 day, and only the base modules, SmithingSuite, TestRi
 the scenario row; the exit code is 0 (the scenario Passed), 2 (Failed) or 1 (rig error: the scenario is missing from the
 result or Skipped) regardless of days reached.
 
-`-Suite RIG` is the rig self-test: one job with four runs, each judged against an expected outcome. r1
+`-Suite CS` runs the CompanionManagementSuite scenarios `companion.equip-now`, `companion.roles-apply` and
+`companion.development-guard` (in this order; `kind` `scenarios`): harness `TestRig`, mode `WarSails`, seed 1, 1 day, and
+only the base modules, CompanionManagementSuite, TestRig.Harness and CompanionManagementSuite.Scenarios (no CoherentWarAI).
+`-Suite AT` is the same for AutoTraderSpeed: scenarios `autotrader.warehouse-consign` and `autotrader.town-trade`, modules
+AutoTraderSpeed, TestRig.Harness and AutoTraderSpeed.Scenarios. With `-PackageFrom` the package must contain those three
+modules. Exit code of both (as for `-Suite SM`): 0 if every scenario Passed, 2 if one Failed, 1 for a rig error (a
+scenario missing from the result, Skipped or in error, or the job not completed), 3 if the agent aborted the job or the
+runner deadline hit; a failed check is printed below its scenario row.
+
+`-Suite CW1` is the AC25a comparison of CoherentWarAI: harness `TestRig`, only the base modules, CoherentWarAI,
+TestRig.Harness and CoherentWarAI.Scenarios (no other mod), 30 days. One job with twelve runs r1-r12 (`kind` `scenarios`,
+scenario `coherentwarai.ac25a-digest`, hard timeout 10 minutes each): seeds 1, 2, 3, and per seed the modes `WarSails`,
+`FeatureOff`, `FeatureOff`, `WarSails` (this order evens out drift). The mode is fixed per run, so an explicit `-Mode`,
+`-Seed` or `-HardTimeoutMinutes` is a usage error (exit 1); `-Days` is allowed (e.g. `-Days 3` as a smoke test). Every
+run must end `Completed` with its scenario Passed. Exit code (as for `-Suite RIG`): 0 if every run meets its expectation,
+2 if one does not, 1 if the job is not completed or a run is missing, 3 if the agent aborted the job or the runner deadline
+hit. The overall deadline is 151 minutes with the defaults. The 300 s limit per scenario holds for 30 days with a factor
+of about 3; far longer `-Days` (about 80 and more) can exceed it. With `-PackageFrom` the package must contain those
+modules (CoherentWarAI included).
+
+Suite checks: after the result is fetched, `-Suite L1` and `-Suite CW1` run CW-2 (`tools\Check-CommandLog.ps1` of the
+CoherentWarAI repo next to this one) on every `Completed` run, with that run's mode and `-MinDays` = the days; CW1 also runs
+CW-1 (`tools\Compare-Ac25a.ps1`) over the whole job. One row per check, e.g.
+`r1     L1-coherentwarai.command-log Passed       expected no FAIL, actual 6 PASS, 1 N/A for mode, 1 MANUAL  <json>` and
+`job    CW1-coherentwarai.ac25a-armydays Passed ...`; FAIL and warning rows (INSUFFICIENT DATA, WARN) are listed below it.
+A FAIL is exit 2, an Inconclusive CW-1 verdict exit 3, a missing log, script or result exit 1 (precedence 1 > 3 > 2 > 0).
+CW-1 gets the job plan via `-JobManifestPath out\jobs\<jobId>\job.json`. CW-1 always runs. If a run did not meet its
+expectation (it did not end `Completed`, or ended `Completed` but a scenario check failed), a `Failed` verdict stays
+Failed (a found violation is evidence; exit 2) and every other outcome becomes `Skipped`, e.g.
+`job    CW1-coherentwarai.ac25a-invariant Skipped  not judged: run(s) rN did not meet its expectation (check said Inconclusive)`, without effect on the exit code.
+Re-judge a fetched job offline (no test PC needed; rewrites `out\results\<jobId>\job-result.json`):
+`runner\Update-JobResult.ps1 -JobId <jobId>`. Details: "Suite checks" in `docs/JOB-PROTOCOL.md`.
+
+`-Suite RIG` is the rig self-test: one job with five runs, each judged against an expected outcome. r1
 `rig.selftest-throw` must end `Crashed`, r2 `rig.selftest-hang` must end `Hung`, r3 `rig.selftest-pass` must end
 `Completed` with its scenario Passed (hard timeout 5 minutes each); for r1 and r2 the agent's run message must also
 show the cause (r1: the exception `System.InvalidOperationException: rig.selftest-throw` itself, not just a harness line
@@ -60,14 +94,15 @@ naming the scenario, r2: the missing `Alive:` line; see `docs/JOB-PROTOCOL.md`).
 lists `TestRig.SelfTest` as its own assembly (`runs[].ownAssemblies`) and must end `Completed` with its scenario Passed
 and `exceptions.own` 10000, `exceptions.classification.walks` 1000 and `ownExact` false (another value: exit 2, a missing
 one: exit 1). Below its row the runner prints each value check and the R2 timing line (walk mean in ms, cache hit upper
-bound in us); above 1 ms / 50 us it adds a WARN line only. Modules: base modules, TestRig.Harness and
+bound in us); above 1 ms / 50 us it adds a WARN line only. r5 `rig.town-screen` (the town and trade screen fixtures:
+enter a foreign town, open and close the trade screen, leave) must end `Completed` with its scenario Passed. Modules: base modules, TestRig.Harness and
 TestRig.SelfTest (built and packaged only for this suite; it contains deliberately crashing code). Exit code: 0 if every
 run meets its expectation, 2 if one does not, 1 if the job is not completed or a run is missing, except 3 if the agent
 aborted the job or the runner deadline hit. If the job is not completed, the runner prints `job status: <status> -
 <message>` (e.g. the agent's rejection reason). The result table shows expected and actual per run. The hard timeout is
 fixed per run, so `-HardTimeoutMinutes` is a usage error with this suite. The overall deadline is, per run, its hard
 timeout plus 2 minutes (baseline restore, cleanup, artifact copy), plus the claim wait (`-ClaimTimeoutSeconds`, rounded
-up to minutes) plus 5 minutes (35 minutes with the defaults), unless `-TimeoutMinutes` is given. With `-PackageFrom` the package must contain TestRig.Harness and TestRig.SelfTest.
+up to minutes) plus 5 minutes (42 minutes with the defaults), unless `-TimeoutMinutes` is given. With `-PackageFrom` the package must contain TestRig.Harness and TestRig.SelfTest.
 
 `-Suite L1-BASE` is the vanilla baseline for L1: the L1 module list without the four mods and without scenario
 modules (base modules incl. the Workshop libraries and NavalDLC, plus TestRig.Harness). One job with five soak runs
@@ -78,7 +113,7 @@ every run must end `Completed` with all days reached (exit codes as for `-Suite 
 fixed per run, so `-Seed` and `-HardTimeoutMinutes` are usage errors. Overall deadline (same formula as RIG): 67 minutes
 with the defaults. The build compiles only TestRig.Harness; with `-PackageFrom` the package must contain it.
 
-The build (default mode) compiles the seven projects (eight with `-Suite RIG`, ten with `-Suite L1`, only the harness with `-Suite L1-BASE`) with MSBuild into `out\stage\<jobId>\Modules`
+The build (default mode) compiles the seven projects (eight with `-Suite RIG`, `CS`, `AT` or `CW1`, ten with `-Suite L1`, only the harness with `-Suite L1-BASE`) with MSBuild into `out\stage\<jobId>\Modules`
 (not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
 repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder
 (`towerGamePath`) changed during the build. `msbuildPath` is optional (default: VS 2026 Build Tools).

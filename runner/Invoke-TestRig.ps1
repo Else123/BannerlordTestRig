@@ -19,15 +19,31 @@
     (NotCompleted, Crashed, too few days); 3 time limit or agent not responding (HardTimeout,
     Hung, Aborted, claim timeout, stale heartbeat, overall deadline). Precedence: 1 > 3 > 2 > 0.
     If the job is not completed, the done status and the agent's message are printed.
-    -Suite RIG (self-test, one job with four runs) is judged differently: each run must end with its
+    -Suite RIG (self-test, one job with five runs) is judged differently: each run must end with its
     expected exitClass (r1, r2: and a run message showing the cause; r4: and its exception counts); exit 0 if all do, 2 if
     one does not, 1 if the job is not completed (except aborted or the runner deadline: 3) or a run is missing.
     -HardTimeoutMinutes conflicts with -Suite RIG.
     -Suite L1-BASE (vanilla baseline: five soak runs with their own seeds, no mod) is judged the same way: each run
     must end Completed with enough days (Hung, HardTimeout, Aborted: 3). -HardTimeoutMinutes and -Seed conflict with it;
     -Days overrides its 30 days (a longer one scales the per-run hard timeout).
+    -Suite is checked against the suite table ($script:RigSuites) in the script body: an unknown suite is a usage error
+    (exit 1, listing the valid suites) before anything is built; the name is case-insensitive (-Suite l1 = L1).
     -Suite L1 also judges each Completed run's measurements against runner\baselines\L1.json (own/unhandled 0, vanilla
     threshold, tempo ratio, modules; written by Update-L1Baseline.ps1): a violation is exit 2, an unmeasured value exit 1.
+    -Suite SM, CS and AT run the scenarios of one mod (SmithingSuite, CompanionManagementSuite, AutoTraderSpeed) with only
+    that mod and its scenario module: exit 0 if every scenario Passed, 2 if one Failed, 1 for a rig error.
+    -Suite CW1 is the AC25a comparison of CoherentWarAI (only that mod): twelve 30-day runs, seeds 1-3, per seed WarSails,
+    FeatureOff, FeatureOff, WarSails, each recording the army digest; judged per run like -Suite RIG (Completed expected).
+    Suite checks (after the fetch, on this PC; scripts of the CoherentWarAI repo next to this repo): -Suite L1 and CW1 run
+    CW-2 (tools\Check-CommandLog.ps1, row <run> <Suite>-coherentwarai.command-log) on every Completed run with that run's
+    mode and -MinDays = the days; CW1 also runs CW-1 (tools\Compare-Ac25a.ps1, rows job CW1-coherentwarai.ac25a-*) over the
+    job. A FAIL is exit 2, an Inconclusive verdict exit 3, a missing log, script or result exit 1 (same precedence).
+    runner\Update-JobResult.ps1 -JobId <jobId> re-judges a fetched job offline (rewrites its job-result.json).
+
+.PARAMETER Suite
+    A fixed test setup from the suite table (case-insensitive; '' or omitted = no suite): L1 (soak, all four mods, health
+    bracket, L1 verdict, CW-2), L1-BASE (vanilla baseline for L1), SM (SmithingSuite scenarios), CS (CompanionManagementSuite
+    scenarios), AT (AutoTraderSpeed scenarios), CW1 (AC25a comparison of CoherentWarAI, CW-2 and CW-1), RIG (rig self-test).
 
 .EXAMPLE
     .\runner\Invoke-TestRig.ps1 -Days 3 -Wait
@@ -42,7 +58,7 @@ param(
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
     [ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode = 'WarSails',
     [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
-    [ValidateSet('L1', 'L1-BASE', 'SM', 'RIG')][string]$Suite,
+    [string]$Suite,   # validated in the script body against $script:RigSuites (the single suite table)
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
     [ValidateRange(1, [int]::MaxValue)][int]$BudgetMinutes = 60,
     [ValidateRange(1, [int]::MaxValue)][int]$HardTimeoutMinutes = 20,
@@ -70,6 +86,8 @@ $script:RigHarnessModules = [ordered]@{
 # RunId, Scenarios, HardTimeoutMinutes and ExpectedExitClass (the verdict then compares every run with it), and
 # optionally ExpectedMessagePattern: a case-sensitive regex the run's agent message (agent-run.json) must match,
 # Seed: the run's own seed (job.json runs[].seed) instead of the suite's; then an explicit -Seed is a usage error,
+# Mode: the run's own mode (job.json runs[].mode) instead of the suite's; then an explicit -Mode is a usage error, and
+# every run's mode must load the same module list as the job's (WarSails and FeatureOff do, NoDlc does not: a usage error),
 # OwnAssemblies: the DLL names written to job.json runs[].ownAssemblies (the agent passes exactly them to run.cfg),
 # ExpectedValues: @{ Path; Value } per value the run's run-result.json must hold when it is Completed (Path = dotted
 # property path, Value = a number or a boolean; see Get-RigExpectedValueChecks), and ClassificationTiming = $true: print
@@ -77,6 +95,16 @@ $script:RigHarnessModules = [ordered]@{
 # suite's run holds for the suite's Days; a longer -Days scales it (Get-RigSuiteRuns).
 # Health (soak suites only): the scenario ids of the health bracket (F-S6-1), written to every run as job.json
 # runs[].health; the verdict then also needs each <id>@0 and <id>@<days> line (see Get-RigHealthOutcome).
+# PostRunChecks / JobChecks (F-S10-1): scripts of a mod repo that the runner calls on this PC after the result is fetched
+# (or re-judged offline, Update-JobResult.ps1); Script is relative to the workspace root (the folder of the repos).
+# PostRunChecks run once per Completed run: @{ Id; Script; Log } is called as
+#   <Script> -LogPath <run folder>\<Log> -Mode <the run's job.json mode> -MinDays <days> -ResultPath <run folder>\<Id>.json
+# and must write { "rows": [ { "ac", "verdict", "evidence" } ] } there (see Invoke-RigPostRunCheck for the verdicts).
+# JobChecks run once per completed job: @{ Id; Script; ResultFile } is called as
+#   <Script> -JobPath <job result folder> -ResultPath <job result folder>\<ResultFile> [-JobManifestPath <out\jobs\<id>\job.json>]
+# (the manifest only with UsesJobManifest = $true, when the file exists; the plan is not part of the results folder).
+# and must write { "checks": [ { "check", "verdict", "detail" } ] } there (see Invoke-RigJobCheck).
+$script:RigCommandLogCheck = @{ Id = 'coherentwarai.command-log'; Script = 'BannerlordCoherentWarAI\tools\Check-CommandLog.ps1'; Log = 'CoherentWarAI.log' }
 $script:RigSuites = @{
     L1 = @{
         Harness           = 'TestRig'
@@ -89,6 +117,8 @@ $script:RigSuites = @{
         # One scenario module per mod, in the order of the mods; each holds that mod's health scenario.
         TailModules       = @('CoherentWarAI.Scenarios', 'AutoTraderSpeed.Scenarios', 'SmithingSuite.Scenarios', 'CompanionManagementSuite.Scenarios')
         Health            = @('coherentwarai.health', 'autotrader.health', 'smithingsuite.health', 'companionsuite.health')
+        # CW-2 in every run with CoherentWarAI (F-S10-6).
+        PostRunChecks     = @($script:RigCommandLogCheck)
     }
     # Vanilla baseline for L1 (F-S6-3): the L1 module list without the four mods and without scenario modules (the
     # Workshop libraries and NavalDLC stay). Five 30-day soaks; the seed varies across runs, three repeat seed 1.
@@ -121,6 +151,60 @@ $script:RigSuites = @{
         ExtraModules      = @('SmithingSuite')
         TailModules       = @('SmithingSuite.Scenarios')
     }
+    # Companion suite (S7): the three companion scenarios on a fresh WarSails campaign, in this order; only the mod
+    # and its scenario module are loaded.
+    CS = @{
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 1
+        Kind              = 'scenarios'
+        Scenarios         = @('companion.equip-now', 'companion.roles-apply', 'companion.development-guard')
+        WithCoherentWarAI = $false
+        ExtraModules      = @('CompanionManagementSuite')
+        TailModules       = @('CompanionManagementSuite.Scenarios')
+    }
+    # AutoTrader suite (S8): the warehouse consignment and the town trade scenario.
+    AT = @{
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 1
+        Kind              = 'scenarios'
+        Scenarios         = @('autotrader.warehouse-consign', 'autotrader.town-trade')
+        WithCoherentWarAI = $false
+        ExtraModules      = @('AutoTraderSpeed')
+        TailModules       = @('AutoTraderSpeed.Scenarios')
+    }
+    # AC25a comparison (S10, F-S10-4/7): only CoherentWarAI, 30 days. Seeds 1-3, per seed WarSails, FeatureOff, FeatureOff,
+    # WarSails (the order evens out drift); every run records the army digest (coherentwarai.ac25a-digest).
+    CW1 = @{
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 30
+        Kind              = 'scenarios'
+        WithCoherentWarAI = $true
+        ExtraModules      = @()
+        TailModules       = @('CoherentWarAI.Scenarios')
+        # CW-2 per run (F-S10-6) and CW-1 over the whole job (F-S10-3).
+        PostRunChecks     = @($script:RigCommandLogCheck)
+        JobChecks         = @(@{ Id = 'coherentwarai.ac25a'; Script = 'BannerlordCoherentWarAI\tools\Compare-Ac25a.ps1'; ResultFile = 'ac25a-compare.json'; UsesJobManifest = $true })
+        Runs              = @(
+            @{ RunId = 'r1'; Seed = 1; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r2'; Seed = 1; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r3'; Seed = 1; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r4'; Seed = 1; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r5'; Seed = 2; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r6'; Seed = 2; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r7'; Seed = 2; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r8'; Seed = 2; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r9'; Seed = 3; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r10'; Seed = 3; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r11'; Seed = 3; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r12'; Seed = 3; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' }
+        )
+    }
     RIG = @{
         Harness           = 'TestRig'
         Mode              = 'WarSails'
@@ -148,7 +232,9 @@ $script:RigSuites = @{
                     @{ Path = 'exceptions.own'; Value = 10000 },
                     @{ Path = 'exceptions.classification.walks'; Value = 1000 },
                     @{ Path = 'exceptions.classification.ownExact'; Value = $false })
-            }
+            },
+            # Spike R1 / fixture regression (S8): enter a foreign town, open and close the trade screen, leave; no mod involved.
+            @{ RunId = 'r5'; Scenarios = @('rig.town-screen'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' }
         )
     }
 }
@@ -258,7 +344,7 @@ function Get-RigHealthOutcome {
 }
 
 # The runs a suite defines (RunId, Scenarios (empty for a soak run), HardTimeoutMinutes, ExpectedExitClass,
-# ExpectedMessagePattern and Seed = $null when the run has none, OwnAssemblies and ExpectedValues (empty when none),
+# ExpectedMessagePattern, Seed and Mode = $null when the run has none, OwnAssemblies and ExpectedValues (empty when none),
 # ClassificationTiming); none for suites without Runs. $Days = the job's days (0 = the suite's Days): a soak run's
 # hard timeout holds for the suite's Days and grows in proportion to a longer -Days, rounded up (L1-BASE: max(10,
 # ceil(10 x days / 30)) minutes); a shorter -Days keeps it. Callers wrap the result in @().
@@ -274,6 +360,7 @@ function Get-RigSuiteRuns {
             HardTimeoutMinutes = $hardTimeout; ExpectedExitClass = [string]$r.ExpectedExitClass
             ExpectedMessagePattern = if ($r.ContainsKey('ExpectedMessagePattern')) { [string]$r.ExpectedMessagePattern } else { $null }
             Seed = if ($r.ContainsKey('Seed')) { [int]$r.Seed } else { $null }
+            Mode = if ($r.ContainsKey('Mode')) { [string]$r.Mode } else { $null }
             OwnAssemblies = @(if ($r.ContainsKey('OwnAssemblies')) { $r.OwnAssemblies })
             ExpectedValues = @(if ($r.ContainsKey('ExpectedValues')) { $r.ExpectedValues })
             ClassificationTiming = $r.ContainsKey('ClassificationTiming') -and [bool]$r.ClassificationTiming
@@ -321,12 +408,29 @@ function Resolve-RigSuiteSettings {
         if ($BoundParameters -contains 'Seed' -and @(Get-RigSuiteRuns -Suite $Suite | Where-Object { $null -ne $_.Seed }).Count -gt 0) {
             throw "-Suite $Suite fixes the seed of each run; -Seed conflicts with it (omit -Seed)."
         }
+        $runModes = @(Get-RigSuiteRuns -Suite $Suite | Where-Object { $null -ne $_.Mode } | ForEach-Object { $_.Mode } | Select-Object -Unique)
+        if ($BoundParameters -contains 'Mode' -and $runModes.Count -gt 0) {
+            throw "-Suite $Suite fixes the mode of each run; -Mode conflicts with it (omit -Mode)."
+        }
         $Harness = $s.Harness
         if ($BoundParameters -notcontains 'Mode') { $Mode = $s.Mode }
         if ($BoundParameters -notcontains 'Seed') { $Seed = $s.Seed }
         if ($BoundParameters -notcontains 'Days') { $Days = $s.Days }
+        # One job has one module list: the run modes must load the same modules as the job's mode.
+        $jobModules = @(Get-RigModules -Mode $Mode -Harness $Harness -Suite $Suite) -join ','
+        foreach ($runMode in $runModes) {
+            if ((@(Get-RigModules -Mode $runMode -Harness $Harness -Suite $Suite) -join ',') -ne $jobModules) {
+                throw "-Suite $Suite has a run in mode $runMode, which loads other modules than the job's mode $Mode; one job has one module list."
+            }
+        }
     }
     [pscustomobject]@{ Harness = (Get-RigHarnessName $Harness); Mode = $Mode; Seed = $Seed; Days = $Days }
+}
+
+function Get-RigSuiteName {
+    # The canonical spelling of a suite id (the key in $script:RigSuites); $null for an unknown suite.
+    param([Parameter(Mandatory)][string]$Suite)
+    @($script:RigSuites.Keys | Where-Object { $_ -ieq $Suite })[0]
 }
 
 function Get-RigHarnessName {
@@ -386,14 +490,15 @@ function New-RigJobManifest {
     $health = @(Get-RigSuiteHealth -Suite $Suite)
     $newRun = {
         # $RunSeed: $null = the job's -Seed; $RunOwnAssemblies: empty = no ownAssemblies field (the agent derives the list)
-        param([string]$RunId, [int]$RunHardTimeoutMinutes, $RunScenarios, $RunSeed, $RunOwnAssemblies)
+        # $RunMode: $null = the job's -Mode
+        param([string]$RunId, [int]$RunHardTimeoutMinutes, $RunScenarios, $RunSeed, $RunOwnAssemblies, $RunMode)
         $run = [ordered]@{
             runId              = $RunId
             kind               = $kind
             harness            = $Harness
             seed               = if ($null -ne $RunSeed) { [int]$RunSeed } else { $Seed }
             days               = $Days
-            mode               = $Mode
+            mode               = if ($RunMode) { $RunMode } else { $Mode }
             stallMinutes       = $StallMinutes
             budgetMinutes      = $BudgetMinutes
             hardTimeoutMinutes = $RunHardTimeoutMinutes
@@ -406,7 +511,7 @@ function New-RigJobManifest {
     $suiteRuns = @(Get-RigSuiteRuns -Suite $Suite -Days $Days)
     # Outer @(): a one-run list must stay a JSON array (an assignment from `if` unrolls a single element).
     $runs = @(if ($suiteRuns.Count -gt 0) {
-            $suiteRuns | ForEach-Object { & $newRun $_.RunId $_.HardTimeoutMinutes $_.Scenarios $_.Seed $_.OwnAssemblies }
+            $suiteRuns | ForEach-Object { & $newRun $_.RunId $_.HardTimeoutMinutes $_.Scenarios $_.Seed $_.OwnAssemblies $_.Mode }
         } else {
             & $newRun 'r1' $HardTimeoutMinutes $(if ($kind -eq 'scenarios') { $script:RigSuites[$Suite].Scenarios })
         })
@@ -1139,12 +1244,15 @@ function Update-RigL1Baseline {
 # With -Expectations (a suite with Runs) the per-run rules above do not apply; instead every expectation is judged by
 # Get-RigExpectationOutcome: Met = 0, Mismatch = 2, Inconclusive = 3, RigError or a run missing from a completed job = 1. The job status
 # and -ForceTimeout rules stay.
+# -CheckOutcomes (the suite's PostRunChecks and JobChecks, in addition to either rule set): Passed = 0, Failed = 2,
+# Inconclusive = 3, RigError and anything else = 1.
 function Resolve-RigExitCode {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$DoneStatus,
         [object[]]$Runs,
         [Parameter(Mandatory)][int]$Days,
         [object[]]$Expectations,
+        [string[]]$CheckOutcomes = @(),
         [switch]$ForceTimeout   # the runner itself hit a time limit (e.g. overall deadline)
     )
     $runList = @($Runs)
@@ -1192,6 +1300,14 @@ function Resolve-RigExitCode {
             elseif ($scenarioStatus -in 'Passed', 'Timeout', 'Skipped') { }
             elseif ($scenarioStatus -eq 'Failed') { $codes.Add(2) }
             else { $codes.Add(1) }   # Error and anything unknown
+        }
+    }
+    foreach ($o in $CheckOutcomes) {
+        switch -CaseSensitive ($o) {
+            { $_ -cin 'Passed', 'Skipped' } { }   # Skipped: the check was not run because a run did not complete (that run decides)
+            'Failed' { $codes.Add(2) }
+            'Inconclusive' { $codes.Add(3) }
+            default { $codes.Add(1) }   # RigError and anything unknown
         }
     }
     if ($ForceTimeout) { $codes.Add(3) }
@@ -1243,6 +1359,158 @@ function Format-RigExpectationLine {
     $what = if (@($Expectation.Scenarios).Count -gt 0) { @($Expectation.Scenarios) -join '+' } else { 'soak' }
     '{0,-6} {1,-6} expected {2,-10} actual {3,-12} {4,-8} {5}' -f $Expectation.RunId, "$Suite-$what", `
         $Expectation.ExpectedExitClass, $actual, $verdict, $Path
+}
+
+# Longest a check script may run before it is killed (a hung script must not hang the whole judgement).
+$script:RigCheckScriptTimeoutSeconds = 600
+
+# Runs a check script of a suite (PostRunChecks / JobChecks) in its own Windows PowerShell process and reads the JSON it
+# writes to $ResultPath (a stale file from an earlier judgement is deleted first, on every path, so only this call's
+# result counts). Returns Document (the parsed JSON object) and Problem: $null on success, else why there is no result
+# (script missing, timed out and killed, no or invalid JSON; with the script's exit code and last output line). The
+# script's console output is not shown.
+function Invoke-RigCheckScript {
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$ResultPath
+    )
+    if (Test-Path -LiteralPath $ResultPath) { Remove-Item -LiteralPath $ResultPath -Force -ErrorAction Stop }
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
+        return [pscustomobject]@{ Document = $null; Problem = "check script not found: $ScriptPath" }
+    }
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $quoted = foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $ScriptPath) + @($Arguments)) {
+        '"' + ($argument -replace '(\\*)"', '$1$1\"' -replace '(\\+)\z', '$1$1') + '"'
+    }
+    $startInfo.Arguments = $quoted -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    try {
+        # Both streams are drained asynchronously, else a chatty script could block on a full pipe.
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit([int]($script:RigCheckScriptTimeoutSeconds * 1000))) {
+            try { $process.Kill() } catch { }   # it may have ended just now
+            $process.WaitForExit()
+            return [pscustomobject]@{ Document = $null; Problem = "$(Split-Path -Leaf $ScriptPath) timed out after $($script:RigCheckScriptTimeoutSeconds) seconds and was killed" }
+        }
+        $process.WaitForExit()   # flushes the redirected streams
+        $exit = $process.ExitCode
+        $output = @(($stdout.Result + "`n" + $stderr.Result) -split "`r?`n")
+    } finally { $process.Dispose() }
+    $lastLine = @($output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1)
+    $shownLine = if ($lastLine.Count -gt 0) { Format-RigCheckField $lastLine[0] 200 } else { '(no output)' }
+    if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
+        return [pscustomobject]@{ Document = $null; Problem = "$(Split-Path -Leaf $ScriptPath) wrote no result (exit $exit): $shownLine" }
+    }
+    try {
+        $doc = [IO.File]::ReadAllText($ResultPath, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
+        if ($doc -isnot [System.Management.Automation.PSCustomObject]) { throw 'not a JSON object' }
+    } catch {
+        return [pscustomobject]@{ Document = $null; Problem = "$(Split-Path -Leaf $ScriptPath) wrote an invalid result ${ResultPath}: $($_.Exception.Message)" }
+    }
+    [pscustomobject]@{ Document = $doc; Problem = $null }
+}
+
+# One PostRunCheck (CW-2, F-S10-6) on one Completed run. The rows of the result JSON decide: any FAIL = 'Failed'; PASS,
+# 'N/A for mode' and MANUAL count as met; 'INSUFFICIENT DATA' and 'WARN ...' are warnings (shown, no exit code);
+# 'RigError' when the log or the script is missing, the run mode is unknown, the script wrote no result, there is no row,
+# or a row has an unknown verdict. Returns Id, Outcome, Detail (expected/actual summary), Rows (the FAIL and warning rows:
+# Ac, Verdict, Evidence, Shown = 'FAIL' / 'WARN' / 'UNKNOWN') and ResultPath.
+function Invoke-RigPostRunCheck {
+    param(
+        [Parameter(Mandatory)][hashtable]$Check,
+        [Parameter(Mandatory)][string]$RunDir,
+        [AllowNull()][AllowEmptyString()][string]$Mode,   # the run's job.json mode
+        [Parameter(Mandatory)][int]$Days,
+        [Parameter(Mandatory)][string]$WorkspaceRoot
+    )
+    $resultPath = Join-Path $RunDir "$($Check.Id).json"
+    $outcome = { param($Outcome, $Detail, $Rows = @()) [pscustomobject]@{ Id = $Check.Id; Outcome = $Outcome; Detail = $Detail; Rows = @($Rows); ResultPath = $resultPath } }
+    $logPath = Join-Path $RunDir $Check.Log
+    # A stale result of an earlier judgement must not survive an early return (Invoke-RigCheckScript deletes it as well).
+    if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Force -ErrorAction Stop }
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return (& $outcome 'RigError' "log missing: $logPath") }
+    if ([string]::IsNullOrWhiteSpace($Mode)) { return (& $outcome 'RigError' 'run mode unknown (no mode for this run in job.json)') }
+    $script = Join-Path $WorkspaceRoot $Check.Script
+    $r = Invoke-RigCheckScript -ScriptPath $script -ResultPath $resultPath `
+        -Arguments @('-LogPath', $logPath, '-Mode', $Mode, '-MinDays', [string]$Days, '-ResultPath', $resultPath)
+    if ($null -ne $r.Problem) { return (& $outcome 'RigError' $r.Problem) }
+    $rows = @($r.Document.rows | Where-Object { $null -ne $_ })
+    if ($rows.Count -eq 0) { return (& $outcome 'RigError' "no verdict rows in $resultPath") }
+    $counts = [ordered]@{}
+    $notable = @()
+    $failed = $false
+    $unknown = $false
+    foreach ($row in $rows) {
+        $verdict = [string]$row.verdict
+        $counts[$verdict] = 1 + $(if ($counts.Contains($verdict)) { $counts[$verdict] } else { 0 })
+        $shown = if ($verdict -ceq 'FAIL') { 'FAIL' }
+        elseif ($verdict -ceq 'INSUFFICIENT DATA' -or $verdict -clike 'WARN*') { 'WARN' }
+        elseif ($verdict -cin 'PASS', 'N/A for mode', 'MANUAL') { $null }
+        else { 'UNKNOWN' }
+        if ($shown -ceq 'FAIL') { $failed = $true }
+        if ($shown -ceq 'UNKNOWN') { $unknown = $true }
+        if ($shown) { $notable += [pscustomobject]@{ Ac = [string]$row.ac; Verdict = $verdict; Evidence = [string]$row.evidence; Shown = $shown } }
+    }
+    $actual = @($counts.Keys | ForEach-Object { '{0} {1}' -f $counts[$_], (Format-RigCheckField $_ 40) }) -join ', '
+    $result = if ($unknown) { 'RigError' } elseif ($failed) { 'Failed' } else { 'Passed' }
+    & $outcome $result "expected no FAIL, actual $actual" $notable
+}
+
+# One JobCheck (CW-1) on a completed job: one entry per check of the result JSON (Id = its 'check', Outcome = its verdict
+# when Passed, Failed or Inconclusive, else 'RigError'; Detail; Violations), or one 'RigError' entry under the JobCheck's
+# Id when the script is missing, wrote no result or the result holds no check.
+function Invoke-RigJobCheck {
+    param(
+        [Parameter(Mandatory)][hashtable]$Check,
+        [Parameter(Mandatory)][string]$ResultDir,
+        [Parameter(Mandatory)][string]$WorkspaceRoot,
+        [string]$JobManifestPath   # job.json of the job (the plan); passed as -JobManifestPath to a check with UsesJobManifest, when the file exists
+    )
+    $resultPath = Join-Path $ResultDir $Check.ResultFile
+    $arguments = @('-JobPath', $ResultDir, '-ResultPath', $resultPath)
+    if ($Check.UsesJobManifest -and $JobManifestPath -and (Test-Path -LiteralPath $JobManifestPath -PathType Leaf)) {
+        $arguments += @('-JobManifestPath', $JobManifestPath)
+    }
+    $r = Invoke-RigCheckScript -ScriptPath (Join-Path $WorkspaceRoot $Check.Script) -ResultPath $resultPath -Arguments $arguments
+    $entries = @(if ($null -eq $r.Problem) { $r.Document.checks | Where-Object { $null -ne $_ } })
+    if ($null -ne $r.Problem -or $entries.Count -eq 0) {
+        $problem = if ($null -ne $r.Problem) { $r.Problem } else { "no checks in $resultPath" }
+        return [pscustomobject]@{ Id = $Check.Id; Outcome = 'RigError'; Detail = $problem; Violations = @(); ResultPath = $resultPath }
+    }
+    foreach ($e in $entries) {
+        $verdict = [string]$e.verdict
+        [pscustomobject]@{
+            Id = Format-RigCheckField $(if ([string]::IsNullOrWhiteSpace([string]$e.check)) { $Check.Id } else { [string]$e.check }) 80
+            Outcome = if ($verdict -cin 'Passed', 'Failed', 'Inconclusive') { $verdict } else { 'RigError' }
+            Detail = Format-RigCheckField ([string]$e.detail) 400
+            Violations = @(if ($e.PSObject.Properties.Name -contains 'violations') { @($e.violations | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) })
+            ResultPath = $resultPath
+        }
+    }
+}
+
+# Console rows of the suite checks, in the style of the run rows: '<runId> <Suite>-<check id> <outcome> <detail> <file>'
+# ('job' instead of a run id for a JobCheck), then one indented row per FAIL / warning row or violation. 'Error' is shown
+# for 'RigError'.
+function Format-RigCheckLines {
+    param([Parameter(Mandatory)][string]$Where, [Parameter(Mandatory)][string]$Suite, [Parameter(Mandatory)]$Result)
+    $shown = if ($Result.Outcome -ceq 'RigError') { 'Error' } else { $Result.Outcome }
+    '{0,-6} {1,-6} {2,-12} {3}  {4}' -f $Where, "$Suite-$($Result.Id)", $shown, $Result.Detail, $Result.ResultPath
+    if ($Result.PSObject.Properties.Name -contains 'Rows') {
+        foreach ($row in @($Result.Rows)) {
+            '    {0}: expected PASS, actual {1} ({2}) - {3}' -f (Format-RigCheckField $row.Ac 20), (Format-RigCheckField $row.Verdict 40), $row.Shown, (Format-RigCheckField $row.Evidence 300)
+        }
+    }
+    if ($Result.PSObject.Properties.Name -contains 'Violations') {
+        foreach ($v in @($Result.Violations)) { '    FAIL  {0}' -f (Format-RigCheckField $v 300) }
+    }
 }
 
 # Runs $Action, retrying on any error (transient transport problems). Backoff: DelaySeconds * attempt.
@@ -1341,8 +1609,18 @@ function Publish-RigResult {
         [string]$TowerGamePath,   # when set, versions reported by the agent are compared with the tower (warnings only)
         [AllowNull()][string[]]$ExpectedModules,   # job.modules; the L1 verdict compares the reported modules with it
         [string]$BaselinePath = $script:RigL1BaselinePath,   # the L1 baseline (-Suite L1 only)
+        [object[]]$JobRuns = @(),   # job.json runs[]: the mode of each run (job-result.json runs[].mode, the PostRunChecks' -Mode)
+        [string]$WorkspaceRoot,     # resolves the Script of the suite's PostRunChecks/JobChecks; default: parent folder of this repo
+        [string]$JobManifestPath,   # <OutRoot>\jobs\<id>\job.json: the job plan, passed to the JobChecks that use it (-JobManifestPath)
+        [AllowNull()][string[]]$CarriedVersionWarnings,   # offline re-judgement: the version warnings of the earlier job-result.json (no tower to compare with)
+        [AllowNull()]$RejudgedFrom,   # offline re-judgement: { exitCode; at } written as 'rejudgedFrom' to job-result.json
+        [switch]$SkipChecks,        # do not run the suite's PostRunChecks/JobChecks (tests of the other verdict parts)
         [switch]$ForceTimeout
     )
+    if (-not $WorkspaceRoot) { $WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+    $suiteDef = if ($Suite) { $script:RigSuites[$Suite] } else { $null }
+    $postRunChecks = @(if (-not $SkipChecks -and $null -ne $suiteDef -and $suiteDef.ContainsKey('PostRunChecks')) { $suiteDef.PostRunChecks })
+    $jobChecks = @(if (-not $SkipChecks -and $null -ne $suiteDef -and $suiteDef.ContainsKey('JobChecks')) { $suiteDef.JobChecks })
     $doneFile = Join-Path $ResultDir 'done.json'
     if (-not (Test-Path -LiteralPath $doneFile)) { throw "done.json missing in fetched result: $ResultDir" }
     $done = Get-Content -LiteralPath $doneFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -1396,6 +1674,14 @@ function Publish-RigResult {
         if ($null -ne $l1Baseline -and [string]$dr.exitClass -ceq 'Completed') {
             $l1Verdict = Get-RigL1Verdict -RunId $runId -Result $rr.Result -ExpectedModules $ExpectedModules -GameVersion $gameVersion -Baseline $l1Baseline
         }
+        $jobRun = @($JobRuns | Where-Object { $null -ne $_ -and [string]$_.runId -ceq $runId }) | Select-Object -First 1
+        $runMode = if ($null -ne $jobRun -and $jobRun.mode -is [string] -and $jobRun.mode -ne '') { $jobRun.mode } else { $null }
+        # Suite checks on the fetched artifacts: only a Completed run (any other exit class already fails by itself).
+        $checkResults = @(if ([string]$dr.exitClass -ceq 'Completed') {
+                foreach ($check in $postRunChecks) {
+                    Invoke-RigPostRunCheck -Check $check -RunDir $runDir -Mode $runMode -Days $Days -WorkspaceRoot $WorkspaceRoot
+                }
+            })
 
         $runs += [pscustomobject]@{
             runId = $runId; kind = $runKind; exitClass = [string]$dr.exitClass; daysReached = $daysReached; result = $rr.Result
@@ -1403,6 +1689,7 @@ function Publish-RigResult {
             scenarioIds = @($rr.Scenarios | ForEach-Object { $_.Id })
             requestedScenarios = $requestedScenarios; requestedHealth = $requestedHealth
             gameVersion = $gameVersion; moduleVersions = $moduleVersions; message = $runMessage; l1Verdict = $l1Verdict
+            mode = $runMode; checks = $checkResults
         }
         # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario, each followed by
         # one indented line per failed check of that scenario
@@ -1429,7 +1716,34 @@ function Publish-RigResult {
             }
         }
         if ($null -ne $l1Verdict) { $lines += @(Format-RigL1Lines -RunId $runId -Verdict $l1Verdict) }
+        foreach ($c in $checkResults) { $lines += @(Format-RigCheckLines -Where $runId -Suite $Suite -Result $c) }
     }
+    # Job checks (CW-1) over the whole fetched job: only a completed job (otherwise the job status already decides).
+    # The check always runs: a violation it finds is evidence even when another run is unusable. With a run that did not
+    # end as its expectation says (a suite with Runs; else: did not end Completed) a Failed outcome stays Failed (shown and
+    # counted); every other outcome (Passed, Inconclusive, RigError) becomes Skipped, since it could only outrank the run's
+    # own verdict (a Crashed run or a Completed one with a failed scenario is a Mismatch, 2).
+    $unusableRunIds = @(if ($expectations.Count -gt 0) {
+            foreach ($e in $expectations) {
+                $judged = $runs | Where-Object { $_.runId -ceq $e.RunId } | Select-Object -First 1
+                if ((Get-RigExpectationOutcome -Expectation $e -Run $judged -Days $Days) -cne 'Met') { $e.RunId }
+            }
+        } else {
+            $runs | Where-Object { $_.exitClass -cne 'Completed' } | ForEach-Object { $_.runId }
+        })
+    $unusableWording = if ($expectations.Count -gt 0) { 'did not meet its expectation' } else { 'not Completed' }
+    $jobCheckResults = @(if ($doneStatus -ceq 'completed') {
+            foreach ($check in $jobChecks) {
+                foreach ($result in @(Invoke-RigJobCheck -Check $check -ResultDir $ResultDir -WorkspaceRoot $WorkspaceRoot -JobManifestPath $JobManifestPath)) {
+                    if ($unusableRunIds.Count -gt 0 -and $result.Outcome -cne 'Failed') {
+                        $result.Detail = "not judged: run(s) $($unusableRunIds -join ', ') $unusableWording (check said $($result.Outcome))"
+                        $result.Outcome = 'Skipped'
+                    }
+                    $result
+                }
+            }
+        })
+    foreach ($c in $jobCheckResults) { $lines += @(Format-RigCheckLines -Where 'job' -Suite $Suite -Result $c) }
     if ($expectations.Count -gt 0) {
         $expectationLines = foreach ($e in $expectations) {
             $run = $runs | Where-Object { $_.runId -ceq $e.RunId } | Select-Object -First 1
@@ -1459,7 +1773,7 @@ function Publish-RigResult {
         Write-RigMessage $(if ([string]::IsNullOrWhiteSpace($doneMessage)) { "job status: $shownStatus" } else { "job status: $shownStatus - $doneMessage" })
     }
 
-    $versionWarnings = @()
+    $versionWarnings = @($CarriedVersionWarnings | Where-Object { $null -ne $_ })
     if (-not [string]::IsNullOrWhiteSpace($TowerGamePath)) {
         try { $versionWarnings = @(Get-RigVersionWarnings -TowerGamePath $TowerGamePath -Runs $runs) } catch {
             Write-RigMessage "WARN version check skipped: $($_.Exception.Message)"
@@ -1467,16 +1781,29 @@ function Publish-RigResult {
     }
     $versionWarnings | ForEach-Object { Write-RigMessage $_ }
 
-    $code = Resolve-RigExitCode -DoneStatus $doneStatus -Runs $runs -Days $Days -Expectations $expectations -ForceTimeout:$ForceTimeout
-    Write-RigJsonFile -Path (Join-Path $ResultDir 'job-result.json') -InputObject ([ordered]@{
+    $checkOutcomes = @(@($runs | ForEach-Object { $_.checks }) + $jobCheckResults | Where-Object { $null -ne $_ } | ForEach-Object { $_.Outcome })
+    $code = Resolve-RigExitCode -DoneStatus $doneStatus -Runs $runs -Days $Days -Expectations $expectations -CheckOutcomes $checkOutcomes -ForceTimeout:$ForceTimeout
+    $checkJson = {
+        param($Result)
+        $o = [ordered]@{ id = $Result.Id; outcome = $Result.Outcome; detail = $Result.Detail; resultPath = $Result.ResultPath }
+        if ($Result.PSObject.Properties.Name -contains 'Rows') {
+            $o.rows = @($Result.Rows | ForEach-Object { [ordered]@{ ac = $_.Ac; expected = 'PASS'; actual = $_.Verdict; evidence = $_.Evidence } })
+        }
+        if ($Result.PSObject.Properties.Name -contains 'Violations') { $o.violations = @($Result.Violations) }
+        $o
+    }
+    $jobResult = [ordered]@{
             jobId    = $JobId
             suite    = if ($Suite) { $Suite } else { $null }
             status   = if ($doneStatus) { $doneStatus } else { $null }
             exitCode = $code
             runs     = @($runs | ForEach-Object {
                     $entry = [ordered]@{
-                        runId = $_.runId; exitClass = $_.exitClass; result = $_.result
+                        runId = $_.runId; mode = $_.mode; exitClass = $_.exitClass; result = $_.result
                         gameVersion = $_.gameVersion; moduleVersions = $_.moduleVersions
+                    }
+                    if ($postRunChecks.Count -gt 0) {   # suites with PostRunChecks: empty for a run that is not Completed
+                        $entry.checks = @($_.checks | ForEach-Object { & $checkJson $_ })
                     }
                     if ($healthLineIds.Count -gt 0) {   # health suites: every expected health line with what the run reported
                         $reportedIds = [object[]]@($_.scenarioIds)
@@ -1515,9 +1842,77 @@ function Publish-RigResult {
                     }
                     $entry
                 })
+            # suites with JobChecks: one entry per check (empty for a job that is not completed); else null
+            jobChecks = if ($jobChecks.Count -gt 0) { , @($jobCheckResults | ForEach-Object { & $checkJson $_ }) } else { $null }
             versionWarnings = $versionWarnings
-        })
+        }
+    if ($null -ne $RejudgedFrom) { $jobResult.rejudgedFrom = $RejudgedFrom }
+    Write-RigJsonFile -Path (Join-Path $ResultDir 'job-result.json') -InputObject $jobResult
     $code
+}
+
+# Re-judges a fetched job offline (F-S10-1, entry point runner\Update-JobResult.ps1): reads <OutRoot>\jobs\<jobId>\job.json
+# (days, modules, the runs with their modes) and the suite from the job's existing job-result.json (-Suite overrides it),
+# then judges <OutRoot>\results\<jobId> again exactly as after the fetch (Publish-RigResult, including the suite's
+# PostRunChecks/JobChecks with the scripts as they are now) and rewrites its job-result.json. The earlier file is kept as
+# job-result.previous.json (the first judgement is never overwritten), its versionWarnings are carried over and its exit
+# code is recorded as rejudgedFrom. Not reconstructed: a runner-side time limit of the original wait (-ForceTimeout)
+# (visible in the kept file). Returns the exit code (1 when the job folders are unusable).
+function Update-RigJobResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$OutRoot,
+        [string]$Suite,
+        [string]$WorkspaceRoot,   # default: parent folder of this repo (see Publish-RigResult)
+        [string]$BaselinePath = $script:RigL1BaselinePath
+    )
+    try {
+        if ($JobId -cnotmatch '^[A-Za-z0-9_-]+\z') { throw "Invalid jobId '$JobId'." }
+        $resultDir = Join-Path (Join-Path $OutRoot 'results') $JobId
+        $jobFile = Join-Path (Join-Path (Join-Path $OutRoot 'jobs') $JobId) 'job.json'
+        if (-not (Test-Path -LiteralPath $resultDir -PathType Container)) { throw "Result folder not found: $resultDir" }
+        if (-not (Test-Path -LiteralPath $jobFile -PathType Leaf)) { throw "job.json not found: $jobFile" }
+        $job = Get-Content -LiteralPath $jobFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $jobRuns = @($job.runs | Where-Object { $null -ne $_ })
+        $days = 0
+        if ($jobRuns.Count -eq 0 -or -not [int]::TryParse([string]$jobRuns[0].days, [ref]$days) -or $days -lt 1) {
+            throw "$jobFile has no run with a valid 'days'."
+        }
+        $previousFile = Join-Path $resultDir 'job-result.json'
+        $previous = $null   # the earlier job-result.json, $null when there is none or it is unreadable
+        $previousError = $null
+        if (Test-Path -LiteralPath $previousFile -PathType Leaf) {
+            try { $previous = Get-Content -LiteralPath $previousFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $previousError = $_ }
+        }
+        if (-not $Suite) {
+            if ($null -ne $previousError) { throw $previousError }   # the suite cannot be taken from an unreadable file
+            if ($null -ne $previous) { $Suite = [string]$previous.suite }
+        }
+        if ($Suite) {
+            $canonical = Get-RigSuiteName $Suite
+            if (-not $canonical) { throw "unknown suite '$Suite'. Valid suites: $((@($script:RigSuites.Keys) | Sort-Object) -join ', ')." }
+            $Suite = $canonical
+        }
+        Write-RigMessage "re-judging job $JobId offline (suite: $(if ($Suite) { $Suite } else { 'none' }), $days days)"
+        # Keep the evidence of the earlier judgement (original exit code, timeout, version warnings) before it is overwritten.
+        $carriedWarnings = @()
+        $rejudgedFrom = $null
+        if ($null -ne $previous) {
+            $copy = Join-Path $resultDir 'job-result.previous.json'
+            if (-not (Test-Path -LiteralPath $copy)) { Copy-Item -LiteralPath $previousFile -Destination $copy }   # the first judgement stays
+            if ($previous.PSObject.Properties.Name -contains 'versionWarnings') { $carriedWarnings = @($previous.versionWarnings | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) }
+            $originalExitCode = if ($previous.PSObject.Properties.Name -contains 'rejudgedFrom' -and $null -ne $previous.rejudgedFrom) { $previous.rejudgedFrom.exitCode }
+            elseif ($previous.PSObject.Properties.Name -contains 'exitCode') { $previous.exitCode }
+            else { $null }
+            $rejudgedFrom = [ordered]@{ exitCode = $originalExitCode; at = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+        }
+        Publish-RigResult -ResultDir $resultDir -JobId $JobId -Days $days -Suite $Suite -ExpectedModules @($job.modules | Where-Object { $null -ne $_ }) `
+            -JobRuns $jobRuns -WorkspaceRoot $WorkspaceRoot -BaselinePath $BaselinePath -JobManifestPath $jobFile `
+            -CarriedVersionWarnings $carriedWarnings -RejudgedFrom $rejudgedFrom
+    } catch {
+        Write-RigMessage "ERROR: $($_.Exception.Message)"
+        1
+    }
 }
 
 function Start-TestRigJob {
@@ -1548,7 +1943,8 @@ function Start-TestRigJob {
                 throw "Package source '$PackageFrom' has no Modules\$harnessModule (needed by -Harness $Harness)."
             }
             if ($Suite) {
-                foreach ($suiteModule in @($script:RigSuites[$Suite].ExtraModules) + @($script:RigSuites[$Suite].TailModules)) {
+                $s = $script:RigSuites[$Suite]
+                foreach ($suiteModule in @(if ($s.WithCoherentWarAI) { 'CoherentWarAI' }) + @($s.ExtraModules) + @($s.TailModules)) {
                     if (-not (Test-Path -LiteralPath (Join-Path $PackageFrom "Modules\$suiteModule") -PathType Container)) {
                         throw "Package source '$PackageFrom' has no Modules\$suiteModule (needed by -Suite $Suite)."
                     }
@@ -1560,8 +1956,9 @@ function Start-TestRigJob {
                 throw "Config '$ConfigPath' is missing 'towerGamePath' (needed to build; that game folder is only read, never written)."
             }
             $msbuildPath = if ([string]::IsNullOrWhiteSpace([string]$target.msbuildPath)) { $script:DefaultMsBuildPath } else { [string]$target.msbuildPath }
-            if (-not $WorkspaceRoot) { $WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
         }
+        # Also with -PackageFrom: the suite's PostRunChecks/JobChecks are scripts in the workspace repos.
+        if (-not $WorkspaceRoot) { $WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
 
         # Game version the job expects: the tower install's Version.xml (unreadable = abort before anything is built or published).
         $towerGamePath = [string]$target.towerGamePath
@@ -1585,7 +1982,8 @@ function Start-TestRigJob {
         if ($buildMode) {
             $stageDir = Join-Path (Join-Path $OutRoot 'stage') $jobId
             $build = Invoke-RigBuildPackage -WorkspaceRoot $WorkspaceRoot -StageDir $stageDir `
-                -TowerGamePath ([string]$target.towerGamePath) -MsBuildPath $msbuildPath -Suite $Suite
+                -TowerGamePath ([string]$target.towerGamePath) -MsBuildPath $msbuildPath -Suite $Suite `
+                -SuiteDefinition $(if ($Suite) { $script:RigSuites[$Suite] } else { $null })
             Write-RigMessage "build: staged in $stageDir; tower Modules unchanged"
             Copy-Item -LiteralPath $build.ManifestPath -Destination (Join-Path $jobDir 'manifest.json') -ErrorAction Stop
             $repos = @($build.Repos)
@@ -1624,7 +2022,8 @@ function Start-TestRigJob {
             Receive-JobResult -Target $target -JobId $jobId -DestinationRoot (Join-Path $OutRoot 'results')
         }
         return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -Suite $Suite -TowerGamePath $towerGamePath `
-                -ExpectedModules @($manifest.modules) -ForceTimeout:$forceTimeout)
+                -ExpectedModules @($manifest.modules) -JobRuns @($manifest.runs) -WorkspaceRoot $WorkspaceRoot `
+                -JobManifestPath (Join-Path $jobDir 'job.json') -ForceTimeout:$forceTimeout)
     } catch {
         Write-RigMessage "ERROR: $($_.Exception.Message)"
         return 1
@@ -1633,6 +2032,12 @@ function Start-TestRigJob {
 
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'runner.config.json' }
+    if ($Suite -and -not $script:RigSuites.ContainsKey($Suite)) {
+        Write-RigMessage "ERROR: unknown -Suite '$Suite'. Valid suites: $((@($script:RigSuites.Keys) | Sort-Object) -join ', ')."
+        exit 1
+    }
+    # The canonical spelling of the suite (the table key): the verdict compares suite names case-sensitively (-Suite l1 = L1).
+    if ($Suite) { $Suite = Get-RigSuiteName $Suite }
     try {
         $settings = Resolve-RigSuiteSettings -Suite $Suite -BoundParameters @($PSBoundParameters.Keys) `
             -Harness $Harness -Mode $Mode -Seed $Seed -Days $Days

@@ -92,6 +92,10 @@
     <Compile Include="Logic\Scenario.cs" />
     <Compile Include="Logic\ScenarioDiscovery.cs" />
     <Compile Include="Logic\ScenarioRunner.cs" />
+    <Compile Include="Logic\SnapshotDiff.cs" />
+    <Compile Include="Fixtures\InventorySnapshot.cs" />
+    <Compile Include="Fixtures\ScreenFixture.cs" />
+    <Compile Include="Fixtures\TownFixture.cs" />
     <Compile Include="HarnessSubModule.cs" />
     <Compile Include="SeededSandBoxGameManager.cs" />
     <Compile Include="CharacterCreationDriver.cs" />

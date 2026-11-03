@@ -339,7 +339,7 @@ Describe 'Publish-RigResult -Suite L1 verdict' {
         if ($RunResultJson) { [IO.File]::WriteAllText((Join-Path $script:rd 'r1\run-result.json'), $RunResultJson) }
     }
     function Publish([string]$BaselinePath = $script:baseFile) {
-        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:verdictModules -BaselinePath $BaselinePath
+        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:verdictModules -BaselinePath $BaselinePath -SkipChecks
     }
     function Get-JobResult { Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json }
 

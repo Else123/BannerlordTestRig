@@ -50,8 +50,17 @@
       <HintPath>$(BannerlordBinPath)\TaleWorlds.Core.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <!-- Needed by the compiler to resolve MBSaveLoad.GetSaveFiles (SaveGameFileInfo, MetaData). -->
+    <Reference Include="TaleWorlds.SaveSystem">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.SaveSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="TaleWorlds.Library">
       <HintPath>$(BannerlordBinPath)\TaleWorlds.Library.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.ObjectSystem">
+      <HintPath>$(BannerlordBinPath)\TaleWorlds.ObjectSystem.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="TaleWorlds.MountAndBlade">
@@ -64,6 +73,7 @@
     <Compile Include="ThrowScenario.cs" />
     <Compile Include="HangScenario.cs" />
     <Compile Include="PassScenario.cs" />
+    <Compile Include="TownScreenScenario.cs" />
     <Compile Include="ExceptionStormScenario.cs" />
   </ItemGroup>
   <ItemGroup>

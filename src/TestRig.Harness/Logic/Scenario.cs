@@ -41,6 +41,12 @@ namespace TestRig.Harness.Logic
         /// requested days after it.
         /// </summary>
         int Day { get; }
+
+        /// <summary>
+        /// The <c>days=</c> value of run.cfg: the days the run was asked for. Read-only information;
+        /// a scenario that wants game time must still yield <see cref="ScenarioStep.Days"/> itself.
+        /// </summary>
+        int DaysRequested { get; }
     }
 
     /// <summary>A wait yielded by a scenario. Created only through the factory methods.</summary>

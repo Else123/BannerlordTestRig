@@ -410,7 +410,7 @@ scenario modules hold one health scenario per mod and load after the harness the
 `["coherentwarai.health", "autotrader.health", "smithingsuite.health", "companionsuite.health"]` (the health bracket,
 see "`run.cfg`"). Explicit `-Days`, `-Seed`, `-Mode` win over the suite defaults; an explicit
 `-Harness` other than `TestRig` is a usage error (runner exit 1, nothing built or published). `job.json` keeps its
-schema: the suite only shapes `modules` and `runs[]` (several runs for RIG and L1-BASE), there is no suite key (the agent never sees it). The suite name
+schema: the suite only shapes `modules` and `runs[]` (several runs for RIG, L1-BASE and CW1), there is no suite key (the agent never sees it). The suite name
 appears in `job-result.json` as job-level `suite` (`"L1"`, `null` without `-Suite`); `scenarios[].id` stays raw (`soak`,
 `autotrader.health@0`). With `-PackageFrom` the package must contain the four mods, `TestRig.Harness` and the four
 scenario modules. The build mode builds ten projects for L1: the seven of every job (see `-Suite SM`), then
@@ -491,8 +491,88 @@ base-run tempo spread (max - min) / median exceeds 10 % or the slowest L1 run is
 Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore, Sandbox, StoryMode, NavalDLC, SmithingSuite,
 TestRig.Harness, SmithingSuite.Scenarios` (no CoherentWarAI; the scenario module loads after the harness it references).
 With `-PackageFrom` the package must contain `SmithingSuite`, `TestRig.Harness` and `SmithingSuite.Scenarios`. The
-default build mode builds seven projects for every job (eight with `-Suite RIG`, ten with `-Suite L1`, one with
-`-Suite L1-BASE`), including `BannerlordSmithingSuite\tests\InGame\SmithingSuite.Scenarios`.
+default build mode builds seven projects for every job (eight with `-Suite RIG`, `CS`, `AT` or `CW1`, ten with
+`-Suite L1`, one with `-Suite L1-BASE`), including `BannerlordSmithingSuite\tests\InGame\SmithingSuite.Scenarios`.
+
+`-Suite CS` (CompanionManagementSuite) and `-Suite AT` (AutoTraderSpeed) are scenario suites like SM: harness `TestRig`,
+mode `WarSails`, seed 1, `days` 1, `kind` `scenarios`, one run `r1`. CS: `scenarios` `["companion.equip-now",
+"companion.roles-apply", "companion.development-guard"]`, `modules` = base modules, `CompanionManagementSuite`,
+`TestRig.Harness`, `CompanionManagementSuite.Scenarios`. AT: `["autotrader.warehouse-consign", "autotrader.town-trade"]`,
+`modules` = base modules, `AutoTraderSpeed`, `TestRig.Harness`, `AutoTraderSpeed.Scenarios`. No CoherentWarAI. Exit codes
+as for SM (no per-run expectations): 0 all scenarios Passed, 2 one Failed, 1 rig error (missing, Skipped, Error), 3
+abort or runner deadline. The scenario row prefix is the suite (`CS-companion.equip-now`).
+
+`-Suite CW1` (AC25a comparison) has per-run expectations and per-run modes. `modules` = base modules, `CoherentWarAI`,
+`TestRig.Harness`, `CoherentWarAI.Scenarios` (no other mod); `days` 30 (an explicit `-Days` applies to all runs). Twelve
+runs `r1`-`r12`, `kind` `scenarios`, `scenarios` `["coherentwarai.ac25a-digest"]`, `hardTimeoutMinutes` 10, each expected
+`Completed` with its scenario Passed, with `runs[].seed` 1, 2, 3 (four runs each) and `runs[].mode` per seed `WarSails`,
+`FeatureOff`, `FeatureOff`, `WarSails`. `mode` is already a per-run field of `job.json`; a suite run definition may set
+`Mode`, which the runner writes to that run's `runs[].mode` instead of the `-Mode` value. Rules: an explicit `-Mode` is a
+usage error when the runs fix their modes (as `-Seed`); every run mode must load the same module list as the job's mode
+(`WarSails` and `FeatureOff` do, `NoDlc` drops NavalDLC), else usage error (runner exit 1 before anything is built).
+`FeatureOff` itself is applied by the agent (it writes the MCM settings of the run after the baseline restore). Exit codes
+as for `-Suite RIG`. Overall deadline: 12 x (10 + 2) + claim wait + 5 = 151 minutes with the defaults. The harness limit
+of 300 s per scenario holds for 30 days with a factor of about 3; with far more days (about 80 and up) the digest
+scenario can run into it. CW1 also runs CW-2 per run and CW-1 per job (see "Suite checks").
+
+### Suite checks (runner, after the fetch)
+
+A suite may name check scripts of a mod repo that the runner calls on the tower after the result is fetched (the agent
+and `job.json` are not involved, so an old job can be judged again offline). `Script` is relative to the workspace root
+(the folder that holds the repos, the parent of this repo). Each script runs in its own `powershell -NoProfile -File`
+process; the runner reads only the JSON it writes (a stale file is deleted first) and does not show its console output.
+
+- `PostRunChecks` (per run, every run with `exitClass` `Completed`): `@{ Id; Script; Log }`, called as
+  `<Script> -LogPath <run>\<Log> -Mode <runs[].mode of job.json> -MinDays <days> -ResultPath <run>\<Id>.json`; the result
+  is `{ "rows": [ { "ac", "verdict", "evidence" } ] }`. Verdicts: `FAIL` = `Failed`; `PASS`, `N/A for mode`, `MANUAL` are
+  met; `INSUFFICIENT DATA` and `WARN ...` are warnings (shown, exit code unchanged); any other verdict, no row, no result,
+  a missing log, script or run mode = `RigError`.
+- `JobChecks` (per job, only when done status is `completed`): `@{ Id; Script; ResultFile; UsesJobManifest? }`, called as
+  `<Script> -JobPath <job result folder> -ResultPath <job result folder>\<ResultFile>`, plus
+  `-JobManifestPath <OutRoot>\jobs\<jobId>\job.json` for a check with `UsesJobManifest` (CW-1) when that file exists: the
+  job plan is not part of the results folder (also passed by the offline re-judgement). The result is
+  `{ "checks": [ { "check", "verdict", "detail", "violations"? } ] }`. Verdicts `Passed`, `Failed`, `Inconclusive`; any
+  other (including `RigError`, which the script reports for missing or broken artifacts), no check or no result (e.g. the
+  script exits 1: job folder unusable) = `RigError` under the JobCheck's `Id`; an entry without a `check` name takes the
+  JobCheck's `Id`. A script that runs longer than 10 minutes is killed and counts as no result (`RigError`). If any run
+  of the job did not meet its expectation (a suite with per-run expectations: verdict not `Met`, e.g. `Crashed`, or
+  `Completed` with a failed scenario check; otherwise: the run did not end `Completed`), the JobChecks still run (a
+  violation they find is evidence even when another run is unusable): a `Failed` outcome stays `Failed` (shown and
+  counted); every other outcome (`Passed`, `Inconclusive`, `RigError`) becomes `Skipped` with the detail
+  `not judged: run(s) rN did not meet its expectation (check said <verdict>)` (`not Completed` for a suite without
+  expectations), exit code unchanged (otherwise an `Inconclusive` would outrank the run's own verdict). A stale result
+  file of an earlier judgement is deleted before each script call on every path (also when the script or the log is
+  missing), so a Skipped or Error row never leaves an old result looking current.
+
+Suites: `L1` and `CW1` run CW-2 (`coherentwarai.command-log`: `BannerlordCoherentWarAI\tools\Check-CommandLog.ps1` on
+`CoherentWarAI.log`, F-S10-6); `CW1` also runs CW-1 (`coherentwarai.ac25a`: `BannerlordCoherentWarAI\tools\Compare-Ac25a.ps1`,
+result `ac25a-compare.json`, checks `coherentwarai.ac25a-invariant` and `coherentwarai.ac25a-armydays`). Console rows, after
+the rows of the run (`job` instead of the run id for a JobCheck), then one indented row per FAIL / warning row or violation:
+
+```
+r1     L1-coherentwarai.command-log Passed       expected no FAIL, actual 6 PASS, 1 N/A for mode, 1 MANUAL  <run>\coherentwarai.command-log.json
+    AC13: expected PASS, actual INSUFFICIENT DATA (WARN) - <evidence>
+job    CW1-coherentwarai.ac25a-invariant Failed       <detail>  <job>\ac25a-compare.json
+    FAIL  <violation>
+```
+
+(`Error` is shown for `RigError`.) Exit code: `Failed` = `2`, `Inconclusive` = `3`, `RigError` = `1`, on top of the
+other rules, with the precedence 1 > 3 > 2 > 0. `job-result.json`: each run of such a suite holds `checks` (one
+`{ "id", "outcome", "detail", "resultPath", "rows": [ { "ac", "expected": "PASS", "actual", "evidence" } ] }` per
+PostRunCheck; an empty array for a run that is not `Completed`); on job level `jobChecks` holds one
+`{ "id", "outcome", "detail", "resultPath", "violations": [...] }` per check (an empty array for a job that is not
+completed, `null` for a suite without JobChecks).
+
+Offline re-judgement: `runner\Update-JobResult.ps1 -JobId <jobId> [-Suite <suite>]` judges `out\results\<jobId>` again as
+after the fetch (all rows, the suite verdicts and the suite checks with the scripts as they are now) and rewrites its
+`job-result.json`. Days, modules and the run modes come from `out\jobs\<jobId>\job.json`, the suite from the existing
+`job-result.json` (or `-Suite`). The expectations come from today's suite definition, so re-judging an old job after
+the suite changed can report missing runs. The earlier `job-result.json` is kept as `job-result.previous.json` in the
+same folder (the first judgement is never overwritten, so the original exit code and any time-limit evidence stay
+available), its `versionWarnings` are carried over, and the new file gets the additive field
+`rejudgedFrom: { "exitCode": <exit code of the first judgement>, "at": "<UTC time of the latest re-judgement>" }`
+(absent when there was no earlier file). Not reconstructed: a runner-side time limit of the original wait (see the kept
+file). Exit codes as above; `1` when the job folders are unusable.
 
 `-Suite L1-BASE` (vanilla baseline for L1) sets harness `TestRig`, mode `WarSails`, `days` 30, `kind` `soak` and the
 `modules` load order `Bannerlord.Harmony, Bannerlord.ButterLib, Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native,
@@ -511,9 +591,10 @@ Per-run seed: `job.json` carries `seed` (and `days`) per run, and the agent writ
 then writes it to that run's `runs[].seed` instead of the `-Seed` value.
 
 `-Suite RIG` (rig self-test) sets harness `TestRig`, mode `WarSails`, seed 1, `days` 1, `kind` `scenarios` and the `modules`
-load order of the base modules, `TestRig.Harness`, `TestRig.SelfTest`. One job with four runs, each with
+load order of the base modules, `TestRig.Harness`, `TestRig.SelfTest`. One job with five runs, each with
 `hardTimeoutMinutes` 5 and one scenario: `r1` `rig.selftest-throw` (expected `Crashed`), `r2` `rig.selftest-hang` (`Hung`),
-`r3` `rig.selftest-pass` (`Completed`), `r4` `rig.selftest-exception-storm` (`Completed`; R2). Only `r4` carries
+`r3` `rig.selftest-pass` (`Completed`), `r4` `rig.selftest-exception-storm` (`Completed`; R2), `r5` `rig.town-screen`
+(`Completed`; town and trade screen fixtures, no mod). Only `r4` carries
 `runs[].ownAssemblies` `["TestRig.SelfTest"]` (a JSON array, also with this one name), so its 10,000 caught self-test
 exceptions count as own; its expectation also checks three values of its `run-result.json`: `exceptions.own` = 10000,
 `exceptions.classification.walks` = 1000 and `exceptions.classification.ownExact` = `false` (verdict: "Runner exit codes").
@@ -524,7 +605,7 @@ walkMs) / (total - walks)> us (mean of <total - walks> other exceptions)` (`n/a`
 measured` when a value is missing). Above the R2 start values [A] (walk mean > 1 ms, cache hit > 50 us) it adds
 `WARN r4 R2 walk mean ...` / `WARN r4 R2 cache hit at most ...`; warnings never change the exit code. With `-PackageFrom`
 the package must contain `TestRig.Harness` and `TestRig.SelfTest`. Overall deadline (formula as for `-Suite L1-BASE`):
-35 minutes with the defaults.
+42 minutes with the defaults.
 
 ### Version warnings (runner)
 
@@ -545,12 +626,13 @@ parsed object as written by the harness (nested, typed values as above); from le
 (missing file, or invalid `run-result.json`). Per run it also holds `gameVersion` and `moduleVersions`, copied from
 `agent-run.json` (`moduleVersions` is always a JSON array when present, also with 0 or 1 entry; `null` only for an old
 agent); on job level `versionWarnings` is an array of the warning lines above and `suite` is the runner's `-Suite`
-value or `null`. Only for a suite with per-run expectations (`-Suite RIG`, `-Suite L1-BASE`) every run also holds `expected`
+value or `null`. Only for a suite with per-run expectations (`-Suite RIG`, `-Suite L1-BASE`, `-Suite CW1`) every run also holds `expected`
 (`{ "exitClass": "...", "messagePattern": "<regex>" | null, "values": [ { "name": "<path>", "expected": <number|boolean> } ] }`,
 `values` = the value checks of the run, an empty array for runs without, e.g. `RIG` `r4`: `exceptions.own` 10000; `null`
 for a run the suite does not define) and `verdict` (`Met`, `Mismatch`, `Inconclusive` or `RigError`, see the exit codes;
 `null` when `expected` is `null`; the actual values are in `result`). For `-Suite L1` every
-run also holds `l1` (see "L1 verdict").
+run also holds `l1` (see "L1 verdict"). Every run holds `mode`: its `runs[].mode` from `job.json` (`null` when unknown).
+Suites with checks add `checks` per run and `jobChecks` on job level (see "Suite checks").
 
 ### `run.cfg`
 
@@ -621,7 +703,8 @@ verdict) - `2` test failure (`NotCompleted`, `Crashed`, `Completed` with too few
 a scenario with status `Failed`, a `Failed` row of the L1 verdict, see "L1 verdict") -
 `3` time limit, hang or agent not responding (`HardTimeout`, `Hung`, `Aborted`, done status `aborted`, claim
 timeout, stale heartbeat, overall deadline; the runner aborts at its deadline and, best effort,
-on a stale heartbeat). Precedence:
+on a stale heartbeat). The suite checks add their own codes (`Failed` 2, `Inconclusive` 3, `RigError` 1, see "Suite
+checks"). Precedence:
 1 > 3 > 2 > 0. An unknown `exitClass` or `status` maps to `1`. Scenario statuses (case-insensitive): `Passed`,
 `Timeout` and `Skipped` do not change the code by themselves (except the requested-scenario rule above), `Failed` gives `2`, `Error` and any other value (unknown
 string, empty, `null`, non-string) give `1`.

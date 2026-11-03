@@ -141,14 +141,14 @@ Describe 'Publish-RigResult with -Suite' {
     function Get-JobResult { Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json }
 
     It 'prints the row as <Suite>-<scenario id> and records suite in job-result.json (raw ids kept)' {
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 0
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 0
         @($script:lines | Where-Object { $_ -match '^r1 .*L1-soak ' })[0] | Should Match 'L1-soak\s+Passed\s+3/3\s+Completed'
         (Get-JobResult).suite | Should Be 'L1'
         (Get-JobResult).runs[0].result.scenarios[0].id | Should Be 'coherentwarai.health@0'
     }
     It 'prefixes the fallback row of a result without scenarios too (L1: no health line reported = rig error, exit 1)' {
         [IO.File]::WriteAllText((Join-Path $script:rd 'r1\run-result.json'), '{"schema":1,"status":"Completed","daysReached":3,"scenarios":[]}')
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 1
         @($script:lines | Where-Object { $_ -match '^r1 ' })[0] | Should Match 'L1-soak\s+Completed'
     }
     It 'without -Suite the row is unchanged and suite is null' {
@@ -204,16 +204,15 @@ Describe 'Invoke-TestRig.ps1 -Suite (powershell -File)' {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:suiteScript, [ref]$null, [ref]$null)
     $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Suite' }
 
-    It 'exists with ValidateSet L1, L1-BASE, SM and RIG' {
+    It 'has a plain -Suite parameter (no ValidateSet: the suite table is the single source)' {
         $param | Should Not BeNullOrEmpty
-        $vs = @($param.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' })
-        $vs.Count | Should Be 1
-        (@($vs[0].PositionalArguments | ForEach-Object { $_.Value }) -join ',') | Should Be 'L1,L1-BASE,SM,RIG'
+        @($param.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' }).Count | Should Be 0
     }
-    It 'rejects an unknown suite' {
+    It 'rejects an unknown suite as a usage error: exit 1, valid suites listed, before the config is read' {
         $out = (& powershell -NoProfile -File $script:suiteScript -PackageFrom C:\nowhere -Suite L2 2>&1 | Out-String)
-        $LASTEXITCODE | Should Not Be 0
-        $out | Should Match 'ParameterArgumentValidationError'
+        $LASTEXITCODE | Should Be 1
+        $out | Should Match "unknown -Suite 'L2'"
+        $out | Should Match 'Valid suites: AT, CS, CW1, L1, L1-BASE, RIG, SM\.'
         $out | Should Not Match 'Config not found'
     }
     It 'a conflicting -Harness is a usage error, exit 1 before the config is read' {
@@ -490,7 +489,7 @@ Describe 'Publish-RigResult: failed checks of a scenario run' {
     }
     It 'a soak result (no checks) prints no check lines' {
         Write-RunResult ('{"schema":1,"status":"Completed","daysReached":3,"scenarios":' + (Get-L1ScenariosJson 3) + (Get-L1MeasuresJson) + '}')
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 0
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 0
         @($script:lines | Where-Object { $_ -match '^\s+\S' -and $_ -match 'expected' }).Count | Should Be 0
     }
 }
@@ -580,15 +579,15 @@ Describe 'Invoke-TestRig.ps1 -Suite RIG -HardTimeoutMinutes (powershell -File)' 
 }
 
 Describe 'Get-RigSuiteRuns and Get-RigSuiteTimeoutMinutes' {
-    It 'RIG has the four runs with scenario, 5 minute hard timeout and expected exitClass' {
+    It 'RIG has the five runs with scenario, 5 minute hard timeout and expected exitClass' {
         $r = @(Get-RigSuiteRuns -Suite RIG)
-        $r.Count | Should Be 4
-        (($r | ForEach-Object { $_.RunId }) -join ',') | Should Be 'r1,r2,r3,r4'
-        (($r | ForEach-Object { @($_.Scenarios) -join '+' }) -join ',') | Should Be 'rig.selftest-throw,rig.selftest-hang,rig.selftest-pass,rig.selftest-exception-storm'
-        (($r | ForEach-Object { $_.ExpectedExitClass }) -join ',') | Should Be 'Crashed,Hung,Completed,Completed'
+        $r.Count | Should Be 5
+        (($r | ForEach-Object { $_.RunId }) -join ',') | Should Be 'r1,r2,r3,r4,r5'
+        (($r | ForEach-Object { @($_.Scenarios) -join '+' }) -join ',') | Should Be 'rig.selftest-throw,rig.selftest-hang,rig.selftest-pass,rig.selftest-exception-storm,rig.town-screen'
+        (($r | ForEach-Object { $_.ExpectedExitClass }) -join ',') | Should Be 'Crashed,Hung,Completed,Completed,Completed'
         foreach ($x in $r) { $x.HardTimeoutMinutes | Should Be 5 }
     }
-    It 'r1 and r2 carry a message pattern, r3 and r4 none' {
+    It 'r1 and r2 carry a message pattern, r3 to r5 none' {
         $r = @(Get-RigSuiteRuns -Suite RIG)
         'Harness reported: 5.1 UnhandledException (terminating=True): System.InvalidOperationException: rig.selftest-throw' | Should MatchExactly $r[0].ExpectedMessagePattern
         'No Alive line in harness.log for 61 s (limit 60 s); last line: (none)' | Should MatchExactly $r[1].ExpectedMessagePattern
@@ -614,18 +613,18 @@ Describe 'Get-RigSuiteRuns and Get-RigSuiteTimeoutMinutes' {
         @(Get-RigSuiteRuns).Count | Should Be 0
     }
     It 'the overall deadline of RIG is sum(hard timeout + 2 min per run) + claim wait (rounded up) + 5 minutes' {
-        # 4 x (5 + 2) + 2 (default 120 s) + 5
-        Get-RigSuiteTimeoutMinutes -Suite RIG | Should Be 35
-        Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 90 | Should Be 35
-        Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 600 | Should Be 43
+        # 5 x (5 + 2) + 2 (default 120 s) + 5
+        Get-RigSuiteTimeoutMinutes -Suite RIG | Should Be 42
+        Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 90 | Should Be 42
+        Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 600 | Should Be 50
     }
     It 'the deadline of a suite with runs is never below sum of hard timeouts + 10 (the single-run default)' {
-        Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 0.001 | Should Be 34   # claim wait rounds up to 1 min
-        (Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 0.001) -ge (20 + 10) | Should Be $true
+        Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 0.001 | Should Be 41   # claim wait rounds up to 1 min
+        (Get-RigSuiteTimeoutMinutes -Suite RIG -ClaimTimeoutSeconds 0.001) -ge (25 + 10) | Should Be $true
     }
     It 'RIG runs (kind scenarios) keep their hard timeout whatever -Days says' {
         foreach ($x in @(Get-RigSuiteRuns -Suite RIG -Days 90)) { $x.HardTimeoutMinutes | Should Be 5 }
-        Get-RigSuiteTimeoutMinutes -Suite RIG -Days 90 | Should Be 35
+        Get-RigSuiteTimeoutMinutes -Suite RIG -Days 90 | Should Be 42
     }
     It 'suites without runs have no suite deadline' {
         Get-RigSuiteTimeoutMinutes -Suite SM | Should Be $null
@@ -639,9 +638,9 @@ Describe 'New-RigJobManifest -Suite RIG' {
                 -PackageSha256 'ABC' -Seed 1 -Days 1 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite RIG)
         $script:o = $script:json | ConvertFrom-Json
     }
-    It 'carries one job with four runs r1, r2, r3, r4' {
-        @($script:o.runs).Count | Should Be 4
-        ((@($script:o.runs) | ForEach-Object { $_.runId }) -join ',') | Should Be 'r1,r2,r3,r4'
+    It 'carries one job with five runs r1 to r5' {
+        @($script:o.runs).Count | Should Be 5
+        ((@($script:o.runs) | ForEach-Object { $_.runId }) -join ',') | Should Be 'r1,r2,r3,r4,r5'
     }
     It 'only r4 carries ownAssemblies, as a JSON array with the one id TestRig.SelfTest' {
         foreach ($run in @($script:o.runs)[0..2]) { ($run.PSObject.Properties.Name -contains 'ownAssemblies') | Should Be $false }
@@ -701,13 +700,14 @@ Describe 'Resolve-RigExitCode with expectations (RIG)' {
         $result = $json | ConvertFrom-Json
         Rr r4 Completed @($result.scenarios | ForEach-Object { $_.id }) @($result.scenarios | ForEach-Object { $_.status }) $null $result
     }
-    # The r1-r3 cases list only those runs: a good r4 is added unless the case lists an r4 itself.
+    # The r1-r3 cases list only those runs: a good r4 and a good r5 (town screen) are added unless the case lists them itself.
     function Verdict($runs, $status = 'completed') {
         $all = @($runs)
         if (@($all | Where-Object { $_.runId -ceq 'r4' }).Count -eq 0) { $all += Storm }
+        if (@($all | Where-Object { $_.runId -ceq 'r5' }).Count -eq 0) { $all += Rr r5 Completed 'rig.town-screen' 'Passed' }
         Resolve-RigExitCode -DoneStatus $status -Runs $all -Days 1 -Expectations @(Get-RigSuiteRuns -Suite RIG)
     }
-    $good = { @((Rr r1 Crashed), (Rr r2 Hung), (Rr r3 Completed 'rig.selftest-pass' 'Passed'), (Storm)) }
+    $good = { @((Rr r1 Crashed), (Rr r2 Hung), (Rr r3 Completed 'rig.selftest-pass' 'Passed'), (Storm), (Rr r5 Completed 'rig.town-screen' 'Passed')) }
 
     It 'every run meets its expectation -> 0 (a crashed run has no scenario results)' {
         Verdict (& $good) | Should Be 0
@@ -843,23 +843,24 @@ Describe 'Publish-RigResult -Suite RIG' {
         Write-AgentRun r2 'No Alive line in harness.log for 61 s (limit 60 s); last line: (none)'
     }
     $pass = '{"schema":1,"status":"Completed","scenarios":[{"id":"rig.selftest-pass","status":"Passed","seconds":4}],"checks":[]}'
-    function Write-PassRuns { Write-Run r3 $pass; Write-Run r4 (Get-StormResultJson) }
+    $town = '{"schema":1,"status":"Completed","scenarios":[{"id":"rig.town-screen","status":"Passed","seconds":9}],"checks":[]}'
+    function Write-PassRuns { Write-Run r3 $pass; Write-Run r4 (Get-StormResultJson); Write-Run r5 $town }
     function Rig { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -Suite RIG }
 
     It 'all runs meet their expectation: exit 0 and a row per run with expected and actual' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
         (Rig) | Should Be 0
         @($script:lines | Where-Object { $_ -match '^r1 .*rig\.selftest-throw.*expected Crashed\s+actual Crashed\s+met' }).Count | Should Be 1
         @($script:lines | Where-Object { $_ -match '^r2 .*rig\.selftest-hang.*expected Hung\s+actual Hung\s+met' }).Count | Should Be 1
         @($script:lines | Where-Object { $_ -match '^r3 .*rig\.selftest-pass.*expected Completed\s+actual Completed\s+met' }).Count | Should Be 1
     }
     It 'one mismatch: exit 2 and the row says MISMATCH with expected and actual' {
-        Write-Done completed @('Crashed', 'HardTimeout', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
+        Write-Done completed @('Crashed', 'HardTimeout', 'Completed', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
         (Rig) | Should Be 2
         @($script:lines | Where-Object { $_ -match '^r2 .*expected Hung\s+actual HardTimeout\s+MISMATCH' }).Count | Should Be 1
     }
     It 'a Failed scenario in the Completed-expected run: exit 2' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-Run r4 (Get-StormResultJson)
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-Run r4 (Get-StormResultJson)
         Write-Run r3 '{"schema":1,"status":"Completed","scenarios":[{"id":"rig.selftest-pass","status":"Failed","seconds":4}],"checks":[{"name":"campaign","expected":"true","actual":"false","passed":false,"scenario":"rig.selftest-pass"}]}'
         (Rig) | Should Be 2
         @($script:lines | Where-Object { $_ -match 'campaign: expected true, actual false' }).Count | Should Be 1
@@ -880,15 +881,15 @@ Describe 'Publish-RigResult -Suite RIG' {
         @($script:lines | Where-Object { $_ -match '[\x00-\x1F\x7F]' }).Count | Should Be 0
     }
     It 'writes job-result.json with exitCode and suite RIG' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
         Rig | Out-Null
         $o = Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json
         $o.suite | Should Be 'RIG'
         $o.exitCode | Should Be 0
-        @($o.runs).Count | Should Be 4
+        @($o.runs).Count | Should Be 5
     }
     It 'job-result.json records per run what it was judged against and the verdict' {
-        Write-Done completed @('Crashed', 'HardTimeout', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
+        Write-Done completed @('Crashed', 'HardTimeout', 'Completed', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
         Rig | Out-Null
         $runs = @((Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json).runs)
         $expectations = @(Get-RigSuiteRuns -Suite RIG)
@@ -908,7 +909,7 @@ Describe 'Publish-RigResult -Suite RIG' {
         $runs[3].verdict | Should Be 'Met'
     }
     It 'r4 storm met: one line per value check and the R2 timing line below its row, no WARN; exit 0' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
         (Rig) | Should Be 0
         $i = [array]::IndexOf($script:lines, @($script:lines | Where-Object { $_ -match '^r4 .*rig\.selftest-exception-storm.*expected Completed\s+actual Completed\s+met' })[0])
         $i -ge 0 | Should Be $true
@@ -919,7 +920,7 @@ Describe 'Publish-RigResult -Suite RIG' {
         @($script:lines | Where-Object { $_ -match '^WARN' }).Count | Should Be 0
     }
     It 'r4 storm slower than the R2 start values: WARN lines only, the exit code stays 0' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-Run r3 $pass; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-Run r3 $pass; Write-Run r5 $town; Write-GoodMessages
         Write-Run r4 (Get-StormResultJson -WalkMs 1500 -HandlerMs 2000)
         (Rig) | Should Be 0
         @($script:lines | Where-Object { $_ -ceq '    R2 timing: walk mean 1.500 ms (1000 walks); cache hit at most 55.5 us (mean of 9012 other exceptions)' }).Count | Should Be 1
@@ -927,7 +928,7 @@ Describe 'Publish-RigResult -Suite RIG' {
         @($script:lines | Where-Object { $_ -ceq 'WARN r4 R2 cache hit at most 55.5 us > 50 us (start value, warning only)' }).Count | Should Be 1
     }
     It 'r4 storm with a wrong own count: exit 2, MISMATCH, the value line shows it; verdict Mismatch' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-Run r3 $pass; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-Run r3 $pass; Write-GoodMessages
         Write-Run r4 (Get-StormResultJson -Own 9990)
         (Rig) | Should Be 2
         @($script:lines | Where-Object { $_ -match '^r4 .*expected Completed\s+actual Completed\s+MISMATCH' }).Count | Should Be 1
@@ -935,7 +936,7 @@ Describe 'Publish-RigResult -Suite RIG' {
         (Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json).runs[3].verdict | Should Be 'Mismatch'
     }
     It 'r4 storm without the exceptions block: exit 1, ERROR, null values and timing not measured' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-Run r3 $pass; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-Run r3 $pass; Write-GoodMessages
         Write-Run r4 (Get-StormResultJson -NoExceptions)
         (Rig) | Should Be 1
         @($script:lines | Where-Object { $_ -match '^r4 .*expected Completed\s+actual Completed\s+ERROR' }).Count | Should Be 1
@@ -944,13 +945,13 @@ Describe 'Publish-RigResult -Suite RIG' {
         (Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json).runs[3].verdict | Should Be 'RigError'
     }
     It 'r4 not Completed: no value lines (the exit class decides), the timing line still shows what was measured' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Crashed'); Write-Run r3 $pass; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Crashed', 'Completed'); Write-Run r3 $pass; Write-Run r5 $town; Write-GoodMessages
         (Rig) | Should Be 2
         @($script:lines | Where-Object { $_ -match '^    exceptions\.' }).Count | Should Be 0
         @($script:lines | Where-Object { $_ -ceq '    R2 timing: not measured (exceptions.classification incomplete)' }).Count | Should Be 1
     }
     It 'a Crashed r1 whose message does not show the self-test throw: exit 2, MISMATCH and a line naming the message' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
         Write-AgentRun r1 "Crash occurred (watchdog_log_1.txt); last line: 3.0 FirstChance #1 [Main]: System.NullReferenceException`r`nx"
         (Rig) | Should Be 2
         @($script:lines | Where-Object { $_ -match '^r1 .*expected Crashed\s+actual Crashed\s+MISMATCH' }).Count | Should Be 1
@@ -959,7 +960,7 @@ Describe 'Publish-RigResult -Suite RIG' {
         (Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json).runs[0].verdict | Should Be 'Mismatch'
     }
     It 'a Hung r2 without agent-run.json: MISMATCH and the message shown as (none)' {
-        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
+        Write-Done completed @('Crashed', 'Hung', 'Completed', 'Completed', 'Completed'); Write-PassRuns; Write-GoodMessages
         Remove-Item -LiteralPath (Join-Path $script:rd 'r2\agent-run.json')
         (Rig) | Should Be 2
         @($script:lines | Where-Object { $_ -match '^    message does not match \^No Alive line.*: \(none\)$' }).Count | Should Be 1
@@ -992,7 +993,7 @@ Describe 'Publish-RigResult -Suite RIG' {
     }
     It 'L1 still shows no expected/actual column and job-result.json has no expected/verdict' {
         Write-Done completed @('Completed'); Write-Run r1 ('{"schema":1,"status":"Completed","daysReached":3,"scenarios":' + (Get-L1ScenariosJson 3) + (Get-L1MeasuresJson) + '}')
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 0
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 0
         # No expectation row ('<run> <suite>-<what> expected <class> actual ...'); the L1 verdict rows have their own shape.
         @($script:lines | Where-Object { $_ -match '^\S+\s+\S+\s+expected ' }).Count | Should Be 0
         $props = @((Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json).runs[0].PSObject.Properties.Name)
@@ -1023,10 +1024,10 @@ Describe 'Start-TestRigJob -Suite RIG' {
             -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -ClaimTimeoutSeconds 0.3 -TimeoutMinutes 0.5 `
             -ConfigPath $script:cfg -OutRoot $script:out -RetryDelaySeconds 0
     }
-    It 'publishes one job with four runs when the package holds the harness and the self-test module' {
+    It 'publishes one job with five runs when the package holds the harness and the self-test module' {
         $pkg = Join-Path $script:t 'pkg'; New-ModuleFixture $pkg @('TestRig.Harness', 'TestRig.SelfTest')
         (Start-RigSuite $pkg) | Should Be 0
-        @($script:published.Job.runs).Count | Should Be 4
+        @($script:published.Job.runs).Count | Should Be 5
         (@($script:published.Job.runs[3].ownAssemblies) -join ',') | Should BeExactly 'TestRig.SelfTest'
         ($script:published.Job.modules -join ',') | Should Be ($script:rigModules -join ',')
     }
@@ -1111,7 +1112,7 @@ Describe 'New-RigJobManifest -Suite L1-BASE' {
     It 'RIG runs still take -Seed' {
         $j = (ConvertTo-RigJson (New-RigJobManifest -JobId '20261103-120000-abcd' -CreatedUtc ([datetime]'2026-11-03T12:00:00Z') `
                     -PackageSha256 'ABC' -Seed 7 -Days 1 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite RIG)) | ConvertFrom-Json
-        (@($j.runs | ForEach-Object { $_.seed }) -join ',') | Should Be '7,7,7,7'
+        (@($j.runs | ForEach-Object { $_.seed }) -join ',') | Should Be '7,7,7,7,7'
     }
 }
 
@@ -1402,7 +1403,7 @@ Describe 'Publish-RigResult -Suite L1 with health lines' {
 
     It 'every line Passed: exit 0, one row per health line (L1-<id>@0 / @<days>), job-result health with expected/actual' {
         Write-Job Completed (New-Result Completed (Get-L1ScenariosJson 3))
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 0
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 0
         foreach ($h in $script:l1Health) {
             (Get-Row "$h@0").Count | Should Be 1
             (Get-Row "$h@3")[0] | Should Match 'Passed\s+3/3\s+Completed'
@@ -1415,7 +1416,7 @@ Describe 'Publish-RigResult -Suite L1 with health lines' {
     It 'a Failed health line: exit 2, its failed check printed below its row, actual Failed in job-result' {
         $checks = '[{"name":"behavior registered","expected":"true","actual":"false","passed":false,"scenario":"autotrader.health@3"}]'
         Write-Job Completed (New-Result Completed (Get-L1ScenariosJson 3 @{ 'autotrader.health@3' = 'Failed' }) $checks)
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 2
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 2
         $row = (Get-Row 'autotrader.health@3')[0]
         $row | Should Match 'Failed'
         $i = [array]::IndexOf($script:lines, $row)
@@ -1424,37 +1425,37 @@ Describe 'Publish-RigResult -Suite L1 with health lines' {
     }
     It 'a missing health line: exit 1, a row with status missing, actual null in job-result' {
         Write-Job Completed (New-Result Completed (Get-L1ScenariosJson 3 -Omit @('smithingsuite.health@3')))
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 1
         (Get-Row 'smithingsuite.health@3')[0] | Should Match 'missing\s+3/3\s+Completed'
         $entry = @((Get-JobResult).runs[0].health) | Where-Object { $_.id -eq 'smithingsuite.health@3' }
         $entry.actual | Should Be $null
     }
     It 'a Skipped health line in a Completed run: exit 1 (that check did not run); a missing line beats a Failed one' {
         Write-Job Completed (New-Result Completed (Get-L1ScenariosJson 3 @{ 'companionsuite.health@3' = 'Skipped' }))
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 1
         Write-Job Completed (New-Result Completed (Get-L1ScenariosJson 3 @{ 'companionsuite.health@3' = 'Failed' } -Omit @('autotrader.health@0')))
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 1
     }
     It 'the expected @<days> lines follow -Days: @3 lines in a -Days 30 job are missing (exit 1)' {
         Write-Job Completed (New-Result Completed (Get-L1ScenariosJson 3) -DaysReached 30)
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 30 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 30 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 1
         (Get-Row 'autotrader.health@30')[0] | Should Match 'missing'
     }
     It 'taint in health@0 by a throw (Error, rest Skipped, NotCompleted): exit 1 by the Error line' {
         $sc = Get-L1ScenariosJson 3 @{ 'coherentwarai.health@0' = 'Error' } -Status 'Skipped'
         Write-Job NotCompleted (New-Result Aborted $sc -DaysReached 0)
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 1
         (Get-Row 'coherentwarai.health@0')[0] | Should Match 'Error'
         (Get-Row 'soak')[0] | Should Match 'Skipped'
     }
     It 'taint in health@0 by a timeout (Timeout, rest Skipped, NotCompleted): exit 2, the Skipped lines add no rig error' {
         $sc = Get-L1ScenariosJson 3 @{ 'coherentwarai.health@0' = 'Timeout' } -Status 'Skipped'
         Write-Job NotCompleted (New-Result Aborted $sc -DaysReached 0)
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 2
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 2
     }
     It 'a Completed run with an empty scenarios list: exit 1 and a missing row per expected health line' {
         Write-Job Completed (New-Result Completed '[]')
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 1
         foreach ($id in @(Get-RigHealthLineIds -Health $script:l1Health -Days 3)) {
             (Get-Row $id).Count | Should Be 1
             (Get-Row $id)[0] | Should Match 'missing\s+3/3\s+Completed'
@@ -1462,7 +1463,7 @@ Describe 'Publish-RigResult -Suite L1 with health lines' {
     }
     It 'a crashed run without run-result.json: exit 2, only its soak row (no missing health rows), health actual null' {
         Write-Job Crashed $null
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules) | Should Be 2
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -Suite L1 -ExpectedModules $script:l1Modules -SkipChecks) | Should Be 2
         @($script:lines | Where-Object { $_ -match '^r1 ' }).Count | Should Be 1
         @($script:lines | Where-Object { $_ -match 'missing' }).Count | Should Be 0
         $health = @((Get-JobResult).runs[0].health)
@@ -1504,5 +1505,172 @@ Describe 'Start-TestRigJob -Suite L1 package check' {
         $pkg = Join-Path $script:t 'pkg'; New-ModuleFixture $pkg $l1Mods
         (Start-L1 $pkg) | Should Be 0
         (@($script:published.runs[0].health) -join ',') | Should Be ($script:l1Health -join ',')
+    }
+}
+
+Describe 'Get-RigSuiteBuildProjects (the suite table drives the build projects)' {
+    $base = 'SmithingSuite.Scenarios'
+    $sevenIds = 'CoherentWarAI,CoherentWarAI.TestHarness,AutoTraderSpeed,SmithingSuite,CompanionManagementSuite,TestRig.Harness,SmithingSuite.Scenarios'
+
+    # Snapshot taken before #25 (project lists as built by the hard-coded L1/RIG/L1-BASE special cases).
+    It 'L1 builds the seven plus three health scenario projects' {
+        $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'L1')
+        (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sevenIds,CoherentWarAI.Scenarios,AutoTraderSpeed.Scenarios,CompanionManagementSuite.Scenarios"
+        (@($r | ForEach-Object { $_.ProjectPath.Substring(6) }) -join '|') | Should Be ((
+                'BannerlordCoherentWarAI\src\CoherentWarAI\CoherentWarAI.csproj',
+                'BannerlordCoherentWarAI\tools\TestHarness\CoherentWarAI.TestHarness.csproj',
+                'BannerlordAutoTrader\AutoTrader\src\AutoTrader.csproj',
+                'BannerlordSmithingSuite\src\SmithingSuite.csproj',
+                'CompanionManagementSuite\src\CompanionSuite.csproj',
+                'BannerlordTestRig\src\TestRig.Harness\TestRig.Harness.csproj',
+                'BannerlordSmithingSuite\tests\InGame\SmithingSuite.Scenarios\SmithingSuite.Scenarios.csproj',
+                'BannerlordCoherentWarAI\tests\InGame\CoherentWarAI.Scenarios\CoherentWarAI.Scenarios.csproj',
+                'BannerlordAutoTrader\tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj',
+                'CompanionManagementSuite\tests\InGame\CompanionManagementSuite.Scenarios\CompanionManagementSuite.Scenarios.csproj') -join '|')
+    }
+    It 'SM builds the seven (its scenario module is in the base set)' {
+        (@(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'SM' | ForEach-Object { $_.ModuleId }) -join ',') | Should Be $sevenIds
+    }
+    It 'RIG builds the seven plus TestRig.SelfTest' {
+        $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'RIG')
+        (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sevenIds,TestRig.SelfTest"
+        $r[7].Repo | Should Be 'BannerlordTestRig'
+        $r[7].ProjectPath | Should Be 'C:\ws\BannerlordTestRig\src\TestRig.SelfTest\TestRig.SelfTest.csproj'
+    }
+    It 'CS, AT and CW1 build the seven plus their one scenario module' {
+        foreach ($case in @(@('CS', 'CompanionManagementSuite.Scenarios', 'CompanionManagementSuite'),
+                @('AT', 'AutoTraderSpeed.Scenarios', 'BannerlordAutoTrader'), @('CW1', 'CoherentWarAI.Scenarios', 'BannerlordCoherentWarAI'))) {
+            $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite $case[0])
+            (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sevenIds,$($case[1])"
+            $r[7].Repo | Should Be $case[2]
+        }
+    }
+    It 'L1-BASE builds only the harness' {
+        $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'L1-BASE')
+        $r.Count | Should Be 1
+        $r[0].ModuleId | Should Be 'TestRig.Harness'
+    }
+    It 'no suite builds the seven' {
+        (@(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' | ForEach-Object { $_.ModuleId }) -join ',') | Should Be $sevenIds
+    }
+    It 'a fake suite with TailModule X builds X' {
+        $script:RigTailModuleProjects['Fake.Scenarios'] = @('FakeRepo', 'tests\Fake.Scenarios\Fake.Scenarios.csproj')
+        $script:RigSuites['FAKE'] = @{ Harness = 'TestRig'; Mode = 'WarSails'; Seed = 1; Days = 1; Kind = 'scenarios'; Scenarios = @('fake.one')
+            WithCoherentWarAI = $false; ExtraModules = @(); TailModules = @('Fake.Scenarios') }
+        try {
+            $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'FAKE')
+            $r.Count | Should Be 8
+            $r[7].ModuleId | Should Be 'Fake.Scenarios'
+            $r[7].Repo | Should Be 'FakeRepo'
+        } finally {
+            $script:RigSuites.Remove('FAKE')
+            $script:RigTailModuleProjects.Remove('Fake.Scenarios')
+        }
+        $script:RigSuites.ContainsKey('FAKE') | Should Be $false
+    }
+    It 'throws for an unknown suite' {
+        { Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'L2' } | Should Throw "Unknown suite 'L2'"
+    }
+    It 'every TailModule of every suite has a project (or is in the base set)' {
+        foreach ($name in $script:RigSuites.Keys) {
+            { Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite $name } | Should Not Throw
+        }
+    }
+}
+
+# -Suite CS / AT (S7, S8): scenario suites with one mod and its scenario module; -Suite CW1 (S10): twelve runs with a mode each.
+
+$script:baseModules = @(
+    'Bannerlord.Harmony', 'Bannerlord.ButterLib', 'Bannerlord.UIExtenderEx', 'Bannerlord.MBOptionScreen',
+    'Native', 'SandBoxCore', 'Sandbox', 'StoryMode', 'NavalDLC')
+
+Describe 'Suite CS and AT' {
+    It 'CS: the exact module list, WarSails, seed 1, 1 day, kind scenarios, the three scenarios in this order' {
+        $r = Resolve-RigSuiteSettings -Suite CS -BoundParameters @('Suite') -Harness CoherentWarAI -Mode NoDlc -Seed 9 -Days 5
+        $r.Harness | Should Be 'TestRig'; $r.Mode | Should Be 'WarSails'; $r.Seed | Should Be 1; $r.Days | Should Be 1
+        (Get-RigModules -Mode WarSails -Harness TestRig -Suite CS) -join ',' |
+            Should Be (($script:baseModules + @('CompanionManagementSuite', 'TestRig.Harness', 'CompanionManagementSuite.Scenarios')) -join ',')
+        Get-RigSuiteKind -Suite CS | Should Be 'scenarios'
+        ($script:RigSuites['CS'].Scenarios -join ',') | Should Be 'companion.equip-now,companion.roles-apply,companion.development-guard'
+        @(Get-RigSuiteRuns -Suite CS).Count | Should Be 0
+    }
+    It 'AT: the exact module list, WarSails, seed 1, 1 day, kind scenarios, the two scenarios in this order' {
+        (Get-RigModules -Mode WarSails -Harness TestRig -Suite AT) -join ',' |
+            Should Be (($script:baseModules + @('AutoTraderSpeed', 'TestRig.Harness', 'AutoTraderSpeed.Scenarios')) -join ',')
+        Get-RigSuiteKind -Suite AT | Should Be 'scenarios'
+        $script:RigSuites['AT'].Days | Should Be 1
+        $script:RigSuites['AT'].Seed | Should Be 1
+        ($script:RigSuites['AT'].Scenarios -join ',') | Should Be 'autotrader.warehouse-consign,autotrader.town-trade'
+    }
+    It 'CS and AT have no CoherentWarAI and write one run r1 with their scenarios' {
+        foreach ($s in 'CS', 'AT') {
+            (@(Get-RigModules -Mode WarSails -Harness TestRig -Suite $s) -contains 'CoherentWarAI') | Should Be $false
+            $j = New-RigJobManifest -JobId '20261103-100000-a1b2' -CreatedUtc ([datetime]'2026-11-03T10:00:00Z').ToUniversalTime() -PackageSha256 'ABC' `
+                -Seed 1 -Days 1 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite $s
+            @($j.runs).Count | Should Be 1
+            @($j.runs)[0].runId | Should Be 'r1'
+            (@($j.runs)[0].scenarios -join ',') | Should Be ($script:RigSuites[$s].Scenarios -join ',')
+        }
+    }
+}
+
+Describe 'Suite CW1' {
+    BeforeEach {
+        $script:cw = New-RigJobManifest -JobId '20261103-100000-a1b2' -CreatedUtc ([datetime]'2026-11-03T10:00:00Z').ToUniversalTime() `
+            -PackageSha256 'ABC' -Seed 1 -Days 30 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite CW1
+    }
+    It 'loads only CoherentWarAI, the harness and CoherentWarAI.Scenarios' {
+        ($script:cw.modules -join ',') | Should Be (($script:baseModules + @('CoherentWarAI', 'TestRig.Harness', 'CoherentWarAI.Scenarios')) -join ',')
+        foreach ($mod in 'AutoTraderSpeed', 'SmithingSuite', 'CompanionManagementSuite') { ($script:cw.modules -contains $mod) | Should Be $false }
+    }
+    It 'job.json has the 12 runs r1-r12: seeds 1-3, per seed WarSails, FeatureOff, FeatureOff, WarSails, 30 days, 10 minutes' {
+        (@($script:cw.runs | ForEach-Object { $_.runId }) -join ',') | Should Be 'r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12'
+        (@($script:cw.runs | ForEach-Object { $_.seed }) -join ',') | Should Be '1,1,1,1,2,2,2,2,3,3,3,3'
+        (@($script:cw.runs | ForEach-Object { $_.mode }) -join ',') |
+            Should Be 'WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails'
+        foreach ($run in @($script:cw.runs)) {
+            $run.kind | Should Be 'scenarios'
+            $run.harness | Should Be 'TestRig'
+            $run.days | Should Be 30
+            $run.hardTimeoutMinutes | Should Be 10
+            (@($run.scenarios) -join ',') | Should Be 'coherentwarai.ac25a-digest'
+        }
+    }
+    It 'a suite without per-run modes keeps the job mode in every run (RIG with NoDlc)' {
+        $j = New-RigJobManifest -JobId '20261103-100000-a1b2' -CreatedUtc ([datetime]'2026-11-03T10:00:00Z').ToUniversalTime() -PackageSha256 'ABC' `
+            -Seed 1 -Days 1 -Mode NoDlc -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite RIG
+        foreach ($run in @($j.runs)) { $run.mode | Should Be 'NoDlc' }
+    }
+    It 'every run expects Completed; the deadline is 12 x (10 + 2) + claim wait + 5' {
+        foreach ($x in @(Get-RigSuiteRuns -Suite CW1)) { $x.ExpectedExitClass | Should Be 'Completed' }
+        Get-RigSuiteTimeoutMinutes -Suite CW1 | Should Be 151
+    }
+    It 'Get-RigSuiteRuns carries the run mode, $null for runs without one' {
+        (@(Get-RigSuiteRuns -Suite CW1 | ForEach-Object { $_.Mode }) -join ',') |
+            Should Be 'WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails'
+        foreach ($x in @(Get-RigSuiteRuns -Suite RIG)) { $x.Mode | Should Be $null }
+    }
+    It 'an explicit -Mode is a usage error (the runs fix their modes); an explicit -Seed too' {
+        { Resolve-RigSuiteSettings -Suite CW1 -BoundParameters @('Suite', 'Mode') -Harness TestRig -Mode WarSails -Seed 1 -Days 30 } | Should Throw '-Mode conflicts'
+        { Resolve-RigSuiteSettings -Suite CW1 -BoundParameters @('Suite', 'Seed') -Harness TestRig -Mode WarSails -Seed 1 -Days 30 } | Should Throw '-Seed conflicts'
+        { Resolve-RigSuiteSettings -Suite CW1 -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 30 } | Should Not Throw
+        (Resolve-RigSuiteSettings -Suite CW1 -BoundParameters @('Suite') -Harness TestRig -Mode NoDlc -Seed 9 -Days 5).Days | Should Be 30
+    }
+    It 'a -Days shorter than 30 keeps the 12 runs and their modes (smoke)' {
+        $j = New-RigJobManifest -JobId '20261103-100000-a1b2' -CreatedUtc ([datetime]'2026-11-03T10:00:00Z').ToUniversalTime() -PackageSha256 'ABC' `
+            -Seed 1 -Days 3 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite CW1
+        @($j.runs).Count | Should Be 12
+        foreach ($run in @($j.runs)) { $run.days | Should Be 3 }
+    }
+    It 'a run mode with another module list than the job (NoDlc) is a usage error' {
+        $script:RigSuites['MIXED'] = @{ Harness = 'TestRig'; Mode = 'WarSails'; Seed = 1; Days = 1; Kind = 'scenarios'
+            WithCoherentWarAI = $false; ExtraModules = @(); TailModules = @()
+            Runs = @(@{ RunId = 'r1'; Mode = 'WarSails'; Scenarios = @('x.y'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' },
+                @{ RunId = 'r2'; Mode = 'NoDlc'; Scenarios = @('x.y'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' }) }
+        try {
+            { Resolve-RigSuiteSettings -Suite MIXED -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 1 } | Should Throw 'NoDlc'
+            $script:RigSuites['MIXED'].Runs = @(@{ RunId = 'r1'; Mode = 'FeatureOff'; Scenarios = @('x.y'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' })
+            { Resolve-RigSuiteSettings -Suite MIXED -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 1 } | Should Not Throw
+        } finally { $script:RigSuites.Remove('MIXED') }
     }
 }

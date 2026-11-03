@@ -5,6 +5,9 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:buildScript = Join-Path $here '..\..\runner\Build-Package.ps1'
 # Guarded so a missing file shows up as one red test per It (not as a crashed test file).
 if (Test-Path -LiteralPath $script:buildScript) { . $script:buildScript }
+# Invoke-RigBuildPackage reads the suite table $script:RigSuites, which Invoke-TestRig.ps1 defines (it dot-sources Build-Package.ps1 too).
+$script:invokeScript = Join-Path $here '..\..\runner\Invoke-TestRig.ps1'
+if (Test-Path -LiteralPath $script:invokeScript) { . $script:invokeScript }
 
 function New-TempDir {
     $d = Join-Path ([IO.Path]::GetTempPath()) ('rigbuild-' + [guid]::NewGuid().ToString('N'))
@@ -130,16 +133,12 @@ Describe 'Get-RigBuildProjects' {
         $iScen | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
         $iScen | Should BeGreaterThan ([array]::IndexOf($ids, 'SmithingSuite'))
     }
-    It 'adds TestRig.SelfTest (repo BannerlordTestRig) after the harness only for -Suite RIG' {
-        foreach ($s in @($null, '', 'SM')) {
-            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s).Count | Should Be 7
-            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' }).Count | Should Be 0
+    It 'adds TestRig.SelfTest (repo BannerlordTestRig) after the harness only when it is a tail module' {
+        foreach ($tail in @($null, @(), @('SmithingSuite.Scenarios'))) {
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules $tail).Count | Should Be 7
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules $tail | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' }).Count | Should Be 0
         }
-        foreach ($s in @('L1')) {
-            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s).Count | Should Be 10
-            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' }).Count | Should Be 0
-        }
-        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite RIG)
+        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules @('TestRig.SelfTest'))
         $r.Count | Should Be 8
         $hit = @($r | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' })
         $hit.Count | Should Be 1
@@ -148,8 +147,8 @@ Describe 'Get-RigBuildProjects' {
         $ids = @($r | ForEach-Object { $_.ModuleId })
         [array]::IndexOf($ids, 'TestRig.SelfTest') | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
     }
-    It 'adds the three health scenario projects only for -Suite L1, after the seven (each after its mod and the harness)' {
-        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite L1)
+    It 'adds the health scenario projects of the tail modules after the seven, in tail order, without repeating SmithingSuite.Scenarios' {
+        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules @('CoherentWarAI.Scenarios', 'AutoTraderSpeed.Scenarios', 'SmithingSuite.Scenarios', 'CompanionManagementSuite.Scenarios'))
         $r.Count | Should Be 10
         $ids = @($r | ForEach-Object { $_.ModuleId })
         ($ids[0..6] -join ',') | Should Be (@($script:projects | ForEach-Object { $_.Id }) -join ',')
@@ -162,12 +161,22 @@ Describe 'Get-RigBuildProjects' {
             [array]::IndexOf($ids, $p.Id) | Should BeGreaterThan ([array]::IndexOf($ids, $p.Mod))
             [array]::IndexOf($ids, $p.Id) | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
         }
-        foreach ($s in @($null, '', 'SM', 'RIG', 'L1-BASE')) {
-            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite $s | Where-Object { $_.ModuleId -in 'CoherentWarAI.Scenarios', 'AutoTraderSpeed.Scenarios', 'CompanionManagementSuite.Scenarios' }).Count | Should Be 0
-        }
     }
-    It 'builds only the harness for -Suite L1-BASE (no mod, no scenario module)' {
-        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'L1-BASE')
+    It 'throws for a tail module without an entry in the project table' {
+        { Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules @('No.Such.Module') } | Should Throw 'No.Such.Module'
+    }
+    It 'builds a tail module that was added to the table (a new suite is one table entry)' {
+        $script:RigTailModuleProjects['Fake.Scenarios'] = @('FakeRepo', 'tests\Fake.Scenarios\Fake.Scenarios.csproj')
+        try {
+            $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules @('Fake.Scenarios'))
+            $r.Count | Should Be 8
+            $r[7].ModuleId | Should Be 'Fake.Scenarios'
+            $r[7].Repo | Should Be 'FakeRepo'
+            $r[7].ProjectPath | Should Be (Join-Path 'C:\ws\FakeRepo' 'tests\Fake.Scenarios\Fake.Scenarios.csproj')
+        } finally { $script:RigTailModuleProjects.Remove('Fake.Scenarios') }
+    }
+    It 'builds only the harness with -HarnessOnly (no mod, no scenario module)' {
+        $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -HarnessOnly)
         $r.Count | Should Be 1
         $r[0].ModuleId | Should Be 'TestRig.Harness'
         $r[0].Repo | Should Be 'BannerlordTestRig'

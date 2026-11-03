@@ -152,7 +152,7 @@ namespace TestRig.Harness
                         return;
                     }
 
-                    _run = new HarnessRun(_config, RealSeconds, new ScenarioRunner(scenarios, m => Log(OneLine(m))));
+                    _run = new HarnessRun(_config, RealSeconds, new ScenarioRunner(scenarios, m => Log(OneLine(m)), _config.Days));
                 }
                 else if (_config.Health.Count > 0)
                 {
@@ -164,8 +164,8 @@ namespace TestRig.Harness
 
                     // The same instances run in both brackets, so a scenario can carry state from @0 to @N.
                     _run = new HarnessRun(_config, RealSeconds,
-                        ScenarioRunner.ForHealth(health, 0, m => Log(OneLine(m))),
-                        ScenarioRunner.ForHealth(health, _config.Days, m => Log(OneLine(m))));
+                        ScenarioRunner.ForHealth(health, 0, m => Log(OneLine(m)), _config.Days),
+                        ScenarioRunner.ForHealth(health, _config.Days, m => Log(OneLine(m)), _config.Days));
                 }
                 else
                 {

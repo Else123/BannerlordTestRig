@@ -1,14 +1,28 @@
-# Build step of the test rig runner: builds the mod projects (seven; eight with -Suite RIG, ten with -Suite L1, only the
-# harness with -Suite L1-BASE) into a staging folder, guards the
+# Build step of the test rig runner: builds the mod projects (seven plus the TailModules of the suite, only the
+# harness for a suite without mods) into a staging folder, guards the
 # tower (the game's own Modules folder) against changes and writes manifest.json.
 # Functions only; dot-sourced by Invoke-TestRig.ps1 (and by tests\runner\Build-Package.Tests.ps1).
 
-# The seven projects (eight with -Suite RIG, ten with -Suite L1, one with -Suite L1-BASE), relative to the workspace root
-# (the folder that contains the repo folders), in build order: mods, harnesses, then the scenario modules.
+# Scenario module id -> @(repo, csproj relative to the repo) for the modules a suite lists in its TailModules (the suite
+# table $script:RigSuites in Invoke-TestRig.ps1 is the single source of which suite ships which). A new scenario module
+# is one entry here plus the TailModules entry of its suite. SmithingSuite.Scenarios is not listed: it is in the base set.
+# TestRig.SelfTest holds deliberately crashing code: only the suite that lists it ships it.
+$script:RigTailModuleProjects = @{
+    'CoherentWarAI.Scenarios'          = @('BannerlordCoherentWarAI', 'tests\InGame\CoherentWarAI.Scenarios\CoherentWarAI.Scenarios.csproj')
+    'AutoTraderSpeed.Scenarios'        = @('BannerlordAutoTrader', 'tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj')
+    'CompanionManagementSuite.Scenarios' = @('CompanionManagementSuite', 'tests\InGame\CompanionManagementSuite.Scenarios\CompanionManagementSuite.Scenarios.csproj')
+    'TestRig.SelfTest'                 = @('BannerlordTestRig', 'src\TestRig.SelfTest\TestRig.SelfTest.csproj')
+}
+
+# The seven base projects plus one per TailModules entry not already in the base set (a suite's scenario modules), relative
+# to the workspace root (the folder that contains the repo folders), in build order: mods, harnesses, then the scenario
+# modules in the order of $TailModules (each references its mod and the harness from the stage, so it comes after both).
+# -HarnessOnly (a suite that loads no mod and no scenario module) builds only the harness. An unknown tail module throws.
 function Get-RigBuildProjects {
     param(
         [Parameter(Mandatory)][string]$WorkspaceRoot,
-        [string]$Suite   # RIG adds the self-test module (it holds deliberately crashing code: no other suite ships it), L1 the health scenario modules
+        [string[]]$TailModules = @(),
+        [switch]$HarnessOnly
     )
     $table = @(
         @('BannerlordCoherentWarAI', 'src\CoherentWarAI\CoherentWarAI.csproj', 'CoherentWarAI'),
@@ -19,17 +33,15 @@ function Get-RigBuildProjects {
         @('BannerlordTestRig', 'src\TestRig.Harness\TestRig.Harness.csproj', 'TestRig.Harness'),
         @('BannerlordSmithingSuite', 'tests\InGame\SmithingSuite.Scenarios\SmithingSuite.Scenarios.csproj', 'SmithingSuite.Scenarios')
     )
-    if ($Suite -eq 'RIG') { $table += , @('BannerlordTestRig', 'src\TestRig.SelfTest\TestRig.SelfTest.csproj', 'TestRig.SelfTest') }   # after the harness it references
-    # The health scenario modules of the other three mods (SmithingSuite.Scenarios is in the base table, built for every
-    # suite except L1-BASE, see below). Each references its
-    # mod and the harness from the stage (same BannerlordModulesPath), so it comes after both.
-    if ($Suite -eq 'L1') {
-        $table += , @('BannerlordCoherentWarAI', 'tests\InGame\CoherentWarAI.Scenarios\CoherentWarAI.Scenarios.csproj', 'CoherentWarAI.Scenarios')
-        $table += , @('BannerlordAutoTrader', 'tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj', 'AutoTraderSpeed.Scenarios')
-        $table += , @('CompanionManagementSuite', 'tests\InGame\CompanionManagementSuite.Scenarios\CompanionManagementSuite.Scenarios.csproj', 'CompanionManagementSuite.Scenarios')
+    foreach ($id in $TailModules) {
+        if ($table | Where-Object { $_[2] -ceq $id }) { continue }   # already built (SmithingSuite.Scenarios)
+        if (-not $script:RigTailModuleProjects.ContainsKey($id)) {
+            throw "Unknown scenario module '$id' in TailModules: add it to `$script:RigTailModuleProjects in Build-Package.ps1."
+        }
+        $table += , @($script:RigTailModuleProjects[$id][0], $script:RigTailModuleProjects[$id][1], $id)
     }
     # The vanilla baseline loads no mod and no scenario module: only the harness is built (and so only its repo recorded).
-    if ($Suite -eq 'L1-BASE') { $table = @($table | Where-Object { $_[2] -ceq 'TestRig.Harness' }) }
+    if ($HarnessOnly) { $table = @($table | Where-Object { $_[2] -ceq 'TestRig.Harness' }) }
     foreach ($row in $table) {
         [pscustomobject]@{
             Repo        = $row[0]
@@ -37,6 +49,26 @@ function Get-RigBuildProjects {
             ModuleId    = $row[2]
         }
     }
+}
+
+# The build projects of a suite: its TailModules, and only the harness when the suite loads no mod and no scenario module
+# (L1-BASE). Without a suite: the base set. The suite comes from -SuiteDefinition (its entry of the suite table) or else by
+# name from the suite table $script:RigSuites, which only Invoke-TestRig.ps1 defines (this file alone has none: a clear
+# error). Throws on an unknown suite.
+function Get-RigSuiteBuildProjects {
+    param([Parameter(Mandatory)][string]$WorkspaceRoot, [string]$Suite, [hashtable]$SuiteDefinition)
+    if (-not $Suite -and $null -eq $SuiteDefinition) { return Get-RigBuildProjects -WorkspaceRoot $WorkspaceRoot }
+    $s = $SuiteDefinition
+    if ($null -eq $s) {
+        if ($null -eq $script:RigSuites) {
+            throw "Suite '$Suite': no suite table. Pass -SuiteDefinition, or dot-source Invoke-TestRig.ps1 (it defines `$script:RigSuites)."
+        }
+        if (-not $script:RigSuites.ContainsKey($Suite)) { throw "Unknown suite '$Suite'." }
+        $s = $script:RigSuites[$Suite]
+    }
+    $tail = @($s.TailModules)
+    $harnessOnly = -not $s.WithCoherentWarAI -and @($s.ExtraModules).Count -eq 0 -and $tail.Count -eq 0
+    Get-RigBuildProjects -WorkspaceRoot $WorkspaceRoot -TailModules $tail -HarnessOnly:$harnessOnly
 }
 
 # MSBuild decodes %XX and splits property values on ';' and ',' - escape them (the '%' first).
@@ -206,7 +238,8 @@ function Invoke-RigBuildPackage {
         [Parameter(Mandatory)][string]$TowerGamePath,
         [Parameter(Mandatory)][string]$MsBuildPath,
         [string]$Configuration = 'Debug',
-        [string]$Suite
+        [string]$Suite,
+        [hashtable]$SuiteDefinition   # the suite's entry of the suite table (see Get-RigSuiteBuildProjects)
     )
     $towerGame = $TowerGamePath.TrimEnd('\', '/')   # a trailing '\' would escape the closing quote in the MSBuild argument
     $towerModules = Join-Path $towerGame 'Modules'
@@ -217,7 +250,7 @@ function Invoke-RigBuildPackage {
         throw "MSBuild not found: $MsBuildPath"
     }
 
-    $projects = @(Get-RigBuildProjects -WorkspaceRoot $WorkspaceRoot -Suite $Suite)
+    $projects = @(Get-RigSuiteBuildProjects -WorkspaceRoot $WorkspaceRoot -Suite $Suite -SuiteDefinition $SuiteDefinition)
     # State of the sources as built (taken before the build, so build output cannot show up as dirty).
     $repos = @($projects | ForEach-Object { $_.Repo } | Select-Object -Unique | ForEach-Object {
             Get-RigRepoState -RepoPath (Join-Path $WorkspaceRoot $_)
