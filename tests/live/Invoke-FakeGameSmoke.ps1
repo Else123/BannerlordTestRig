@@ -13,9 +13,13 @@
     fine for the fake game; the real game must be started by the scheduled task instead.
 
     Scenarios:
-      complete  the fake game completes after 6 s           -> runner exit 0
+      complete  the fake game completes after 6 s           -> runner exit 1 (see below)
       abort     the fake game hangs with a child process,   -> runner exit 3, game and child
                 the runner deadline (30 s) sends an abort      killed, run.cfg removed
+
+    The job is ad hoc (no -Suite), so the runner also runs the CW-2 command-log check on CoherentWarAI.log. The fake game
+    is started without a mod log (FAKEGAME_NOMODLOG), so CW-2 is a RigError (log missing) and a completed run exits 1 on
+    purpose: that is the end-to-end proof that the post-run check ran. An aborted run stays exit 3 (no checks).
 
     Cleans up the job, its results and work folder on the test PC and locally afterwards.
 
@@ -64,8 +68,8 @@ Invoke-RigScp -Target $target -Source (Join-Path $repo 'tests\agent\fixtures\fak
 
 # 2. Minimal package.
 $pkg = Join-Path ([IO.Path]::GetTempPath()) ('rig-smoke-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg 'Modules\CoherentWarAI') | Out-Null
-Set-Content -LiteralPath (Join-Path $pkg 'Modules\CoherentWarAI\SubModule.xml') -Value '<Module><Id value="CoherentWarAI"/></Module>' -Encoding ASCII
+New-Item -ItemType Directory -Force -Path (Join-Path $pkg 'Modules\TestRig.Harness') | Out-Null
+Set-Content -LiteralPath (Join-Path $pkg 'Modules\TestRig.Harness\SubModule.xml') -Value '<Module><Id value="TestRig.Harness"/></Module>' -Encoding ASCII
 
 # 3. Runner in the background, waiting for the result.
 Write-Step "Starting the runner (scenario $Scenario)"
@@ -82,12 +86,12 @@ Start-Sleep -Seconds 5   # publish takes a few seconds; the agent runs -Once and
 Write-Step 'Running the agent once on the test PC'
 $agentOut = Invoke-RigRemoteScript -Target $target -Script @"
 `$fake = $($lit.Fake)
-`$env:FAKEGAME_DOCS = Join-Path `$fake 'docs'; `$env:FAKEGAME_BEHAVIOR = $($lit.Behave)
+`$env:FAKEGAME_DOCS = Join-Path `$fake 'docs'; `$env:FAKEGAME_BEHAVIOR = $($lit.Behave); `$env:FAKEGAME_NOMODLOG = '1'
 & (Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -File (Join-Path $($lit.Rig) 'agent\TestRigAgent.ps1') -Once -ConfigPath (Join-Path `$fake 'agent.config.fake.json')
 "agentExit=`$LASTEXITCODE"
 `$cp = Get-Content -LiteralPath (Join-Path `$fake 'docs\child-pid.txt') -ErrorAction SilentlyContinue
 "childAlive=" + [bool](`$cp -and (Get-Process -Id `$cp -ErrorAction SilentlyContinue))
-"runCfgLeft=" + (Test-Path -LiteralPath (Join-Path `$fake 'docs\Mount and Blade II Bannerlord\CoherentWarAI\harness\run.cfg'))
+"runCfgLeft=" + (Test-Path -LiteralPath (Join-Path `$fake 'docs\Mount and Blade II Bannerlord\TestRig\harness\run.cfg'))
 "@
 $runner.WaitForExit()
 $runnerExit = $runner.ExitCode
@@ -96,7 +100,7 @@ $runnerOut | ForEach-Object { Write-Host "   runner: $_" }
 $agentOut | Where-Object { $_ -match '^(agentExit|childAlive|runCfgLeft)=' } | ForEach-Object { Write-Host "   agent:  $_" }
 
 # 5. Verdict.
-$expected = if ($Scenario -eq 'abort') { 3 } else { 0 }
+$expected = if ($Scenario -eq 'abort') { 3 } else { 1 }
 $checks = [ordered]@{
     "runner exit $expected" = ($runnerExit -eq $expected)
     'agent exit 0'          = [bool]($agentOut -contains 'agentExit=0')

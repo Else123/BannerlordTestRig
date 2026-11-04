@@ -45,10 +45,9 @@ function New-GitRepo([string]$Path, [string[]]$Files) {
     Invoke-Git $Path @('commit', '-q', '-m', 'init')
 }
 
-# Seven project paths relative to the workspace root, in the order of the contract table.
+# Six project paths relative to the workspace root, in the order of the contract table.
 $script:projects = @(
     @{ Repo = 'BannerlordCoherentWarAI'; Rel = 'src\CoherentWarAI\CoherentWarAI.csproj'; Id = 'CoherentWarAI' },
-    @{ Repo = 'BannerlordCoherentWarAI'; Rel = 'tools\TestHarness\CoherentWarAI.TestHarness.csproj'; Id = 'CoherentWarAI.TestHarness' },
     @{ Repo = 'BannerlordAutoTrader'; Rel = 'AutoTrader\src\AutoTrader.csproj'; Id = 'AutoTraderSpeed' },
     @{ Repo = 'BannerlordSmithingSuite'; Rel = 'src\SmithingSuite.csproj'; Id = 'SmithingSuite' },
     @{ Repo = 'CompanionManagementSuite'; Rel = 'src\CompanionSuite.csproj'; Id = 'CompanionManagementSuite' },
@@ -56,7 +55,7 @@ $script:projects = @(
     @{ Repo = 'BannerlordSmithingSuite'; Rel = 'tests\InGame\SmithingSuite.Scenarios\SmithingSuite.Scenarios.csproj'; Id = 'SmithingSuite.Scenarios' }
 )
 
-# The health scenario projects that only -Suite L1 adds (after the seven), in build order.
+# The health scenario projects that only -Suite L1 adds (after the six), in build order.
 $script:l1ScenarioProjects = @(
     @{ Repo = 'BannerlordCoherentWarAI'; Rel = 'tests\InGame\CoherentWarAI.Scenarios\CoherentWarAI.Scenarios.csproj'; Id = 'CoherentWarAI.Scenarios'; Mod = 'CoherentWarAI' },
     @{ Repo = 'BannerlordAutoTrader'; Rel = 'tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj'; Id = 'AutoTraderSpeed.Scenarios'; Mod = 'AutoTraderSpeed' },
@@ -85,7 +84,7 @@ foreach ($a in $args) { if ($a -like '/p:BannerlordModulesPath=*') { $modules = 
 $name = [IO.Path]::GetFileName($proj)
 if ($env:RIG_FAKE_FAIL -and $name -eq $env:RIG_FAKE_FAIL) { Write-Output "error MSB9999: fake failure in $name"; exit 1 }
 $ids = @{
-    'CoherentWarAI.csproj' = 'CoherentWarAI'; 'CoherentWarAI.TestHarness.csproj' = 'CoherentWarAI.TestHarness'; 'TestRig.Harness.csproj' = 'TestRig.Harness'
+    'CoherentWarAI.csproj' = 'CoherentWarAI'; 'TestRig.Harness.csproj' = 'TestRig.Harness'
     'AutoTrader.csproj' = 'AutoTraderSpeed'; 'SmithingSuite.csproj' = 'SmithingSuite'; 'CompanionSuite.csproj' = 'CompanionManagementSuite'
     'SmithingSuite.Scenarios.csproj' = 'SmithingSuite.Scenarios'; 'TestRig.SelfTest.csproj' = 'TestRig.SelfTest'
     'CoherentWarAI.Scenarios.csproj' = 'CoherentWarAI.Scenarios'; 'AutoTraderSpeed.Scenarios.csproj' = 'AutoTraderSpeed.Scenarios'
@@ -115,9 +114,9 @@ exit 0
 function ConvertTo-Slash($Paths) { @($Paths | ForEach-Object { ([string]$_) -replace '\\', '/' }) }
 
 Describe 'Get-RigBuildProjects' {
-    It 'returns the seven projects with repo, absolute path and module id' {
+    It 'returns the six projects with repo, absolute path and module id' {
         $r = Get-RigBuildProjects -WorkspaceRoot 'C:\ws'
-        @($r).Count | Should Be 7
+        @($r).Count | Should Be 6
         foreach ($p in $script:projects) {
             $hit = @($r | Where-Object { $_.ModuleId -eq $p.Id })
             $hit.Count | Should Be 1
@@ -125,6 +124,9 @@ Describe 'Get-RigBuildProjects' {
             $hit[0].ProjectPath | Should Be (Join-Path (Join-Path 'C:\ws' $p.Repo) $p.Rel)
             [IO.Path]::IsPathRooted($hit[0].ProjectPath) | Should Be $true
         }
+    }
+    It 'does not build the retired CoherentWarAI.TestHarness (the rig harness TestRig.Harness replaces it)' {
+        @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' | Where-Object { $_.ModuleId -ceq 'CoherentWarAI.TestHarness' -or $_.ProjectPath -match 'TestHarness' }).Count | Should Be 0
     }
     It 'orders the scenario project after the harness and the mod (build order mod -> harness -> scenarios)' {
         $ids = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' | ForEach-Object { $_.ModuleId })
@@ -135,11 +137,11 @@ Describe 'Get-RigBuildProjects' {
     }
     It 'adds TestRig.SelfTest (repo BannerlordTestRig) after the harness only when it is a tail module' {
         foreach ($tail in @($null, @(), @('SmithingSuite.Scenarios'))) {
-            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules $tail).Count | Should Be 7
+            @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules $tail).Count | Should Be 6
             @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules $tail | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' }).Count | Should Be 0
         }
         $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules @('TestRig.SelfTest'))
-        $r.Count | Should Be 8
+        $r.Count | Should Be 7
         $hit = @($r | Where-Object { $_.ModuleId -eq 'TestRig.SelfTest' })
         $hit.Count | Should Be 1
         $hit[0].Repo | Should Be 'BannerlordTestRig'
@@ -147,12 +149,12 @@ Describe 'Get-RigBuildProjects' {
         $ids = @($r | ForEach-Object { $_.ModuleId })
         [array]::IndexOf($ids, 'TestRig.SelfTest') | Should BeGreaterThan ([array]::IndexOf($ids, 'TestRig.Harness'))
     }
-    It 'adds the health scenario projects of the tail modules after the seven, in tail order, without repeating SmithingSuite.Scenarios' {
+    It 'adds the health scenario projects of the tail modules after the six, in tail order, without repeating SmithingSuite.Scenarios' {
         $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules @('CoherentWarAI.Scenarios', 'AutoTraderSpeed.Scenarios', 'SmithingSuite.Scenarios', 'CompanionManagementSuite.Scenarios'))
-        $r.Count | Should Be 10
+        $r.Count | Should Be 9
         $ids = @($r | ForEach-Object { $_.ModuleId })
-        ($ids[0..6] -join ',') | Should Be (@($script:projects | ForEach-Object { $_.Id }) -join ',')
-        ($ids[7..9] -join ',') | Should Be 'CoherentWarAI.Scenarios,AutoTraderSpeed.Scenarios,CompanionManagementSuite.Scenarios'
+        ($ids[0..5] -join ',') | Should Be (@($script:projects | ForEach-Object { $_.Id }) -join ',')
+        ($ids[6..8] -join ',') | Should Be 'CoherentWarAI.Scenarios,AutoTraderSpeed.Scenarios,CompanionManagementSuite.Scenarios'
         foreach ($p in $script:l1ScenarioProjects) {
             $hit = @($r | Where-Object { $_.ModuleId -eq $p.Id })
             $hit.Count | Should Be 1
@@ -169,10 +171,10 @@ Describe 'Get-RigBuildProjects' {
         $script:RigTailModuleProjects['Fake.Scenarios'] = @('FakeRepo', 'tests\Fake.Scenarios\Fake.Scenarios.csproj')
         try {
             $r = @(Get-RigBuildProjects -WorkspaceRoot 'C:\ws' -TailModules @('Fake.Scenarios'))
-            $r.Count | Should Be 8
-            $r[7].ModuleId | Should Be 'Fake.Scenarios'
-            $r[7].Repo | Should Be 'FakeRepo'
-            $r[7].ProjectPath | Should Be (Join-Path 'C:\ws\FakeRepo' 'tests\Fake.Scenarios\Fake.Scenarios.csproj')
+            $r.Count | Should Be 7
+            $r[6].ModuleId | Should Be 'Fake.Scenarios'
+            $r[6].Repo | Should Be 'FakeRepo'
+            $r[6].ProjectPath | Should Be (Join-Path 'C:\ws\FakeRepo' 'tests\Fake.Scenarios\Fake.Scenarios.csproj')
         } finally { $script:RigTailModuleProjects.Remove('Fake.Scenarios') }
     }
     It 'builds only the harness with -HarnessOnly (no mod, no scenario module)' {
@@ -431,7 +433,7 @@ Describe 'Invoke-RigBuildPackage' {
         Invoke-RigBuildPackage @p
     }
 
-    It 'builds all seven projects into <StageDir>\Modules, writes the manifest and returns StageDir, ManifestPath, 5 repos' {
+    It 'builds all six projects into <StageDir>\Modules, writes the manifest and returns StageDir, ManifestPath, 5 repos' {
         $r = Build @{}
         $r.StageDir | Should Be $script:stage
         $r.ManifestPath | Should Be (Join-Path $script:stage 'manifest.json')
@@ -444,7 +446,7 @@ Describe 'Invoke-RigBuildPackage' {
             Test-Path -LiteralPath (Join-Path $script:stage "Modules\$($p.Id)\SubModule.xml") | Should Be $true
         }
         $lines = @(Get-Content -LiteralPath $script:log)
-        $lines.Count | Should Be 7
+        $lines.Count | Should Be 6
         foreach ($l in $lines) {
             $l.Contains('/p:BannerlordModulesPath=' + (Join-Path $script:stage 'Modules')) | Should Be $true
             $l.Contains('/p:BannerlordPath=' + $script:game) | Should Be $true
@@ -466,7 +468,7 @@ Describe 'Invoke-RigBuildPackage' {
     It 'builds TestRig.SelfTest after the harness and stages it only for -Suite RIG' {
         $r = Build @{ Suite = 'RIG' }
         $lines = @(Get-Content -LiteralPath $script:log)
-        $lines.Count | Should Be 8
+        $lines.Count | Should Be 7
         $iH = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match 'TestRig\.Harness\.csproj') }), $true)
         $iT = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match 'TestRig\.SelfTest\.csproj') }), $true)
         $iH | Should BeGreaterThan -1
@@ -485,10 +487,10 @@ Describe 'Invoke-RigBuildPackage' {
         @($r.Repos)[0].name | Should Be 'BannerlordTestRig'
     }
 
-    It 'builds and stages the ten L1 projects for -Suite L1 (scenario modules last) and records the five repos' {
+    It 'builds and stages the nine L1 projects for -Suite L1 (scenario modules last) and records the five repos' {
         $r = Build @{ Suite = 'L1' }
         $lines = @(Get-Content -LiteralPath $script:log)
-        $lines.Count | Should Be 10
+        $lines.Count | Should Be 9
         $iH = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match 'TestRig\.Harness\.csproj') }), $true)
         foreach ($p in $script:l1ScenarioProjects) {
             $iS = [array]::IndexOf(@($lines | ForEach-Object { [bool]($_ -match ([regex]::Escape($p.Id) + '\.csproj')) }), $true)
@@ -497,7 +499,7 @@ Describe 'Invoke-RigBuildPackage' {
         }
         @($r.Repos).Count | Should Be 5
         $m = [IO.File]::ReadAllText($r.ManifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
-        @($m.modules).Count | Should Be 10
+        @($m.modules).Count | Should Be 9
     }
     It 'records a repo with an uncommitted (untracked) scenario project as dirty (-Suite L1)' {
         $repo = Join-Path $script:ws 'CompanionManagementSuite'
@@ -530,7 +532,7 @@ Describe 'Invoke-RigBuildPackage' {
     It 'keeps the MSBuild output of every project in <StageDir>\build.log' {
         Build @{} | Out-Null
         $text = [IO.File]::ReadAllText((Join-Path $script:stage 'build.log'))
-        foreach ($n in 'CoherentWarAI.csproj', 'CoherentWarAI.TestHarness.csproj', 'AutoTrader.csproj', 'SmithingSuite.csproj', 'CompanionSuite.csproj', 'TestRig.Harness.csproj', 'SmithingSuite.Scenarios.csproj') {
+        foreach ($n in 'CoherentWarAI.csproj', 'AutoTrader.csproj', 'SmithingSuite.csproj', 'CompanionSuite.csproj', 'TestRig.Harness.csproj', 'SmithingSuite.Scenarios.csproj') {
             $text.Contains("fake msbuild ok: $n") | Should Be $true
         }
     }

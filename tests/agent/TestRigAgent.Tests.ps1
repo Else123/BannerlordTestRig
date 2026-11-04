@@ -108,7 +108,7 @@ function New-TestJob {
     param(
         [hashtable]$Rig,
         [string]$JobId = '20261031-120000-aaaa',
-        [string[]]$Entries = @('Modules/CoherentWarAI/SubModule.xml', 'Modules/CoherentWarAI/bin/Win64_Shipping_Client/CoherentWarAI.dll', 'Modules/CoherentWarAI.TestHarness/SubModule.xml'),
+        [string[]]$Entries = @('Modules/CoherentWarAI/SubModule.xml', 'Modules/CoherentWarAI/bin/Win64_Shipping_Client/CoherentWarAI.dll', 'Modules/TestRig.Harness/SubModule.xml'),
         [scriptblock]$Mutate = $null,
         [switch]$NoJobJson
     )
@@ -123,9 +123,9 @@ function New-TestJob {
         expectedGameVersion = $null
         package             = [ordered]@{ file = 'package.zip'; sha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash }
         repos               = @()
-        modules             = @('Bannerlord.Harmony', 'Native', 'NavalDLC', 'CoherentWarAI', 'CoherentWarAI.TestHarness')
+        modules             = @('Bannerlord.Harmony', 'Native', 'NavalDLC', 'CoherentWarAI', 'TestRig.Harness')
         runs                = @([ordered]@{
-                runId = 'r1'; kind = 'soak'; harness = 'CoherentWarAI'; seed = 7; days = 1; mode = 'WarSails'
+                runId = 'r1'; kind = 'soak'; harness = 'TestRig'; seed = 7; days = 1; mode = 'WarSails'
                 stallMinutes = 5; budgetMinutes = 60; hardTimeoutMinutes = 1
             })
     }
@@ -191,7 +191,7 @@ function Read-Done {
 
 function Get-ValidJobObject {
     param([string]$JobId = '20261031-120000-aaaa')
-    return ('{"schema":1,"jobId":"' + $JobId + '","createdUtc":"x","package":{"file":"package.zip","sha256":"' + ('A' * 64) + '"},"modules":["Native"],"runs":[{"runId":"r1","kind":"soak","harness":"CoherentWarAI","seed":1,"days":1,"mode":"WarSails","stallMinutes":5,"budgetMinutes":60,"hardTimeoutMinutes":20}]}') | ConvertFrom-Json
+    return ('{"schema":1,"jobId":"' + $JobId + '","createdUtc":"x","package":{"file":"package.zip","sha256":"' + ('A' * 64) + '"},"modules":["Native"],"runs":[{"runId":"r1","kind":"soak","harness":"TestRig","seed":1,"days":1,"mode":"WarSails","stallMinutes":5,"budgetMinutes":60,"hardTimeoutMinutes":20}]}') | ConvertFrom-Json
 }
 
 function Set-RigConfigValue {
@@ -232,7 +232,7 @@ function Stop-FakeGameLeftovers {
     }
 }
 
-function Get-RigHarnessDir { param($Rig) return (Join-Path $Rig.Docs 'Mount and Blade II Bannerlord\CoherentWarAI\harness') }
+function Get-RigHarnessDir { param($Rig) return (Join-Path $Rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness') }
 
 function Add-SecondRun {
     param($j, [double]$HardTimeout = 1)
@@ -319,10 +319,16 @@ Describe 'Get-NextJob (claim)' {
 
 Describe 'Test-JobSchema' {
     function Get-ValidJob {
-        return ('{"schema":1,"jobId":"20261031-120000-aaaa","createdUtc":"x","package":{"file":"package.zip","sha256":"' + ('A' * 64) + '"},"modules":["Native"],"runs":[{"runId":"r1","kind":"soak","harness":"CoherentWarAI","seed":1,"days":1,"mode":"WarSails","stallMinutes":5,"budgetMinutes":60,"hardTimeoutMinutes":20}]}') | ConvertFrom-Json
+        return ('{"schema":1,"jobId":"20261031-120000-aaaa","createdUtc":"x","package":{"file":"package.zip","sha256":"' + ('A' * 64) + '"},"modules":["Native"],"runs":[{"runId":"r1","kind":"soak","harness":"TestRig","seed":1,"days":1,"mode":"WarSails","stallMinutes":5,"budgetMinutes":60,"hardTimeoutMinutes":20}]}') | ConvertFrom-Json
     }
     It 'accepts a valid job' {
         @(Test-JobSchema (Get-ValidJob) '20261031-120000-aaaa').Count | Should Be 0
+    }
+    foreach ($unsupported in 'CoherentWarAI', 'Other') {
+        It "rejects the unsupported harness $unsupported, naming it (only TestRig is supported)" {
+            $j = Get-ValidJob; $j.runs[0].harness = $unsupported
+            (@(Test-JobSchema $j '20261031-120000-aaaa') -join "`n") | Should Match "Run r1: harness '$unsupported' is not supported \(only 'TestRig'\)"
+        }
     }
     It 'rejects an unknown schema' {
         $j = Get-ValidJob; $j.schema = 2
@@ -353,9 +359,8 @@ Describe 'Test-JobSchema: kind and scenarios (S4)' {
     }
     function Get-SchemaErrors($Job) { @(Test-JobSchema $Job '20261101-120000-aaaa') }
 
-    It 'accepts kind soak without scenarios (both harnesses)' {
+    It 'accepts kind soak without scenarios' {
         (Get-SchemaErrors (New-KindJob 'soak')).Count | Should Be 0
-        (Get-SchemaErrors (New-KindJob 'soak' $null 'CoherentWarAI')).Count | Should Be 0
     }
     It 'accepts kind scenarios with the TestRig harness and valid ids' {
         (Get-SchemaErrors (New-KindJob 'scenarios' '["smithing.smelt-then-refine"]')).Count | Should Be 0
@@ -410,9 +415,6 @@ Describe 'Test-JobSchema: kind and scenarios (S4)' {
             (@(Get-SchemaErrors (New-KindJob 'scenarios' $duplicate)) -join "`n") | Should Match 'duplicate id'
         }
     }
-    It 'rejects kind scenarios with the CoherentWarAI harness' {
-        (Get-SchemaErrors (New-KindJob 'scenarios' '["smithing.smelt-then-refine"]' 'CoherentWarAI')).Count | Should BeGreaterThan 0
-    }
 }
 
 Describe 'run.cfg scenarios line (S4)' {
@@ -439,13 +441,9 @@ Describe 'run.cfg scenarios line (S4)' {
         ($lines -contains 'ownAssemblies=A,B') | Should Be $true
         $lines.Count | Should Be 7
     }
-    It 'soak run.cfg stays byte-identical (TestRig and CoherentWarAI, with and without harness/kind fields)' {
+    It 'soak run.cfg stays byte-identical (with and without harness/kind fields)' {
         Get-RunCfgText (New-CfgRun 'TestRig' 'soak' $null) | Should Be $base
-        Get-RunCfgText (New-CfgRun 'CoherentWarAI' 'soak' $null) | Should Be $base
         Get-RunCfgText (New-CfgRun $null $null $null) | Should Be $base
-    }
-    It 'never writes scenarios for the CoherentWarAI harness (its parser rejects unknown keys)' {
-        Get-RunCfgText (New-CfgRun 'CoherentWarAI' 'scenarios' @('a.one')) | Should Be $base
     }
     It 'never writes scenarios for a soak run' {
         Get-RunCfgText (New-CfgRun 'TestRig' 'soak' @('a.one')) | Should Be $base
@@ -464,9 +462,6 @@ Describe 'Test-JobSchema: health (S6)' {
     It 'accepts a TestRig soak run with health ids (also a single one)' {
         (Get-SchemaErrors (New-HealthJob 'soak' '["coherentwarai.health","autotrader.health"]')).Count | Should Be 0
         (Get-SchemaErrors (New-HealthJob 'soak' '["autotrader.health"]')).Count | Should Be 0
-    }
-    It 'rejects health with the CoherentWarAI harness' {
-        (Get-SchemaErrors (New-HealthJob 'soak' '["autotrader.health"]' 'CoherentWarAI')).Count | Should BeGreaterThan 0
     }
     It 'rejects health on a scenarios run (also next to valid scenarios)' {
         (Get-SchemaErrors (New-HealthJob 'scenarios' '["autotrader.health"]' 'TestRig' '["a.one"]')).Count | Should BeGreaterThan 0
@@ -497,8 +492,7 @@ Describe 'run.cfg health line (S6)' {
     It 'writes a single health id without a comma' {
         Get-RunCfgText (New-HealthCfgRun 'TestRig' 'soak' @('autotrader.health')) | Should Be ($base + "health=autotrader.health`n")
     }
-    It 'never writes health for the CoherentWarAI harness or a scenarios run' {
-        Get-RunCfgText (New-HealthCfgRun 'CoherentWarAI' 'soak' @('autotrader.health')) | Should Be $base
+    It 'never writes health for a scenarios run' {
         $scenariosRun = New-HealthCfgRun 'TestRig' 'scenarios' @('autotrader.health')
         $scenariosRun | Add-Member -NotePropertyName scenarios -NotePropertyValue @('a.one')
         Get-RunCfgText $scenariosRun | Should Be ($base + "scenarios=a.one`n")
@@ -526,9 +520,6 @@ Describe 'Test-JobSchema: ownAssemblies' {
         (Get-SchemaErrors (New-OwnJob 'soak' '["CoherentWarAI","Extra_1"]')).Count | Should Be 0
         (Get-SchemaErrors (New-OwnJob 'scenarios' '["TestRig.SelfTest"]')).Count | Should Be 0
     }
-    It 'rejects the field with the CoherentWarAI harness' {
-        (Get-SchemaErrors (New-OwnJob 'soak' '["A"]' 'CoherentWarAI')).Count | Should BeGreaterThan 0
-    }
     It 'rejects an empty, non-array or non-string list' {
         foreach ($bad in '[]', '"TestRig.SelfTest"', '[1]', '[null]', '[""]', 'null') {
             (Get-SchemaErrors (New-OwnJob 'soak' $bad)).Count | Should BeGreaterThan 0
@@ -554,9 +545,6 @@ Describe 'run.cfg ownAssemblies from the job' {
     }
     It 'keeps the derived list without the field' {
         Get-RunCfgText (New-OwnCfgRun 'TestRig' $null) -OwnAssemblies @('A', 'B') | Should Be ($base + "ownAssemblies=A,B`n")
-    }
-    It 'never writes the field for the CoherentWarAI harness' {
-        Get-RunCfgText (New-OwnCfgRun 'CoherentWarAI' @('X')) | Should Be $base
     }
 }
 
@@ -671,7 +659,6 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
     AfterEach {
         Stop-FakeGameLeftovers
         Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
-        Remove-Item Env:\FAKEGAME_HARNESS -ErrorAction SilentlyContinue
         Remove-Item Env:\FAKEGAME_NOMODLOG -ErrorAction SilentlyContinue
         Remove-Item Env:\FAKEGAME_MODLOGS -ErrorAction SilentlyContinue
     }
@@ -683,9 +670,9 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         New-Item -ItemType Directory -Path $stale -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $stale 'old.txt'), 'old', $utf8NoBom)
         $jobDir = New-TestJob $rig
-        $harnessDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\CoherentWarAI\harness'
+        $harnessDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness'
         New-Item -ItemType Directory -Path $harnessDir -Force | Out-Null
-        [System.IO.File]::WriteAllText((Join-Path $harnessDir 'result.txt'), 'status=Stale', $utf8NoBom)
+        [System.IO.File]::WriteAllText((Join-Path $harnessDir 'run-result.json'), '{"schema":1,"status":"Aborted"}', $utf8NoBom)
 
         (Invoke-AgentCycle -Config (Get-ConfigFor $rig)) | Should Be $true
 
@@ -698,11 +685,11 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $run = [System.IO.File]::ReadAllText((Join-Path $runDir 'agent-run.json')) | ConvertFrom-Json
         $run.exitClass | Should Be 'Completed'
         $run.pid | Should BeGreaterThan 0
-        foreach ($name in @('result.txt', 'harness.log', 'CoherentWarAI.log')) {
+        foreach ($name in @('run-result.json', 'harness.log', 'CoherentWarAI.log')) {
             $run.artifacts -contains $name | Should Be $true
             Test-Path (Join-Path $runDir $name) | Should Be $true
         }
-        (Get-Content -Raw (Join-Path $runDir 'result.txt')) | Should Match 'status=Completed'
+        (Get-Content -Raw (Join-Path $runDir 'run-result.json')) | Should Match '"status":"Completed"'
 
         # install replaced the module
         Test-Path (Join-Path $stale 'old.txt') | Should Be $false
@@ -710,7 +697,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
 
         # what the fake game saw
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-args.txt')).Trim() |
-            Should Be '/singleplayer _MODULES_*Bannerlord.Harmony*Native*NavalDLC*CoherentWarAI*CoherentWarAI.TestHarness*_MODULES_'
+            Should Be '/singleplayer _MODULES_*Bannerlord.Harmony*Native*NavalDLC*CoherentWarAI*TestRig.Harness*_MODULES_'
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) | Should Match 'seed=7'
 
         # run.cfg removed after the run; the game saw the baseline with the per-run patch on top
@@ -741,14 +728,14 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         Test-Path (Join-Path $jobDir 'job.claimed.json') | Should Be $true
     }
 
-    It 'turns the stale result.txt into NotCompleted when the game writes none' {
+    It 'turns the stale run-result.json into NotCompleted when the game writes none' {
         $env:FAKEGAME_BEHAVIOR = 'noresult'
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
         $null = New-TestJob $rig
-        $harnessDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\CoherentWarAI\harness'
+        $harnessDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness'
         New-Item -ItemType Directory -Path $harnessDir -Force | Out-Null
-        [System.IO.File]::WriteAllText((Join-Path $harnessDir 'result.txt'), 'status=Completed', $utf8NoBom)
+        [System.IO.File]::WriteAllText((Join-Path $harnessDir 'run-result.json'), '{"schema":1,"status":"Completed"}', $utf8NoBom)
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'NotCompleted'
     }
@@ -764,7 +751,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $done.runs[0].exitClass | Should Be 'HardTimeout'
         $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
         @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
-        Test-Path (Join-Path $rig.Docs 'Mount and Blade II Bannerlord\CoherentWarAI\harness\run.cfg') | Should Be $false
+        Test-Path (Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness\run.cfg') | Should Be $false
     }
 
     It 'classifies the run Aborted when the abort file exists, kills the game and skips the rest' {
@@ -794,7 +781,6 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
     It 'accepts harness TestRig: run.cfg, run-result.json and harness.log live in the TestRig folder' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $null = New-TestRigHarnessJob $rig
         $docs = Join-Path $rig.Docs 'Mount and Blade II Bannerlord'
 
@@ -803,56 +789,35 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $done = Read-Done $rig
         $done.status | Should Be 'completed'
         $done.runs[0].exitClass | Should Be 'Completed'
-        # the fake game read run.cfg from the TestRig folder; nothing was written to the other one
+        # the fake game read run.cfg from the TestRig folder
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) | Should Match 'seed=7'
-        (Get-Content -Raw (Join-Path $rig.Docs 'fake-other-runcfg.txt')).Trim() | Should Be 'False'
         $runDir = Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1'
         (Get-Content -Raw (Join-Path $runDir 'run-result.json')) | Should Match '"status":"Completed"'
         (Get-Content -Raw (Join-Path $runDir 'harness.log')) | Should Match 'harness started'
         $run = Get-Content -Raw (Join-Path $runDir 'agent-run.json') | ConvertFrom-Json
         $run.artifacts -contains 'run-result.json' | Should Be $true
         $run.artifacts -contains 'harness.log' | Should Be $true
-        # run.cfg removed after the run, in both folders
+        # run.cfg removed after the run
         Test-Path (Join-Path $docs 'TestRig\harness\run.cfg') | Should Be $false
-        Test-Path (Join-Path $docs 'CoherentWarAI\harness\run.cfg') | Should Be $false
     }
 
-    It 'does not take a stale TestRig result.txt as this run result' {
-        $env:FAKEGAME_BEHAVIOR = 'noresult'
-        $rig = New-Rig
-        $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
-        $null = New-TestRigHarnessJob $rig
-        $trDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness'
-        New-Item -ItemType Directory -Path $trDir -Force | Out-Null
-        [System.IO.File]::WriteAllText((Join-Path $trDir 'result.txt'), 'status=Completed', $utf8NoBom)
-        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
-        (Read-Done $rig).runs[0].exitClass | Should Be 'NotCompleted'
-    }
-
-    It 'keeps CoherentWarAI behavior: run.cfg goes to the CoherentWarAI folder, nothing is created in TestRig' {
-        $rig = New-Rig
-        $env:FAKEGAME_DOCS = $rig.Docs
-        $null = New-TestJob $rig
-        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
-        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
-        (Get-Content -Raw (Join-Path $rig.Docs 'fake-other-runcfg.txt')).Trim() | Should Be 'False'
-        Test-Path (Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig') | Should Be $false
-    }
-
-    It 'classifies an unknown harness as SetupError without launching' {
-        $rig = New-Rig
-        $env:FAKEGAME_DOCS = $rig.Docs
-        $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['harness'] = 'Other' }
-        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
-        (Read-Done $rig).runs[0].exitClass | Should Be 'SetupError'
-        Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
+    foreach ($unsupported in 'CoherentWarAI', 'Other') {
+        It "rejects the job of an unsupported harness ($unsupported) without launching, naming the harness" {
+            $rig = New-Rig
+            $env:FAKEGAME_DOCS = $rig.Docs
+            $harness = $unsupported   # GetNewClosure sees only this scope's own variables
+            $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['harness'] = $harness }.GetNewClosure()
+            $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+            $done = Read-Done $rig
+            $done.status | Should Be 'rejected'
+            $done.message | Should Match "harness '$unsupported' is not supported"
+            Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
+        }
     }
 
     It 'classifies a TestRig run as SetupError without launching when TestRig.Harness is not in the package' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         # A stale copy from an earlier job passes the job-level module check; the run must still refuse it.
         New-SubModuleXml (Join-Path $rig.Game 'Modules\TestRig.Harness') 'TestRig.Harness' 'v0.0.1'
         $null = New-TestRigHarnessJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml')
@@ -866,7 +831,6 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
     It 'classifies a TestRig run as SetupError without launching when TestRig.Harness is not in job.modules' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $null = New-TestRigHarnessJob $rig -Modules @('Native', 'CoherentWarAI')
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'SetupError'
@@ -879,7 +843,6 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $env:FAKEGAME_NOMODLOG = '1'
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $null = New-TestRigHarnessJob $rig
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
@@ -895,7 +858,6 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $env:FAKEGAME_MODLOGS = '1'
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $null = New-TestRigHarnessJob $rig
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
@@ -915,7 +877,6 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
     It 'does not copy a mod log last written before the run started (stale log of an earlier session)' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $stale = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\Configs\AutoTrader.log'
         New-Item -ItemType Directory -Path (Split-Path -Parent $stale) -Force | Out-Null
         [System.IO.File]::WriteAllText($stale, "stale`r`n", $utf8NoBom)
@@ -940,7 +901,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
     }
 }
 
-Describe 'Get-ResultStatus: run-result.json with result.txt fallback' {
+Describe 'Get-ResultStatus: run-result.json only' {
     BeforeEach {
         $script:hd = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $script:hd -Force | Out-Null
@@ -958,17 +919,11 @@ Describe 'Get-ResultStatus: run-result.json with result.txt fallback' {
         Set-HarnessFile 'result.txt' 'status=Completed'
         Get-ResultStatus $script:hd | Should Be 'Aborted'
     }
-    It 'falls back to result.txt when there is no run-result.json' {
+    It 'treats a result.txt alone as no result (the old harness format is not read)' {
         Set-HarnessFile 'result.txt' "status=Completed`r`ndaysReached=1`r`n"
-        Get-ResultStatus $script:hd | Should Be 'Completed'
-    }
-    It 'falls back to result.txt with CRLF line endings' {
-        Set-HarnessFile 'result.txt' "daysReached=1`r`nstatus=Aborted`r`n"
-        Get-ResultStatus $script:hd | Should Be 'Aborted'
-    }
-    It 'falls back to result.txt with LF-only line endings (no CR)' {
+        Get-ResultStatus $script:hd | Should Be $null
         Set-HarnessFile 'result.txt' "daysReached=1`nstatus=Aborted`ndetail=x`n"
-        Get-ResultStatus $script:hd | Should Be 'Aborted'
+        Get-ResultStatus $script:hd | Should Be $null
     }
     foreach ($case in @(
             @{ Name = 'an array'; Json = '[{"status":"Completed"}]' },
@@ -1032,8 +987,7 @@ Describe 'ownAssemblies for run.cfg' {
     It 'excludes harness modules' {
         New-ModuleXml $script:mods 'A' @('Alpha.dll')
         New-ModuleXml $script:mods 'TestRig.Harness' @('TestRig.Harness.dll')
-        New-ModuleXml $script:mods 'CoherentWarAI.TestHarness' @('CoherentWarAI.TestHarness.dll')
-        (Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A', 'TestRig.Harness', 'CoherentWarAI.TestHarness') -HarnessModuleIds @('CoherentWarAI.TestHarness', 'TestRig.Harness')) -join ',' | Should Be 'Alpha'
+        (Get-OwnAssemblyNames -ModulesDir $script:mods -ModuleIds @('A', 'TestRig.Harness') -HarnessModuleIds @('TestRig.Harness')) -join ',' | Should Be 'Alpha'
     }
     It 'excludes a module that depends on a harness module (scenario module), by its SubModule.xml' {
         New-ModuleXml $script:mods 'A' @('Alpha.dll')
@@ -1081,7 +1035,6 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
     AfterEach {
         Stop-FakeGameLeftovers
         Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
-        Remove-Item Env:\FAKEGAME_HARNESS -ErrorAction SilentlyContinue
     }
     function Get-TrDir($rig) { Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness' }
     function Get-RunDir($rig) { Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1' }
@@ -1089,7 +1042,6 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
         $env:FAKEGAME_BEHAVIOR = $Behavior
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $null = New-TestRigHarnessJob $rig
         return $rig
     }
@@ -1110,7 +1062,6 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
         $env:FAKEGAME_BEHAVIOR = 'complete'
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $null = New-TestJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml') -Mutate {
             param($j)
             $j['runs'][0]['harness'] = 'TestRig'
@@ -1126,26 +1077,17 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
         $json = Get-Content -Raw (Join-Path (Get-RunDir $rig) 'run-result.json') | ConvertFrom-Json
         (@($json.scenarios | ForEach-Object { $_.id }) -join ' ') | Should Be 'coherentwarai.health@0 autotrader.health@0 soak coherentwarai.health@2 autotrader.health@2'
     }
-    It 'falls back to result.txt for a TestRig run without run-result.json' {
-        $rig = Start-TrRig 'txtonly'
-        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
-        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
-        $run = Get-Content -Raw (Join-Path (Get-RunDir $rig) 'agent-run.json') | ConvertFrom-Json
-        $run.artifacts -contains 'result.txt' | Should Be $true
-        $run.artifacts -contains 'run-result.json' | Should Be $false
-    }
     It 'classifies invalid run-result.json as NotCompleted' {
         $rig = Start-TrRig 'badjson'
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'NotCompleted'
     }
-    It 'clears a stale run-result.json, run-result.json.tmp and result.txt before the launch' {
+    It 'clears a stale run-result.json and run-result.json.tmp before the launch' {
         $rig = Start-TrRig 'noresult'
         $trDir = Get-TrDir $rig
         New-Item -ItemType Directory -Path $trDir -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $trDir 'run-result.json'), '{"schema":1,"status":"Completed"}', $utf8NoBom)
         [System.IO.File]::WriteAllText((Join-Path $trDir 'run-result.json.tmp'), '{', $utf8NoBom)
-        [System.IO.File]::WriteAllText((Join-Path $trDir 'result.txt'), 'status=Completed', $utf8NoBom)
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'NotCompleted'
         Test-Path (Join-Path $trDir 'run-result.json') | Should Be $false
@@ -1154,7 +1096,6 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
     It 'writes ownAssemblies from the installed SubModule.xml of non-harness modules (TestRig only)' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $jobDir = New-TestRigHarnessJob $rig
         Set-JobPackageWithValidXml $jobDir
 
@@ -1165,7 +1106,6 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
     It 'lists only modules of job.modules and no scenario module (depends on the harness) in ownAssemblies' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $jobDir = New-TestRigHarnessJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml', 'Modules/AutoTraderSpeed/SubModule.xml', 'Modules/Sc.Scenarios/SubModule.xml') `
             -Modules @('Native', 'CoherentWarAI', 'TestRig.Harness', 'Sc.Scenarios')
         Set-JobPackageWithValidXml $jobDir -UnlistedModuleId 'AutoTraderSpeed' -ScenarioModuleId 'Sc.Scenarios'
@@ -1177,7 +1117,6 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
     It 'writes exactly runs[].ownAssemblies instead of the derived list (TestRig.SelfTest depends on the harness)' {
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = 'TestRig'
         $jobDir = New-TestJob $rig -Entries @('Modules/CoherentWarAI/SubModule.xml', 'Modules/TestRig.Harness/SubModule.xml') -Mutate {
             param($j)
             $j['runs'][0]['harness'] = 'TestRig'
@@ -1189,17 +1128,6 @@ Describe 'Invoke-Job: run-result.json end-to-end with a fake game' {
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
         (Get-Content -Raw (Join-Path $rig.Docs 'fake-ownassemblies.txt')).Trim() | Should Be 'ownAssemblies=TestRig.SelfTest'
-    }
-    It 'does not give the CoherentWarAI harness an ownAssemblies line' {
-        $rig = New-Rig
-        $env:FAKEGAME_DOCS = $rig.Docs
-        # Valid SubModule.xml with DLLs: without the harness choice, ownAssemblies=CoherentWarAI,Extra would be written.
-        $jobDir = New-TestJob $rig
-        Set-JobPackageWithValidXml $jobDir -HarnessModuleId 'CoherentWarAI.TestHarness'
-        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
-        (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
-        (Get-Content -Raw (Join-Path $rig.Docs 'fake-runcfg.txt')) | Should Not Match 'ownAssemblies'
-        [System.IO.File]::ReadAllText((Join-Path $rig.Docs 'fake-ownassemblies.txt')) | Should Be ''
     }
 }
 
@@ -1384,7 +1312,7 @@ Describe 'Resolve-OrphanedJobs at startup (W3)' {
         $resB = Join-Path $rig.Queue 'results\20261031-120000-aaaa'
         New-Item -ItemType Directory -Path $resB -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $resB 'done.json'), '{"schema":1,"status":"completed"}', $utf8NoBom)
-        $harnessDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\CoherentWarAI\harness'
+        $harnessDir = Join-Path $rig.Docs 'Mount and Blade II Bannerlord\TestRig\harness'
         New-Item -ItemType Directory -Path $harnessDir -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $harnessDir 'run.cfg'), 'seed=1', $utf8NoBom)
 
@@ -1416,21 +1344,6 @@ Describe 'Resolve-OrphanedJobs at startup (W3)' {
         (Get-Content -Raw (Join-Path $rig.Work 'agent.log')) | Should Match 'Removed leftover harness run\.cfg'
     }
 
-    It 'removes leftover run.cfg files from both folders in one startup' {
-        $rig = New-Rig
-        $dirA = New-TestJob $rig '20261031-110000-bbbb'
-        Rename-Item (Join-Path $dirA 'job.json') 'job.claimed.json'
-        $docs = Join-Path $rig.Docs 'Mount and Blade II Bannerlord'
-        $dirs = @((Join-Path $docs 'CoherentWarAI\harness'), (Join-Path $docs 'TestRig\harness'))
-        foreach ($d in $dirs) {
-            New-Item -ItemType Directory -Path $d -Force | Out-Null
-            [System.IO.File]::WriteAllText((Join-Path $d 'run.cfg'), 'seed=1', $utf8NoBom)
-        }
-
-        Invoke-AgentMain -ConfigPath $rig.ConfigPath -Once | Should Be 0
-
-        foreach ($d in $dirs) { Test-Path (Join-Path $d 'run.cfg') | Should Be $false }
-    }
 }
 
 Describe 'Invoke-Job: hardening end-to-end' {
@@ -1453,11 +1366,11 @@ Describe 'Invoke-Job: hardening end-to-end' {
 
     It 'fails the run before Start-Process when the deadline cannot be computed (C1)' {
         $rig = New-Rig; $env:FAKEGAME_DOCS = $rig.Docs
-        $run = [pscustomobject]@{ runId = 'r1'; kind = 'soak'; harness = 'CoherentWarAI'; seed = 1; days = 1; mode = 'WarSails'
+        $run = [pscustomobject]@{ runId = 'r1'; kind = 'soak'; harness = 'TestRig'; seed = 1; days = 1; mode = 'WarSails'
             stallMinutes = 5; budgetMinutes = 60; hardTimeoutMinutes = 10000000000 }
         $resultsDir = Join-Path $rig.Root 'res'
         $ctx = @{ JobId = '20261031-120000-aaaa'; JobDir = $rig.Root; ResultsDir = $resultsDir; Beat = 0; RunCount = 1 }
-        $rec = Invoke-Run -Config (Get-ConfigFor $rig) -Context $ctx -Run $run -Modules @('Native', 'CoherentWarAI.TestHarness') -PackageModuleIds @('CoherentWarAI.TestHarness') -RunIndex 1 -ResultsDir $resultsDir
+        $rec = Invoke-Run -Config (Get-ConfigFor $rig) -Context $ctx -Run $run -Modules @('Native', 'TestRig.Harness') -PackageModuleIds @('TestRig.Harness') -RunIndex 1 -ResultsDir $resultsDir
         $rec.exitClass | Should Be 'SetupError'
         Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
         Test-Path (Join-Path (Get-RigHarnessDir $rig) 'run.cfg') | Should Be $false
@@ -2054,7 +1967,7 @@ Describe 'Invoke-Job: preflight and versions end-to-end' {
         $run = Read-RunRecord $rig
         $run.gameVersion | Should Be 'v1.4.8'
         (@($run.moduleVersions) | ForEach-Object { '{0}@{1}' -f $_.id, $_.source }) -join ';' |
-            Should Be 'Bannerlord.Harmony@workshop;Native@game;NavalDLC@game;CoherentWarAI@package;CoherentWarAI.TestHarness@package'
+            Should Be 'Bannerlord.Harmony@workshop;Native@game;NavalDLC@game;CoherentWarAI@package;TestRig.Harness@package'
         @($run.moduleVersions)[0].version | Should Be 'v2.4.2.248'
     }
     It 'blocks a version mismatch before installing anything and does not touch the configs' {
@@ -3397,17 +3310,15 @@ Describe 'Invoke-Run: early detection from harness.log' {
         $script:AgentLogPath = $null
         Stop-FakeGameLeftovers
         Remove-Item Env:\FAKEGAME_BEHAVIOR -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_DOCS -ErrorAction SilentlyContinue
-        Remove-Item Env:\FAKEGAME_HARNESS -ErrorAction SilentlyContinue; Remove-Item Env:\FAKEGAME_ENGINELOGS -ErrorAction SilentlyContinue
+        Remove-Item Env:\FAKEGAME_ENGINELOGS -ErrorAction SilentlyContinue
     }
-    function Start-EarlyRig([string]$Behavior, [string]$Harness = 'TestRig', [double]$HardTimeoutMinutes = 1) {
+    function Start-EarlyRig([string]$Behavior, [double]$HardTimeoutMinutes = 1) {
         $env:FAKEGAME_BEHAVIOR = $Behavior
         $rig = New-Rig
         $env:FAKEGAME_DOCS = $rig.Docs
-        $env:FAKEGAME_HARNESS = $Harness
         $env:FAKEGAME_ENGINELOGS = $rig.EngineLogs
         $script:AgentLogPath = Join-Path $rig.Work 'agent.log'
-        if ($Harness -eq 'TestRig') { $rig.JobDir = New-TestRigHarnessJob $rig -HardTimeoutMinutes $HardTimeoutMinutes }
-        else { $rig.JobDir = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['hardTimeoutMinutes'] = $HardTimeoutMinutes }.GetNewClosure() }
+        $rig.JobDir = New-TestRigHarnessJob $rig -HardTimeoutMinutes $HardTimeoutMinutes
         return $rig
     }
     function Get-AgentLogText($rig) { return (Get-Content -Raw (Join-Path $rig.Work 'agent.log')) }
@@ -3424,11 +3335,6 @@ Describe 'Invoke-Run: early detection from harness.log' {
         $run.message | Should Not Match "[\r\n]"
         @(Get-Process -Id $run.pid -ErrorAction SilentlyContinue).Count | Should Be 0
         Get-AgentLogText $rig | Should Match 'UnhandledException in harness\.log: .*killing the game'
-    }
-    It 'also detects an UnhandledException line for the CoherentWarAI harness' {
-        $rig = Start-EarlyRig 'unhandled' 'CoherentWarAI'
-        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
-        (Read-Done $rig).runs[0].exitClass | Should Be 'Crashed'
     }
     It 'does not trigger on a FirstChance line that merely contains the word' {
         $script:SilenceSeconds = 30
@@ -3536,12 +3442,6 @@ Describe 'Invoke-Run: early detection from harness.log' {
         $rig = Start-EarlyRig 'runningsleep'
         $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
         (Read-Done $rig).runs[0].exitClass | Should Be 'Hung'
-    }
-    It 'does not start the silence watchdog for the CoherentWarAI harness (an Alive line, then silence: HardTimeout)' {
-        $script:SilenceSeconds = 2
-        $rig = Start-EarlyRig 'alivesleep' 'CoherentWarAI' -HardTimeoutMinutes 0.12
-        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
-        (Read-Done $rig).runs[0].exitClass | Should Be 'HardTimeout'
     }
     It 'does not call a game Hung that already wrote its final result and is still shutting down' {
         $script:SilenceSeconds = 2

@@ -62,12 +62,12 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
   "expectedGameVersion": null,
   "package": { "file": "package.zip", "sha256": "<uppercase hex>" },
   "repos": [ { "name": "BannerlordCoherentWarAI", "sha": "<git sha or null>", "dirty": true } ],
-  "modules": [ "Bannerlord.Harmony", "...", "CoherentWarAI", "CoherentWarAI.TestHarness" ],
+  "modules": [ "Bannerlord.Harmony", "...", "CoherentWarAI", "TestRig.Harness" ],
   "runs": [
     {
       "runId": "r1",
       "kind": "soak",
-      "harness": "CoherentWarAI",
+      "harness": "TestRig",
       "seed": 1,
       "days": 1,
       "mode": "WarSails",
@@ -95,17 +95,20 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
   another harness, empty, not an array of strings or with an invalid or duplicate id -> job `rejected` (schema check).
   The agent writes the ids to `run.cfg` as `health=` (section "`run.cfg`").
 - `ownAssemblies` (optional, any `kind`): a non-empty JSON array of unique (case-insensitive) simple DLL names matching
-  `^[A-Za-z0-9._-]+$` (also with one element); only with harness `TestRig`. With another harness, empty, not an array of
+  `^[A-Za-z0-9._-]+$` (also with one element). Empty, not an array of
   strings or with an invalid or duplicate name -> job `rejected` (schema check). The agent writes exactly this list to
   `run.cfg` as `ownAssemblies=` instead of the derived one (section "`run.cfg`").
 - `harness`: selects the in-game harness; `run.cfg`, the result file and `harness.log` live in its folder
-  below `<MyDocuments>\Mount and Blade II Bannerlord\`. Anything else -> run classified `SetupError`.
+  below `<MyDocuments>\Mount and Blade II Bannerlord\`. Only `TestRig` is supported; any other value -> job `rejected`
+  (schema check: `harness 'X' is not supported (only 'TestRig')`).
 
   | `harness` | Folder | Harness module id in `modules` |
   |-----------|--------|--------------------------------|
-  | `CoherentWarAI` | `CoherentWarAI\harness` | `CoherentWarAI.TestHarness` |
   | `TestRig` | `TestRig\harness` | `TestRig.Harness` |
-- `mode`: `WarSails` | `NoDlc` | `FeatureOff` (as in the CoherentWarAI harness).
+
+  History: the harness `CoherentWarAI` (module `CoherentWarAI.TestHarness`, folder `CoherentWarAI\harness`) was retired
+  on 2026-11-04 (last state: commit `8f1bd1f` in BannerlordCoherentWarAI).
+- `mode`: `WarSails` | `NoDlc` | `FeatureOff`.
 - Unknown `schema` or a missing required field -> job finishes with `done.json` status `rejected`.
 
 ## `package.zip`
@@ -157,7 +160,7 @@ The versions found here go into every `agent-run.json` (`gameVersion`, `moduleVe
 ```
 
 `artifacts` lists what was copied to the run folder (only files that exist, written during the run):
-`run-result.json`, `result.txt`, `harness.log`, the mod logs (each only if present; a missing one is no error) and the
+`run-result.json`, `harness.log`, the mod logs (each only if present; a missing one is no error) and the
 engine logs `rgl_log_<pid>.txt` / `rgl_log_errors_<pid>.txt` / `watchdog_log_<pid>.txt`. The mod logs are copied
 under their file name, without a size cap, from below `<MyDocuments>\Mount and Blade II Bannerlord\`:
 
@@ -198,18 +201,18 @@ rewritten in place, everything else in the file (encoding, BOM, line endings, ot
 `Bannerlord` process runs the file belongs to that game: the reset is skipped and logged. If the file cannot be opened
 or written, the agent logs it and launches anyway (the dialog answer above is the fallback).
 
-`exitClass` (names for the exit codes of `Run-SoakTest.ps1` in BannerlordCoherentWarAI):
+`exitClass` (names for the exit codes of the former soak script of BannerlordCoherentWarAI, retired 2026-11-04):
 
 | exitClass | Meaning |
 |---|---|
-| `Completed` | game ended, the harness result has status `Completed` (`run-result.json`, else `result.txt`) |
+| `Completed` | game ended, the harness result has status `Completed` (`run-result.json`) |
 | `SetupError` | precondition or setup failed before or at launch |
 | `LaunchFailed` | process exited within 30 s and the harness log never appeared |
 | `HardTimeout` | `hardTimeoutMinutes` expired, game killed |
 | `NotCompleted` | game ended, but no usable result (missing, or `run-result.json` invalid JSON) or status not `Completed` |
 | `CleanupFailed` | the game could not be stopped or `run.cfg` could not be removed |
 | `Crashed` | the watchdog log reported `Crash occurred`, or `harness.log` gained an `UnhandledException` line; game killed (see "Crash watchdog" and "Early signals from harness.log") |
-| `Hung` | harness `TestRig` only: no new `Alive:` line in `harness.log` for more than 60 s, game killed (see "Early signals from harness.log") |
+| `Hung` | no new `Alive:` line in `harness.log` for more than 60 s, game killed (see "Early signals from harness.log") |
 | `Aborted` | `abort` file seen, game killed |
 
 If several apply, the first in this order wins: `CleanupFailed` > `Aborted` > `SetupError` > `Crashed` >
@@ -225,7 +228,7 @@ run before `hardTimeoutMinutes`; the agent then kills the process tree (after a 
 reads the growth once more, so an `UnhandledException` line written right before the exit still counts (`Crashed`,
 which wins over `Hung` and `HardTimeout`).
 
-- **`UnhandledException` line** (all harnesses): a complete line whose text after the leading `<seconds> `
+- **`UnhandledException` line**: a complete line whose text after the leading `<seconds> `
   timestamp starts with `UnhandledException` gives `exitClass` `Crashed`; `message` is `Harness reported: <that line>`
   (single line, printable ASCII, cut to 200 characters). A `FirstChance` line that merely contains the
   word does not count. The line ends the run whatever its `terminating=` value: under the .NET Framework 4.8 default
@@ -234,7 +237,7 @@ which wins over `Hung` and `HardTimeout`).
   updated exception counts; a result that was final already is rewritten with the updated counts), so the agent waits
   up to 5 s (`UnhandledResultGraceSeconds`) until the game has exited or the harness result was written after the
   agent read the line and has a status other than `Running`, then kills; the result is collected as an artifact.
-- **Silence** (harness `TestRig` only; the CoherentWarAI harness writes no beat): measured on the harness's beat
+- **Silence**: measured on the harness's beat
   only, the lines whose text after the `<seconds> ` timestamp starts with `Alive:`. The harness writes one every
   10 s from the main thread (`OnApplicationTick`; the largest gap measured in a real run was 14.5 s). The watch is
   armed by the first `Alive:` line of the run, so the long gap between module load and the first tick is never a
@@ -248,7 +251,7 @@ which wins over `Hung` and `HardTimeout`).
   is visible in the message. Before deciding `Hung`
   the agent looks once more at the watchdog log and at the growth of
   `harness.log`; a crash found there gives `Crashed` instead. The watch ends once the harness has written its final
-  result: `run-result.json` (or `result.txt`) with a status other than `Running`. `run-result.json` is rewritten
+  result: `run-result.json` with a status other than `Running`. `run-result.json` is rewritten
   after every scenario with status `Running`, so its mere existence does not end the watch. A result that cannot be
   read at that moment (e.g. while it is being replaced) is looked at again on the next two passes (about one second
   apart) before the run counts as `Hung`.
@@ -313,11 +316,11 @@ another name). A violation makes the agent exit with 1 and `Save-TestRigBaseline
 - The agent holds the mutex `Global\BannerlordTestRigConfig` from claiming a job until the job is done.
   `Save-TestRigBaseline.ps1` refuses while it is held, and the agent claims no job while the save holds it.
 
-## Harness result: `run-result.json` / `result.txt`
+## Harness result: `run-result.json`
 
-The harness writes its result into its harness folder. The `TestRig` harness writes `run-result.json`
-(schema 1, UTF-8 without BOM, written via `run-result.json.tmp` + rename); the old `CoherentWarAI` harness
-writes `result.txt` (`key=value` lines, e.g. `status=Completed`, `daysReached=3`).
+The harness writes its result into its harness folder as `run-result.json`
+(schema 1, UTF-8 without BOM, written via `run-result.json.tmp` + rename). Agent and runner read only this file;
+a `result.txt` is ignored (History: the retired CoherentWarAI harness wrote it, see `harness` above).
 
 ```json
 {
@@ -381,15 +384,14 @@ record and `unhandled` stays `0` in any file written earlier. The harness writes
 apart on `IOException` or `UnauthorizedAccessException` (e.g. a virus scanner holding the old file). A config error
 has `status` `Aborted`, `reason` `config:...`, run values `null` and `scenarios` `[ { "id": "soak", "status": "Error", "seconds": null } ]`.
 
-Fallback rule (agent and runner): read `run-result.json` if it exists, else `result.txt`. If `run-result.json`
-exists but is unreadable, not valid JSON, not a JSON object at top level (array, number, string, `null`), or has no `status`, the run has **no result**: there is no fallback to
-`result.txt`; the agent logs it once and classifies `NotCompleted`, the runner warns. Before each launch the agent
-deletes `run-result.json`, `run-result.json.tmp`, `result.txt` and `harness.log`, so a result of an earlier run is never read.
+Reading rule (agent and runner): read `run-result.json`. If it is missing, unreadable, not valid JSON, not a JSON
+object at top level (array, number, string, `null`), or has no `status`, the run has **no result**; the agent logs it
+once and classifies `NotCompleted`, the runner warns. Before each launch the agent
+deletes `run-result.json`, `run-result.json.tmp` and `harness.log`, so a result of an earlier run is never read.
 
-Runner output: with `run-result.json` one console line per scenario (scenario `id` in the kind column, scenario
-`status` in the status column; a result without scenarios prints one line with `soak` and the run status). With
-`result.txt` one line per run (`soak`, status from the file), unchanged. With `-Suite <name>` the kind column shows
-`<name>-<id>` (e.g. `L1-soak`), also for the fallback lines; the ids in the files stay raw. Below the row of a scenario
+Runner output: one console line per scenario (scenario `id` in the kind column, scenario
+`status` in the status column; a result without scenarios prints one line with `soak` and the run status). With `-Suite <name>` the kind column shows
+`<name>-<id>` (e.g. `L1-soak`); the ids in the files stay raw. Below the row of a scenario
 the runner prints one indented line per failed check (`passed: false`) whose `checks[].scenario` is that scenario, e.g.
 `    smelted > 0: expected >0, actual 0`; passed checks are not printed. A failed `daysReached` check of a soak run is
 printed the same way (below the `soak` row). Control characters (incl. CR/LF) in `name`/`expected`/`actual` are replaced by a space
@@ -552,6 +554,10 @@ process; the runner reads only the JSON it writes (a stale file is deleted first
   file of an earlier judgement is deleted before each script call on every path (also when the script or the log is
   missing), so a Skipped or Error row never leaves an old result looking current.
 
+Ad-hoc runs (no `-Suite`) always load CoherentWarAI and run CW-2 as their post-run check, with the run's `-Mode` and
+`-Days` as `-MinDays` (rows `<run> coherentwarai.command-log`, without suite prefix): FAIL = exit 2, a missing
+`CoherentWarAI.log` = exit 1, INSUFFICIENT DATA = WARN. `-SkipChecks` turns it off (also for the suites).
+
 Suites: `L1` and `CW1` run CW-2 (`coherentwarai.command-log`: `BannerlordCoherentWarAI\tools\Check-CommandLog.ps1` on
 `CoherentWarAI.log`, F-S10-6); `CW1` also runs CW-1 (`coherentwarai.ac25a`: `BannerlordCoherentWarAI\tools\Compare-Ac25a.ps1`,
 result `ac25a-compare.json`, checks `coherentwarai.ac25a-invariant` and `coherentwarai.ac25a-armydays`). Console rows, after
@@ -572,7 +578,7 @@ PostRunCheck; an empty array for a run that is not `Completed`); on job level `j
 completed, `null` for a suite without JobChecks).
 
 Offline re-judgement: `runner\Update-JobResult.ps1 -JobId <jobId> [-Suite <suite>]` judges `out\results\<jobId>` again as
-after the fetch (all rows, the suite verdicts and the suite checks with the scripts as they are now) and rewrites its
+after the fetch (all rows, the suite verdicts and the suite checks, for an ad-hoc job CW-2, with the scripts as they are now) and rewrites its
 `job-result.json`. Days, modules and the run modes come from `out\jobs\<jobId>\job.json`, the suite from the existing
 `job-result.json` (or `-Suite`). The expectations come from today's suite definition, so re-judging an old job after
 the suite changed can report missing runs. The earlier `job-result.json` is kept as `job-result.previous.json` in the
@@ -580,7 +586,9 @@ same folder (the first judgement is never overwritten, so the original exit code
 available), its `versionWarnings` are carried over, and the new file gets the additive field
 `rejudgedFrom: { "exitCode": <exit code of the first judgement>, "at": "<UTC time of the latest re-judgement>" }`
 (absent when there was no earlier file). Not reconstructed: a runner-side time limit of the original wait (see the kept
-file). Exit codes as above; `1` when the job folders are unusable.
+file). Exit codes as above; `1` when the job folders are unusable. A job whose runs name another harness than `TestRig` (the retired
+`CoherentWarAI` harness, or no `harness` field in an old `job.json`; those wrote `result.txt`, not `run-result.json`) is refused with
+exit `1` and an error naming the harness, and its `job-result.json` is left untouched.
 
 `-Suite L1-BASE` (vanilla baseline for L1) sets harness `TestRig`, mode `WarSails`, `days` 30, `kind` `soak` and the
 `modules` load order `Bannerlord.Harmony, Bannerlord.ButterLib, Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native,
@@ -628,9 +636,8 @@ runner prints `WARN duplicate workshop id <id> on tower`. Each distinct value (g
 exit code does not change. Old agents without the fields produce no warning. If the tower `Version.xml` cannot be read
 at that time: `WARN version check skipped: <reason>`. Without `towerGamePath` no comparison runs.
 
-`job-result.json` (written by the runner) holds one `result` per run, in one of two shapes: from `run-result.json`, the
-parsed object as written by the harness (nested, typed values as above); from legacy `result.txt`, a flat map of the
-`key=value` lines (all values strings, e.g. `{ "status": "Completed", "daysReached": "3" }`); `{}` when there is no result
+`job-result.json` (written by the runner) holds one `result` per run: from `run-result.json`, the
+parsed object as written by the harness (nested, typed values as above); `{}` when there is no result
 (missing file, or invalid `run-result.json`). Per run it also holds `gameVersion` and `moduleVersions`, copied from
 `agent-run.json` (`moduleVersions` is always a JSON array when present, also with 0 or 1 entry; `null` only for an old
 agent); on job level `versionWarnings` is an array of the warning lines above and `suite` is the runner's `-Suite`
@@ -644,18 +651,15 @@ Suites with checks add `checks` per run and `jobChecks` on job level (see "Suite
 
 ### `run.cfg`
 
-`seed`, `days`, `mode`, `stallMinutes`, `budgetMinutes`, plus, for harness `TestRig` only:
+`seed`, `days`, `mode`, `stallMinutes`, `budgetMinutes`, plus:
 `ownAssemblies=<comma-separated simple DLL names without .dll>` - for every module of the package that is not a
-harness module (`CoherentWarAI.TestHarness`, `TestRig.Harness`), the `SubModules/SubModule/DLLName/@value` entries of its
+harness module (`TestRig.Harness`), the `SubModules/SubModule/DLLName/@value` entries of its
 installed `SubModule.xml`, in order, de-duplicated case-insensitively. A module with a missing or unparseable
 `SubModule.xml` is skipped (logged); a name that does not match `[A-Za-z0-9_.-]+` (after stripping `.dll`) is skipped
 (logged); no names = no line. A run with `runs[].ownAssemblies` skips this derivation: exactly that list is written
-(needed e.g. for `TestRig.SelfTest`, which depends on a harness module and so never appears in the derived list). The
-`CoherentWarAI` harness never gets this key (its parser rejects unknown keys).
-
-`scenarios=<comma-separated scenario ids>` - only for harness `TestRig` with run `kind` `scenarios`, taken from
-`runs[].scenarios` (ids contain no `,` or line breaks, see the schema check); soak runs and the `CoherentWarAI`
-harness never get this key. Written after the numeric keys and before `ownAssemblies`.
+(needed e.g. for `TestRig.SelfTest`, which depends on a harness module and so never appears in the derived list).
+`scenarios=<comma-separated scenario ids>` - only for a run `kind` `scenarios`, taken from
+`runs[].scenarios` (ids contain no `,` or line breaks, see the schema check); soak runs never get this key. Written after the numeric keys and before `ownAssemblies`.
 
 `health=<comma-separated scenario ids>` (harness `TestRig`, soak runs only; health bracket, F-S6-1) - the agent writes it
 from `runs[].health` (only for harness `TestRig` with run `kind` `soak`; never together with `scenarios`, which the schema

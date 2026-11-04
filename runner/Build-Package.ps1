@@ -1,4 +1,4 @@
-# Build step of the test rig runner: builds the mod projects (seven plus the TailModules of the suite, only the
+# Build step of the test rig runner: builds the mod projects (six plus the TailModules of the suite, only the
 # harness for a suite without mods) into a staging folder, guards the
 # tower (the game's own Modules folder) against changes and writes manifest.json.
 # Functions only; dot-sourced by Invoke-TestRig.ps1 (and by tests\runner\Build-Package.Tests.ps1).
@@ -15,7 +15,7 @@ $script:RigTailModuleProjects = @{
     'CrossMod.Scenarios'               = @('BannerlordTestRig', 'scenarios\CrossMod\CrossMod.Scenarios\CrossMod.Scenarios.csproj')
 }
 
-# The seven base projects plus one per TailModules entry not already in the base set (a suite's scenario modules), relative
+# The six base projects plus one per TailModules entry not already in the base set (a suite's scenario modules), relative
 # to the workspace root (the folder that contains the repo folders), in build order: mods, harnesses, then the scenario
 # modules in the order of $TailModules (each references its mod and the harness from the stage, so it comes after both).
 # -HarnessOnly (a suite that loads no mod and no scenario module) builds only the harness. An unknown tail module throws.
@@ -27,7 +27,6 @@ function Get-RigBuildProjects {
     )
     $table = @(
         @('BannerlordCoherentWarAI', 'src\CoherentWarAI\CoherentWarAI.csproj', 'CoherentWarAI'),
-        @('BannerlordCoherentWarAI', 'tools\TestHarness\CoherentWarAI.TestHarness.csproj', 'CoherentWarAI.TestHarness'),
         @('BannerlordAutoTrader', 'AutoTrader\src\AutoTrader.csproj', 'AutoTraderSpeed'),
         @('BannerlordSmithingSuite', 'src\SmithingSuite.csproj', 'SmithingSuite'),
         @('CompanionManagementSuite', 'src\CompanionSuite.csproj', 'CompanionManagementSuite'),

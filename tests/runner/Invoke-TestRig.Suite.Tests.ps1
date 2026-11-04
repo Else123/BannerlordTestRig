@@ -82,12 +82,12 @@ Describe 'Get-RigModules -Suite L1' {
 }
 
 Describe 'Resolve-RigSuiteSettings' {
-    function Resolve-S([string]$Suite, [string[]]$Bound = @(), $Harness = 'CoherentWarAI', $Mode = 'WarSails', $Seed = 1, $Days = 1) {
+    function Resolve-S([string]$Suite, [string[]]$Bound = @(), $Harness = 'TestRig', $Mode = 'WarSails', $Seed = 1, $Days = 1) {
         Resolve-RigSuiteSettings -Suite $Suite -BoundParameters $Bound -Harness $Harness -Mode $Mode -Seed $Seed -Days $Days
     }
     It 'without -Suite returns every value unchanged' {
-        $r = Resolve-S -Suite '' -Bound @('Days') -Harness CoherentWarAI -Mode NoDlc -Seed 7 -Days 2
-        $r.Harness | Should Be 'CoherentWarAI'
+        $r = Resolve-S -Suite '' -Bound @('Days') -Harness TestRig -Mode NoDlc -Seed 7 -Days 2
+        $r.Harness | Should Be 'TestRig'
         $r.Mode | Should Be 'NoDlc'
         $r.Seed | Should Be 7
         $r.Days | Should Be 2
@@ -109,9 +109,6 @@ Describe 'Resolve-RigSuiteSettings' {
     }
     It 'an explicit -Harness TestRig is accepted (any casing)' {
         (Resolve-S -Suite L1 -Bound @('Harness') -Harness testrig).Harness | Should Be 'TestRig'
-    }
-    It 'an explicit conflicting -Harness is a usage error' {
-        { Resolve-S -Suite L1 -Bound @('Harness') -Harness CoherentWarAI } | Should Throw 'Harness'
     }
 }
 
@@ -153,7 +150,7 @@ Describe 'Publish-RigResult with -Suite' {
     }
     It 'without -Suite the row is unchanged and suite is null' {
         [IO.File]::WriteAllText((Join-Path $script:rd 'r1\run-result.json'), '{"schema":1,"status":"Completed","daysReached":3,"scenarios":[{"id":"soak","status":"Passed","seconds":25}]}')
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3) | Should Be 0
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -SkipChecks) | Should Be 0
         $row = @($script:lines | Where-Object { $_ -match '^r1 ' })[0]
         $row | Should Match 'r1\s+soak\s+Passed'
         $row | Should Not Match 'L1-'
@@ -215,11 +212,11 @@ Describe 'Invoke-TestRig.ps1 -Suite (powershell -File)' {
         $out | Should Match 'Valid suites: AT, CS, CW1, L1, L1-BASE, RIG, SM, X\.'
         $out | Should Not Match 'Config not found'
     }
-    It 'a conflicting -Harness is a usage error, exit 1 before the config is read' {
+    It 'the retired -Harness CoherentWarAI is a usage error with a suite too, exit 1 before the config is read' {
         $out = (& powershell -NoProfile -File $script:suiteScript -PackageFrom C:\nowhere -Suite L1 -Harness CoherentWarAI 2>&1 | Out-String)
         $LASTEXITCODE | Should Be 1
         $out | Should Match 'Harness'
-        $out | Should Match 'TestRig'
+        $out | Should Match 'CoherentWarAI'
         $out | Should Not Match 'Config not found'
     }
 
@@ -307,10 +304,9 @@ Describe 'Invoke-TestRig.ps1 -Suite (powershell -File)' {
             $LASTEXITCODE | Should Be 1
             $out | Should Match '-Seed conflicts'
         }
-        It 'without -Suite the defaults stay (CoherentWarAI harness, 1 day)' {
-            New-ModuleFixture $script:pkgDir @('CoherentWarAI.TestHarness')
+        It 'without -Suite the defaults stay (TestRig harness, 1 day)' {
             $j = Invoke-Captured @()
-            $j.runs[0].harness | Should Be 'CoherentWarAI'
+            $j.runs[0].harness | Should Be 'TestRig'
             $j.runs[0].days | Should Be 1
         }
     }
@@ -346,14 +342,11 @@ Describe 'Get-RigModules -Suite SM' {
 
 Describe 'Resolve-RigSuiteSettings -Suite SM' {
     It 'SM alone: TestRig, WarSails, seed 1, 1 day' {
-        $r = Resolve-RigSuiteSettings -Suite SM -BoundParameters @('Suite') -Harness CoherentWarAI -Mode NoDlc -Seed 9 -Days 5
+        $r = Resolve-RigSuiteSettings -Suite SM -BoundParameters @('Suite') -Harness TestRig -Mode NoDlc -Seed 9 -Days 5
         $r.Harness | Should Be 'TestRig'
         $r.Mode | Should Be 'WarSails'
         $r.Seed | Should Be 1
         $r.Days | Should Be 1
-    }
-    It 'an explicit conflicting -Harness is a usage error' {
-        { Resolve-RigSuiteSettings -Suite SM -BoundParameters @('Harness') -Harness CoherentWarAI -Mode WarSails -Seed 1 -Days 1 } | Should Throw 'Harness'
     }
 }
 
@@ -551,7 +544,7 @@ Describe 'Get-RigModules -Suite RIG' {
 
 Describe 'Resolve-RigSuiteSettings -Suite RIG' {
     It 'RIG alone: TestRig, WarSails, seed 1, 1 day' {
-        $r = Resolve-RigSuiteSettings -Suite RIG -BoundParameters @('Suite') -Harness CoherentWarAI -Mode NoDlc -Seed 9 -Days 5
+        $r = Resolve-RigSuiteSettings -Suite RIG -BoundParameters @('Suite') -Harness TestRig -Mode NoDlc -Seed 9 -Days 5
         $r.Harness | Should Be 'TestRig'
         $r.Mode | Should Be 'WarSails'
         $r.Seed | Should Be 1
@@ -988,7 +981,7 @@ Describe 'Publish-RigResult -Suite RIG' {
     }
     It 'without a suite a rejected job prints status and message too' {
         [IO.File]::WriteAllText((Join-Path $script:rd 'done.json'), ('{"schema":1,"jobId":"' + $script:id + '","status":"rejected","message":"bad package","runs":[]}'))
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1) | Should Be 1
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks) | Should Be 1
         @($script:lines | Where-Object { $_ -ceq 'job status: rejected - bad package' }).Count | Should Be 1
     }
     It 'L1 still shows no expected/actual column and job-result.json has no expected/verdict' {
@@ -1078,7 +1071,7 @@ Describe 'Get-RigSuiteRuns and Get-RigSuiteTimeoutMinutes -Suite L1-BASE' {
 
 Describe 'Resolve-RigSuiteSettings -Suite L1-BASE' {
     It 'L1-BASE alone: TestRig, WarSails, 30 days' {
-        $r = Resolve-RigSuiteSettings -Suite 'L1-BASE' -BoundParameters @('Suite') -Harness CoherentWarAI -Mode NoDlc -Seed 1 -Days 1
+        $r = Resolve-RigSuiteSettings -Suite 'L1-BASE' -BoundParameters @('Suite') -Harness TestRig -Mode NoDlc -Seed 1 -Days 1
         $r.Harness | Should Be 'TestRig'
         $r.Mode | Should Be 'WarSails'
         $r.Days | Should Be 30
@@ -1472,7 +1465,7 @@ Describe 'Publish-RigResult -Suite L1 with health lines' {
     }
     It 'a job without a health suite keeps job-result.json without a health field' {
         Write-Job Completed (New-Result Completed '[{"id":"soak","status":"Passed","seconds":1}]')
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3) | Should Be 0
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -SkipChecks) | Should Be 0
         ((Get-JobResult).runs[0].PSObject.Properties.Name -contains 'health') | Should Be $false
     }
 }
@@ -1510,15 +1503,14 @@ Describe 'Start-TestRigJob -Suite L1 package check' {
 
 Describe 'Get-RigSuiteBuildProjects (the suite table drives the build projects)' {
     $base = 'SmithingSuite.Scenarios'
-    $sevenIds = 'CoherentWarAI,CoherentWarAI.TestHarness,AutoTraderSpeed,SmithingSuite,CompanionManagementSuite,TestRig.Harness,SmithingSuite.Scenarios'
+    $sixIds = 'CoherentWarAI,AutoTraderSpeed,SmithingSuite,CompanionManagementSuite,TestRig.Harness,SmithingSuite.Scenarios'
 
     # Snapshot taken before #25 (project lists as built by the hard-coded L1/RIG/L1-BASE special cases).
-    It 'L1 builds the seven plus three health scenario projects' {
+    It 'L1 builds the six plus three health scenario projects' {
         $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'L1')
-        (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sevenIds,CoherentWarAI.Scenarios,AutoTraderSpeed.Scenarios,CompanionManagementSuite.Scenarios"
+        (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sixIds,CoherentWarAI.Scenarios,AutoTraderSpeed.Scenarios,CompanionManagementSuite.Scenarios"
         (@($r | ForEach-Object { $_.ProjectPath.Substring(6) }) -join '|') | Should Be ((
                 'BannerlordCoherentWarAI\src\CoherentWarAI\CoherentWarAI.csproj',
-                'BannerlordCoherentWarAI\tools\TestHarness\CoherentWarAI.TestHarness.csproj',
                 'BannerlordAutoTrader\AutoTrader\src\AutoTrader.csproj',
                 'BannerlordSmithingSuite\src\SmithingSuite.csproj',
                 'CompanionManagementSuite\src\CompanionSuite.csproj',
@@ -1528,21 +1520,21 @@ Describe 'Get-RigSuiteBuildProjects (the suite table drives the build projects)'
                 'BannerlordAutoTrader\tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj',
                 'CompanionManagementSuite\tests\InGame\CompanionManagementSuite.Scenarios\CompanionManagementSuite.Scenarios.csproj') -join '|')
     }
-    It 'SM builds the seven (its scenario module is in the base set)' {
-        (@(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'SM' | ForEach-Object { $_.ModuleId }) -join ',') | Should Be $sevenIds
+    It 'SM builds the six (its scenario module is in the base set)' {
+        (@(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'SM' | ForEach-Object { $_.ModuleId }) -join ',') | Should Be $sixIds
     }
-    It 'RIG builds the seven plus TestRig.SelfTest' {
+    It 'RIG builds the six plus TestRig.SelfTest' {
         $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'RIG')
-        (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sevenIds,TestRig.SelfTest"
-        $r[7].Repo | Should Be 'BannerlordTestRig'
-        $r[7].ProjectPath | Should Be 'C:\ws\BannerlordTestRig\src\TestRig.SelfTest\TestRig.SelfTest.csproj'
+        (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sixIds,TestRig.SelfTest"
+        $r[6].Repo | Should Be 'BannerlordTestRig'
+        $r[6].ProjectPath | Should Be 'C:\ws\BannerlordTestRig\src\TestRig.SelfTest\TestRig.SelfTest.csproj'
     }
-    It 'CS, AT and CW1 build the seven plus their one scenario module' {
+    It 'CS, AT and CW1 build the six plus their one scenario module' {
         foreach ($case in @(@('CS', 'CompanionManagementSuite.Scenarios', 'CompanionManagementSuite'),
                 @('AT', 'AutoTraderSpeed.Scenarios', 'BannerlordAutoTrader'), @('CW1', 'CoherentWarAI.Scenarios', 'BannerlordCoherentWarAI'))) {
             $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite $case[0])
-            (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sevenIds,$($case[1])"
-            $r[7].Repo | Should Be $case[2]
+            (@($r | ForEach-Object { $_.ModuleId }) -join ',') | Should Be "$sixIds,$($case[1])"
+            $r[6].Repo | Should Be $case[2]
         }
     }
     It 'L1-BASE builds only the harness' {
@@ -1550,8 +1542,8 @@ Describe 'Get-RigSuiteBuildProjects (the suite table drives the build projects)'
         $r.Count | Should Be 1
         $r[0].ModuleId | Should Be 'TestRig.Harness'
     }
-    It 'no suite builds the seven' {
-        (@(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' | ForEach-Object { $_.ModuleId }) -join ',') | Should Be $sevenIds
+    It 'no suite builds the six' {
+        (@(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' | ForEach-Object { $_.ModuleId }) -join ',') | Should Be $sixIds
     }
     It 'a fake suite with TailModule X builds X' {
         $script:RigTailModuleProjects['Fake.Scenarios'] = @('FakeRepo', 'tests\Fake.Scenarios\Fake.Scenarios.csproj')
@@ -1559,9 +1551,9 @@ Describe 'Get-RigSuiteBuildProjects (the suite table drives the build projects)'
             WithCoherentWarAI = $false; ExtraModules = @(); TailModules = @('Fake.Scenarios') }
         try {
             $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'FAKE')
-            $r.Count | Should Be 8
-            $r[7].ModuleId | Should Be 'Fake.Scenarios'
-            $r[7].Repo | Should Be 'FakeRepo'
+            $r.Count | Should Be 7
+            $r[6].ModuleId | Should Be 'Fake.Scenarios'
+            $r[6].Repo | Should Be 'FakeRepo'
         } finally {
             $script:RigSuites.Remove('FAKE')
             $script:RigTailModuleProjects.Remove('Fake.Scenarios')
@@ -1586,7 +1578,7 @@ $script:baseModules = @(
 
 Describe 'Suite CS and AT' {
     It 'CS: the exact module list, WarSails, seed 1, 1 day, kind scenarios, the three scenarios in this order' {
-        $r = Resolve-RigSuiteSettings -Suite CS -BoundParameters @('Suite') -Harness CoherentWarAI -Mode NoDlc -Seed 9 -Days 5
+        $r = Resolve-RigSuiteSettings -Suite CS -BoundParameters @('Suite') -Harness TestRig -Mode NoDlc -Seed 9 -Days 5
         $r.Harness | Should Be 'TestRig'; $r.Mode | Should Be 'WarSails'; $r.Seed | Should Be 1; $r.Days | Should Be 1
         (Get-RigModules -Mode WarSails -Harness TestRig -Suite CS) -join ',' |
             Should Be (($script:baseModules + @('CompanionManagementSuite', 'TestRig.Harness', 'CompanionManagementSuite.Scenarios')) -join ',')
@@ -1645,12 +1637,12 @@ Describe 'Suite X' {
         { Resolve-RigSuiteSettings -Suite X -BoundParameters @('Suite', 'Seed') -Harness TestRig -Mode WarSails -Seed 2 -Days 1 } | Should Throw 'fixes the seed'
         { Resolve-RigSuiteSettings -Suite X -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 1 } | Should Not Throw
     }
-    It 'builds the seven plus CrossMod.Scenarios from repo BannerlordTestRig' {
+    It 'builds the six plus CrossMod.Scenarios from repo BannerlordTestRig' {
         $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'X')
-        $r.Count | Should Be 8
-        $r[7].ModuleId | Should Be 'CrossMod.Scenarios'
-        $r[7].Repo | Should Be 'BannerlordTestRig'
-        $r[7].ProjectPath | Should Be 'C:\ws\BannerlordTestRig\scenarios\CrossMod\CrossMod.Scenarios\CrossMod.Scenarios.csproj'
+        $r.Count | Should Be 7
+        $r[6].ModuleId | Should Be 'CrossMod.Scenarios'
+        $r[6].Repo | Should Be 'BannerlordTestRig'
+        $r[6].ProjectPath | Should Be 'C:\ws\BannerlordTestRig\scenarios\CrossMod\CrossMod.Scenarios\CrossMod.Scenarios.csproj'
     }
 }
 

@@ -220,6 +220,64 @@ Describe 'Publish-RigResult PostRunChecks (CW-2 per run)' {
     }
 }
 
+Describe 'Publish-RigResult PostRunChecks for an ad-hoc run (no -Suite): CW-2 as for the suites (S12 #70)' {
+    BeforeEach {
+        $script:f = New-CwFixture
+        $script:lines = @()
+        Mock Write-Host { $script:lines += "$Object" }
+    }
+    function Publish([string]$Mode = 'WarSails', [switch]$SkipChecks) {
+        Publish-RigResult -ResultDir $script:f.ResultDir -JobId $script:f.JobId -Days 3 -JobRuns @([pscustomobject]@{ runId = 'r1'; mode = $Mode }) `
+            -WorkspaceRoot $script:f.Workspace -SkipChecks:$SkipChecks
+    }
+
+    It 'all rows met: exit 0, an unprefixed Passed row, the run mode and -MinDays = days passed, checks in job-result' {
+        Write-CwDone completed @('r1'); Write-CwRun r1 $script:passRows
+        (Publish) | Should Be 0
+        (Get-CwLines '^r1\s+coherentwarai\.command-log Passed\s+expected no FAIL, actual 1 PASS, 1 N/A for mode, 1 MANUAL').Count | Should Be 1
+        [IO.File]::ReadAllText((Join-Path $script:f.ResultDir 'r1\coherentwarai.command-log.json.args')) | Should BeExactly ('WarSails|3|' + (Join-Path $script:f.ResultDir 'r1\CoherentWarAI.log'))
+        $c = (Get-CwJobResult).runs[0].checks[0]
+        $c.id | Should BeExactly 'coherentwarai.command-log'
+        $c.outcome | Should BeExactly 'Passed'
+        (Get-CwJobResult).suite | Should Be $null
+    }
+    It 'a FAIL row: exit 2 and the FAIL row shown below the check row' {
+        Write-CwDone completed @('r1'); Write-CwRun r1 $script:failRows
+        (Publish) | Should Be 2
+        (Get-CwLines '^r1\s+coherentwarai\.command-log Failed ').Count | Should Be 1
+        (Get-CwLines '^    AC10: expected PASS, actual FAIL \(FAIL\) - 3 Command lines with the feature off$').Count | Should Be 1
+    }
+    It 'INSUFFICIENT DATA and WARN rows are warnings: exit unchanged (0), each shown as WARN' {
+        Write-CwDone completed @('r1'); Write-CwRun r1 $script:warnRows
+        (Publish) | Should Be 0
+        (Get-CwLines '^r1\s+coherentwarai\.command-log Passed ').Count | Should Be 1
+        (Get-CwLines '^    AC13: expected PASS, actual INSUFFICIENT DATA \(WARN\)').Count | Should Be 1
+    }
+    It 'a missing CoherentWarAI.log: exit 1, the script is not called' {
+        Write-CwDone completed @('r1'); Write-CwRun r1 $null
+        (Publish) | Should Be 1
+        (Get-CwLines '^r1\s+coherentwarai\.command-log Error\s+log missing: .*CoherentWarAI\.log').Count | Should Be 1
+        Test-Path -LiteralPath (Join-Path $script:f.ResultDir 'r1\coherentwarai.command-log.json.args') | Should Be $false
+    }
+    foreach ($mode in 'NoDlc', 'FeatureOff') {
+        It "the job.json mode of the run is passed on ($mode)" {
+            Write-CwDone completed @('r1'); Write-CwRun r1 $script:passRows
+            (Publish -Mode $mode) | Should Be 0
+            [IO.File]::ReadAllText((Join-Path $script:f.ResultDir 'r1\coherentwarai.command-log.json.args')) | Should Match ('^' + $mode + '\|3\|')
+        }
+    }
+    It 'a run that is not Completed is not checked (its exit class decides)' {
+        Write-CwDone completed @('r1') -ExitClass Crashed; Write-CwRun r1 $script:passRows
+        (Publish) | Should Be 2
+        (Get-CwLines 'coherentwarai\.command-log').Count | Should Be 0
+    }
+    It '-SkipChecks runs no check' {
+        Write-CwDone completed @('r1'); Write-CwRun r1 $script:failRows
+        (Publish -SkipChecks) | Should Be 0
+        (Get-CwLines 'coherentwarai\.command-log').Count | Should Be 0
+    }
+}
+
 Describe 'Publish-RigResult JobChecks (CW-1 per job) and exit precedence' {
     BeforeEach {
         $script:f = New-CwFixture
@@ -396,7 +454,7 @@ Describe 'Update-RigJobResult (offline re-judgement)' {
         $jobDir = Join-Path $script:f.OutRoot "jobs\$($script:f.JobId)"
         New-Item -ItemType Directory -Path $jobDir -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $jobDir 'job.json'), ('{"schema":1,"jobId":"' + $script:f.JobId + '","modules":["Native","CoherentWarAI","TestRig.Harness"],' +
-                '"runs":[{"runId":"r1","kind":"soak","days":3,"mode":"FeatureOff","health":["coherentwarai.health"]}]}'))
+                '"runs":[{"runId":"r1","kind":"soak","harness":"TestRig","days":3,"mode":"FeatureOff","health":["coherentwarai.health"]}]}'))
         $modulesJson = '[{"id":"Native","version":"v1"},{"id":"CoherentWarAI","version":"v1"},{"id":"TestRig.Harness","version":"v1"}]'
         $l1Result = '{"schema":1,"status":"Completed","daysReached":3,"runningDaysPerRealMinute":18.17,"playerMapEvents":3,"modules":' + $modulesJson +
             ',"exceptions":{"total":0,"own":0,"harness":0,"vanilla":0,"unhandled":0,"classification":{"walks":0,"walkMs":0,"handlerMs":0,"maxHandlerMs":0,"ownExact":true},"top":[]}' +
@@ -457,14 +515,39 @@ Describe 'Update-RigJobResult (offline re-judgement)' {
     It 'the entry script Update-JobResult.ps1 under powershell -File: own -Suite/-OutRoot are not shadowed by the dot-sourced parameters; exit code' {
         $entry = (Resolve-Path (Join-Path $here '..\..\runner\Update-JobResult.ps1')).Path
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        # No suite: judged as a plain soak run (3 days reached of 3) -> 0
-        $out = @(& $ps -NoProfile -NonInteractive -File $entry -JobId $script:f.JobId -OutRoot $script:f.OutRoot 2>&1 | ForEach-Object { "$_" })
+        # No suite: an ad-hoc run, judged as a plain soak run (3 days reached of 3) plus CW-2 with the fixture workspace's fake
+        # Check-CommandLog.ps1 (-WorkspaceRoot); the fixture log passes it -> 0
+        $out = @(& $ps -NoProfile -NonInteractive -File $entry -JobId $script:f.JobId -OutRoot $script:f.OutRoot -WorkspaceRoot $script:f.Workspace 2>&1 | ForEach-Object { "$_" })
         $LASTEXITCODE | Should Be 0
+        (@($out | Where-Object { $_ -match 'coherentwarai\.command-log\s+Passed' })).Count | Should Be 1
         (Test-Path -LiteralPath (Join-Path $script:f.ResultDir 'job-result.json')) | Should Be $true
         # -Suite reaches Update-RigJobResult (an unknown suite is reported by name) -> 1
         $out = @(& $ps -NoProfile -NonInteractive -File $entry -JobId $script:f.JobId -OutRoot $script:f.OutRoot -Suite L9 2>&1 | ForEach-Object { "$_" })
         $LASTEXITCODE | Should Be 1
         (@($out | Where-Object { $_ -match "unknown suite 'L9'" })).Count | Should Be 1
+    }
+    It 'an ad-hoc job (no suite anywhere) is judged as a soak run plus CW-2 with mode and days from job.json' {
+        (Rejudge) | Should Be 0
+        $r = Get-CwJobResult
+        $r.suite | Should BeNullOrEmpty
+        $r.runs[0].checks[0].id | Should BeExactly 'coherentwarai.command-log'
+        $r.runs[0].checks[0].outcome | Should BeExactly 'Passed'
+        [IO.File]::ReadAllText((Join-Path $script:f.ResultDir 'r1\coherentwarai.command-log.json.args')) | Should Match '^FeatureOff\|3\|'
+    }
+    foreach ($legacy in @(
+            @{ Name = "harness 'CoherentWarAI'"; From = '"harness":"TestRig",'; To = '"harness":"CoherentWarAI",'; Shown = "'CoherentWarAI'" },
+            @{ Name = 'no harness field (older jobs)'; From = '"harness":"TestRig",'; To = ''; Shown = "'CoherentWarAI'" })) {
+        It "refuses a job of the retired harness ($($legacy.Name)) with exit 1 and leaves job-result.json untouched" {
+            $jobFile = Join-Path $script:f.OutRoot "jobs\$($script:f.JobId)\job.json"
+            [IO.File]::WriteAllText($jobFile, ([IO.File]::ReadAllText($jobFile).Replace($legacy.From, $legacy.To)))
+            $resultFile = Join-Path $script:f.ResultDir 'job-result.json'
+            [IO.File]::WriteAllText($resultFile, '{"jobId":"x","suite":"L1","exitCode":3,"runs":[]}')
+            $before = [IO.File]::ReadAllBytes($resultFile)
+            (Rejudge) | Should Be 1
+            (Get-CwLines "^ERROR: job $($script:f.JobId) ran with the retired harness $($legacy.Shown) \(result\.txt\); it cannot be re-judged\.").Count | Should Be 1
+            ([Convert]::ToBase64String([IO.File]::ReadAllBytes($resultFile))) | Should BeExactly ([Convert]::ToBase64String($before))
+            Test-Path -LiteralPath (Join-Path $script:f.ResultDir 'job-result.previous.json') | Should Be $false
+        }
     }
     It 'a missing job.json or result folder is exit 1 naming it' {
         Remove-Item -LiteralPath (Join-Path $script:f.OutRoot "jobs\$($script:f.JobId)\job.json")
@@ -482,10 +565,10 @@ Describe 'Suite name normalisation (W2)' {
         Get-RigSuiteName 'l1-base' | Should BeExactly 'L1-BASE'
         Get-RigSuiteName 'nope' | Should Be $null
     }
-    It '-Suite l1 is the suite L1 (its rules and messages use the canonical name), exit 1 before the config is read' {
-        $out = (& powershell -NoProfile -File $script:invokeScript -PackageFrom C:\nowhere -Suite l1 -Harness CoherentWarAI 2>&1 | Out-String)
+    It '-Suite l1-base is the suite L1-BASE (its rules and messages use the canonical name), exit 1 before the config is read' {
+        $out = (& powershell -NoProfile -File $script:invokeScript -PackageFrom C:\nowhere -Suite l1-base -Seed 2 2>&1 | Out-String)
         $LASTEXITCODE | Should Be 1
-        $out | Should MatchExactly '-Suite L1 fixes -Harness TestRig'
+        $out | Should MatchExactly '-Suite L1-BASE fixes the seed of each run'
         $out | Should Not Match 'Config not found'
     }
     It "-Suite '' is no suite (no usage error; here the missing config ends it)" {

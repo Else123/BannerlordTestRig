@@ -79,7 +79,7 @@ How to switch Steam into offline mode (menu path) is unverified: see the Steam d
 - The agent sets this itself before every run (after the baseline restore, section g): `StopGameOnFocusLost=False`,
   `AutoSaveInterval=-1` and `EnableTutorialHints=False` in
   `Documents\Mount and Blade II Bannerlord\Configs\BannerlordConfig.txt` (the same keys the
-  CoherentWarAI `Run-SoakTest.ps1` patches).
+  former CoherentWarAI soak script patched, retired 2026-11-04).
 
 ## e. SSH access from the dev PC
 

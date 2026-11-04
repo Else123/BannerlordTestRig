@@ -5,7 +5,7 @@ separate Windows PC, triggered on demand from the dev PC. The dev PC never launc
 
 ## Status
 
-Slice S1 (one soak run of the existing CoherentWarAI harness) is implemented:
+Slice S1 (one soak run with the `TestRig.Harness` harness) is implemented:
 
 - `runner/Invoke-TestRig.ps1` with the SSH transport `runner/Transport.Ssh.ps1`
 - `agent/TestRigAgent.ps1` with its installer `agent/Install-TestRigAgent.ps1`
@@ -24,7 +24,12 @@ runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects (ei
 runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait   # diagnosis: skip the build
 ```
 
-`-Harness CoherentWarAI` (default) or `-Harness TestRig` selects the in-game harness (and its module in the load order).
+`-Harness` accepts only `TestRig` (the default; module `TestRig.Harness` in the load order); any other value is a usage error.
+The 10-day soak is `runner\Invoke-TestRig.ps1 -Days 10 -Wait`, the NoDlc variant `-Mode NoDlc -Days 3 -Wait`.
+
+Ad-hoc runs (no `-Suite`) always load CoherentWarAI and get the CW-2 command-log check as post-run check (like the
+suites below), with the run's `-Mode` and `-Days` (as `-MinDays`): FAIL gives exit 2, a missing `CoherentWarAI.log`
+exit 1, INSUFFICIENT DATA is a WARN. `-SkipChecks` turns it off.
 
 `-Suite L1` runs the L1 soak: harness `TestRig`, mode `WarSails`, seed 1, and the module load order Bannerlord.Harmony,
 ButterLib, UIExtenderEx, MBOptionScreen, Native, SandBoxCore, Sandbox, StoryMode, NavalDLC, CoherentWarAI, AutoTraderSpeed,
@@ -92,8 +97,10 @@ CW-1 gets the job plan via `-JobManifestPath out\jobs\<jobId>\job.json`. CW-1 al
 expectation (it did not end `Completed`, or ended `Completed` but a scenario check failed), a `Failed` verdict stays
 Failed (a found violation is evidence; exit 2) and every other outcome becomes `Skipped`, e.g.
 `job    CW1-coherentwarai.ac25a-invariant Skipped  not judged: run(s) rN did not meet its expectation (check said Inconclusive)`, without effect on the exit code.
+An ad-hoc job is re-judged with CW-2 as well.
 Re-judge a fetched job offline (no test PC needed; rewrites `out\results\<jobId>\job-result.json`):
-`runner\Update-JobResult.ps1 -JobId <jobId>`. Details: "Suite checks" in `docs/JOB-PROTOCOL.md`.
+`runner\Update-JobResult.ps1 -JobId <jobId>`. Jobs of the retired CoherentWarAI harness (`result.txt`) are refused with exit 1.
+Details: "Suite checks" in `docs/JOB-PROTOCOL.md`.
 
 `-Suite RIG` is the rig self-test: one job with five runs, each judged against an expected outcome. r1
 `rig.selftest-throw` must end `Crashed`, r2 `rig.selftest-hang` must end `Hung`, r3 `rig.selftest-pass` must end
@@ -138,7 +145,10 @@ Live smoke test against an installed agent, without Bannerlord (a fake game stan
 The in-game driver, shipped as Bannerlord module `TestRig.Harness` (old-style net48 csproj, game DLLs
 referenced from the install, no mod references). It is inert unless the agent has written a `run.cfg` in
 `Documents\Mount and Blade II Bannerlord\TestRig\harness`; it then drives a seeded campaign, logs to
-`harness.log` and writes `run-result.json` (the older CoherentWarAI harness writes `result.txt`; agent and runner read either). The engine-free state machine lives in `src/TestRig.Harness/Logic`.
+`harness.log` and writes `run-result.json` (the only result file agent and runner read). The engine-free state machine lives in `src/TestRig.Harness/Logic`.
+
+History: the older harness module inside CoherentWarAI (with a `result.txt` handshake and its own soak script) was
+retired on 2026-11-04 (last state: commit `8f1bd1f` in BannerlordCoherentWarAI).
 
 Build: the game install is auto-detected by `src/Directory.Build.props`, or set `BannerlordPath` in a
 git-ignored `src/paths.props.user` (copy `src/paths.props.user.template`). A plain build deploys into the

@@ -19,7 +19,9 @@ param(
     [Parameter(Mandatory)][string]$JobId,
     [string]$Suite = '',
     # Default (resolved in the body: $PSScriptRoot is empty inside param() defaults under powershell -File): out of this repo.
-    [string]$OutRoot = ''
+    [string]$OutRoot = '',
+    # Folder that contains the mod repos with the check scripts; empty = the parent folder of this repo.
+    [string]$WorkspaceRoot = ''
 )
 
 # Dot-sourcing Invoke-TestRig.ps1 binds its own (empty) parameters in this scope, $Suite among them: keep ours first.
@@ -27,4 +29,6 @@ $requestedSuite = $Suite
 . (Join-Path $PSScriptRoot 'Invoke-TestRig.ps1')
 
 if (-not $OutRoot) { $OutRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'out' }
-exit (Update-RigJobResult -JobId $JobId -OutRoot $OutRoot -Suite $requestedSuite)
+$rejudgeArgs = @{ JobId = $JobId; OutRoot = $OutRoot; Suite = $requestedSuite }
+if ($WorkspaceRoot) { $rejudgeArgs.WorkspaceRoot = $WorkspaceRoot }
+exit (Update-RigJobResult @rejudgeArgs)

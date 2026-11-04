@@ -10,7 +10,7 @@ function New-TempDir {
 }
 
 function New-PackageFixture([string]$Root) {
-    foreach ($m in 'CoherentWarAI', 'CoherentWarAI.TestHarness', 'TestRig.Harness') {
+    foreach ($m in 'CoherentWarAI', 'TestRig.Harness') {
         $bin = Join-Path $Root "Modules\$m\bin\Win64_Shipping_Client"
         New-Item -ItemType Directory -Path $bin -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $bin "$m.dll") -Value "dll $m"
@@ -291,7 +291,7 @@ Describe 'Publish-RigResult version warnings and Crashed' {
     It 'prints WARN lines and adds additive version fields to job-result.json' {
         Write-Done 'Completed'
         Write-AgentRun $agentJson
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -TowerGamePath $script:g) | Should Be 2   # no result.txt: 0/1 days
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks -TowerGamePath $script:g) | Should Be 2   # no run-result.json: 0/1 days
         ($script:lines -contains 'WARN version differs: game tower v1.4.8, .20 v1.4.9') | Should Be $true
         ($script:lines -contains 'WARN version differs: Bannerlord.Harmony tower v2.4.2.248, .20 v2.4.2.249') | Should Be $true
         $jr = Get-JobResult
@@ -306,14 +306,14 @@ Describe 'Publish-RigResult version warnings and Crashed' {
     It 'does not change the exit code: a fully completed run stays 0 with warnings' {
         Write-Done 'Completed'
         Write-AgentRun $agentJson
-        [IO.File]::WriteAllText((Join-Path $script:rd 'r1\result.txt'), "status=Completed`ndaysReached=1")
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -TowerGamePath $script:g) | Should Be 0
+        [IO.File]::WriteAllText((Join-Path $script:rd 'r1\run-result.json'), '{"schema":1,"status":"Completed","daysReached":1,"scenarios":[]}')
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks -TowerGamePath $script:g) | Should Be 0
         @((Get-JobResult).versionWarnings).Count | Should Be 2
     }
     It 'old agent-run.json: no warnings, versionWarnings is an empty array, version fields null' {
         Write-Done 'Completed'
         Write-AgentRun '{"schema":1,"runId":"r1","startedUtc":"2026-10-31T15:00:00Z","endedUtc":"2026-10-31T15:12:30Z"}'
-        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -TowerGamePath $script:g | Out-Null
+        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks -TowerGamePath $script:g | Out-Null
         @($script:lines | Where-Object { $_ -match '^WARN' }).Count | Should Be 0
         $jr = Get-JobResult
         $jr.runs[0].gameVersion | Should BeNullOrEmpty
@@ -323,7 +323,7 @@ Describe 'Publish-RigResult version warnings and Crashed' {
     It 'without TowerGamePath: versions are copied but nothing is compared' {
         Write-Done 'Completed'
         Write-AgentRun $agentJson
-        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 | Out-Null
+        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks | Out-Null
         @($script:lines | Where-Object { $_ -match '^WARN' }).Count | Should Be 0
         (Get-JobResult).runs[0].gameVersion | Should Be 'v1.4.9'
     }
@@ -331,7 +331,7 @@ Describe 'Publish-RigResult version warnings and Crashed' {
         Write-Done 'Completed'
         Write-AgentRun $agentJson
         Remove-Item -LiteralPath (Join-Path $script:g 'bin\Win64_Shipping_Client\Version.xml')
-        { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -TowerGamePath $script:g } | Should Not Throw
+        { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks -TowerGamePath $script:g } | Should Not Throw
         (Test-Path -LiteralPath (Join-Path $script:rd 'job-result.json')) | Should Be $true
         @($script:lines | Where-Object { $_ -match 'version check skipped' }).Count | Should Be 1
     }
@@ -340,19 +340,19 @@ Describe 'Publish-RigResult version warnings and Crashed' {
         $head = '{"schema":1,"runId":"r1","startedUtc":"2026-10-31T15:00:00Z","endedUtc":"2026-10-31T15:12:30Z"'
         $raw = Join-Path $script:rd 'job-result.json'
         Write-AgentRun ($head + ',"gameVersion":"v1.4.8","moduleVersions":[]}')
-        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 | Out-Null
+        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks | Out-Null
         (Get-Content -LiteralPath $raw -Raw) | Should Match '"moduleVersions":\s*\[\s*\]'
         Write-AgentRun ($head + ',"gameVersion":"v1.4.8","moduleVersions":[{"id":"Native","version":"v1.4.8","source":"game"}]}')
-        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 | Out-Null
+        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks | Out-Null
         (Get-Content -LiteralPath $raw -Raw) | Should Match '"moduleVersions":\s*\[\s*\{'
         Write-AgentRun ($head + '}')
-        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 | Out-Null
+        Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks | Out-Null
         (Get-Content -LiteralPath $raw -Raw) | Should Match '"moduleVersions":\s*null'
     }
     It 'Crashed shows in the table and maps to exit 2' {
         Write-Done 'Crashed'
         Write-AgentRun $agentJson
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1) | Should Be 2
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks) | Should Be 2
         @($script:lines | Where-Object { $_ -match '^r1 .*Crashed' }).Count | Should Be 1
         (Get-JobResult).runs[0].exitClass | Should Be 'Crashed'
     }

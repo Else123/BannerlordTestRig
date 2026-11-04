@@ -10,7 +10,7 @@ function New-TempDir {
 }
 
 function New-PackageFixture([string]$Root) {
-    foreach ($m in 'CoherentWarAI', 'CoherentWarAI.TestHarness', 'TestRig.Harness') {
+    foreach ($m in 'CoherentWarAI', 'TestRig.Harness') {
         $bin = Join-Path $Root "Modules\$m\bin\Win64_Shipping_Client"
         New-Item -ItemType Directory -Path $bin -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $bin "$m.dll") -Value "dll $m"
@@ -39,7 +39,7 @@ function Start-Rig([hashtable]$o) {
 }
 
 # Mock helper: fake fetched results in DestinationRoot\<jobId>
-function New-FakeResult($Root, $JobId, $DoneStatus, $Runs, $ResultText) {
+function New-FakeResult($Root, $JobId, $DoneStatus, $Runs, $ResultJson) {
     $d = Join-Path $Root $JobId
     New-Item -ItemType Directory -Path $d -Force | Out-Null
     $done = @{ schema = 1; jobId = $JobId; status = $DoneStatus; runs = @($Runs | ForEach-Object { @{ runId = $_.runId; exitClass = $_.exitClass } }) }
@@ -47,7 +47,7 @@ function New-FakeResult($Root, $JobId, $DoneStatus, $Runs, $ResultText) {
     foreach ($r in $Runs) {
         $rd = Join-Path $d $r.runId
         New-Item -ItemType Directory -Path $rd -Force | Out-Null
-        if ($ResultText) { [IO.File]::WriteAllText((Join-Path $rd 'result.txt'), $ResultText) }
+        if ($ResultJson) { [IO.File]::WriteAllText((Join-Path $rd 'run-result.json'), $ResultJson) }
         $ar = @{ schema = 1; runId = $r.runId; exitClass = $r.exitClass; startedUtc = '2026-10-31T15:00:00Z'; endedUtc = '2026-10-31T15:12:30Z' }
         [IO.File]::WriteAllText((Join-Path $rd 'agent-run.json'), ($ar | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
     }
@@ -66,32 +66,25 @@ Describe 'New-RigJobId' {
 
 Describe 'Get-RigModules' {
     $base = @('Bannerlord.Harmony', 'Bannerlord.ButterLib', 'Bannerlord.UIExtenderEx', 'Bannerlord.MBOptionScreen', 'Native', 'SandBoxCore', 'Sandbox', 'StoryMode')
-    It 'WarSails includes NavalDLC before the mod modules' {
-        (Get-RigModules -Mode WarSails) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
+    It 'WarSails includes NavalDLC before the mod modules; ad-hoc ends with CoherentWarAI, TestRig.Harness' {
+        (Get-RigModules -Mode WarSails) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
     }
     It 'FeatureOff includes NavalDLC' {
-        (Get-RigModules -Mode FeatureOff) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
+        (Get-RigModules -Mode FeatureOff) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
     }
     It 'NoDlc omits NavalDLC' {
-        (Get-RigModules -Mode NoDlc) -join ',' | Should Be (($base + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
+        (Get-RigModules -Mode NoDlc) -join ',' | Should Be (($base + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
     }
-    It 'Harness CoherentWarAI keeps the load order (ends with CoherentWarAI, CoherentWarAI.TestHarness)' {
-        (Get-RigModules -Mode WarSails -Harness CoherentWarAI) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
+    It 'Harness TestRig is the default harness' {
+        (Get-RigModules -Mode WarSails -Harness TestRig) -join ',' | Should Be ((Get-RigModules -Mode WarSails) -join ',')
     }
-    It 'Harness TestRig ends with CoherentWarAI, TestRig.Harness and omits CoherentWarAI.TestHarness' {
-        $m = @(Get-RigModules -Mode WarSails -Harness TestRig)
-        $m -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
-        ($m -contains 'CoherentWarAI.TestHarness') | Should Be $false
-    }
-    It 'NoDlc drops NavalDLC for both harnesses' {
-        (Get-RigModules -Mode NoDlc -Harness CoherentWarAI) -join ',' | Should Be (($base + 'CoherentWarAI' + 'CoherentWarAI.TestHarness') -join ',')
-        (Get-RigModules -Mode NoDlc -Harness TestRig) -join ',' | Should Be (($base + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
-    }
-    It 'rejects an unknown harness' {
-        $err = $null
-        try { Get-RigModules -Mode WarSails -Harness Other } catch { $err = $_ }
-        $err | Should Not BeNullOrEmpty
-        $err.FullyQualifiedErrorId | Should Match '^ParameterArgumentValidationError'
+    It 'rejects the retired CoherentWarAI harness and unknown harnesses' {
+        foreach ($h in 'CoherentWarAI', 'Other') {
+            $err = $null
+            try { Get-RigModules -Mode WarSails -Harness $h } catch { $err = $_ }
+            $err | Should Not BeNullOrEmpty
+            $err.FullyQualifiedErrorId | Should Match '^ParameterArgumentValidationError'
+        }
     }
 }
 
@@ -106,7 +99,7 @@ Describe 'New-RigPackage' {
         $z = [IO.Compression.ZipFile]::OpenRead($zip)
         try { $names = @($z.Entries | ForEach-Object { $_.FullName } | Sort-Object) } finally { $z.Dispose() }
         $names -contains 'Modules/CoherentWarAI/SubModule.xml' | Should Be $true
-        $names -contains 'Modules/CoherentWarAI.TestHarness/bin/Win64_Shipping_Client/CoherentWarAI.TestHarness.dll' | Should Be $true
+        $names -contains 'Modules/TestRig.Harness/bin/Win64_Shipping_Client/TestRig.Harness.dll' | Should Be $true
         @($names | Where-Object { $_ -match '\\' }).Count | Should Be 0
         @($names | Where-Object { $_ -notmatch '^Modules/' }).Count | Should Be 0
         $r.Sha256 | Should Be (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
@@ -138,7 +131,7 @@ Describe 'New-RigJobManifest' {
         $r = $o.runs[0]
         $r.runId | Should Be 'r1'
         $r.kind | Should Be 'soak'
-        $r.harness | Should Be 'CoherentWarAI'
+        $r.harness | Should Be 'TestRig'
         $r.seed | Should Be 7
         $r.days | Should Be 3
         $r.mode | Should Be 'NoDlc'
@@ -153,7 +146,16 @@ Describe 'New-RigJobManifest' {
         $o = (ConvertTo-RigJson $j) | ConvertFrom-Json
         $o.runs[0].harness | Should Be 'TestRig'
         ($o.modules -join ',') | Should Be ((Get-RigModules -Mode WarSails -Harness TestRig) -join ',')
-        ($o.modules -contains 'CoherentWarAI.TestHarness') | Should Be $false
+        $o.modules[-1] | Should Be 'TestRig.Harness'
+    }
+    It 'rejects the retired -Harness CoherentWarAI' {
+        $err = $null
+        try {
+            New-RigJobManifest -JobId '20261031-153000-a1b2' -CreatedUtc ([datetime]'2026-10-31T15:30:00Z').ToUniversalTime() `
+                -PackageSha256 'ABC123' -Seed 7 -Days 3 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness CoherentWarAI
+        } catch { $err = $_ }
+        $err | Should Not BeNullOrEmpty
+        $err.FullyQualifiedErrorId | Should Match '^ParameterArgumentValidationError'
     }
     It 'writes UTF-8 without BOM' {
         $f = Join-Path ([IO.Path]::GetTempPath()) ('bom-' + [guid]::NewGuid().ToString('N') + '.json')
@@ -162,16 +164,6 @@ Describe 'New-RigJobManifest' {
             $b = [IO.File]::ReadAllBytes($f)
             ($b[0] -eq 0xEF) | Should Be $false
         } finally { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue }
-    }
-}
-
-Describe 'ConvertFrom-RigResultText' {
-    It 'parses key=value lines, tolerates empty values and CRLF' {
-        $h = ConvertFrom-RigResultText "status=Completed`r`ndaysReached=3`r`nnote=`r`n# c`r`nbad line`r`n"
-        $h['status'] | Should Be 'Completed'
-        $h['daysReached'] | Should Be '3'
-        $h['note'] | Should Be ''
-        $h.Count | Should Be 3
     }
 }
 
@@ -311,10 +303,12 @@ Describe 'Start-TestRigJob' {
             $script:calls.Receive++
             if ($script:receiveFailures -gt 0) { $script:receiveFailures--; throw 'scp failed (exit 1)' }
             $f = $script:fake
-            New-FakeResult -Root $DestinationRoot -JobId $JobId -DoneStatus $f.Status -Runs $f.Runs -ResultText $f.Text | Out-Null
+            New-FakeResult -Root $DestinationRoot -JobId $JobId -DoneStatus $f.Status -Runs $f.Runs -ResultJson $f.Json | Out-Null
             Join-Path $DestinationRoot $JobId
         }
         Mock Write-Host { }
+        # Ad-hoc runs get CW-2 (Check-CommandLog.ps1); these tests are about the transport, not about that check.
+        Mock Invoke-RigPostRunCheck { [pscustomobject]@{ Id = $Check.Id; Outcome = 'Passed'; Detail = ''; Rows = @(); ResultPath = '' } }
     }
     AfterEach { Remove-Item -LiteralPath $script:t -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -351,16 +345,24 @@ Describe 'Start-TestRigJob' {
         $r.mode | Should Be 'NoDlc'
     }
 
-    It 'defaults to harness CoherentWarAI in job.json' {
+    It 'defaults to harness TestRig in job.json (modules end with CoherentWarAI, TestRig.Harness)' {
         Start-Rig @{} | Out-Null
-        $script:published.Job.runs[0].harness | Should Be 'CoherentWarAI'
+        $script:published.Job.runs[0].harness | Should Be 'TestRig'
+        (@($script:published.Job.modules)[-2..-1] -join ',') | Should Be 'CoherentWarAI,TestRig.Harness'
     }
 
     It 'passes -Harness TestRig into job.json (harness and modules)' {
         Start-Rig @{ Harness = 'TestRig' } | Out-Null
         $script:published.Job.runs[0].harness | Should Be 'TestRig'
         ($script:published.Job.modules -contains 'TestRig.Harness') | Should Be $true
-        ($script:published.Job.modules -contains 'CoherentWarAI.TestHarness') | Should Be $false
+    }
+
+    It 'rejects the retired -Harness CoherentWarAI before publishing' {
+        $err = $null
+        try { Start-Rig @{ Harness = 'CoherentWarAI' } | Out-Null } catch { $err = $_ }
+        $err | Should Not BeNullOrEmpty
+        $err.FullyQualifiedErrorId | Should Match '^ParameterArgumentValidationError'
+        $script:calls.Publish | Should Be 0
     }
 
     It 'writes the canonical harness casing into job.json for -Harness testrig' {
@@ -399,7 +401,7 @@ Describe 'Start-TestRigJob' {
 
     It 'withdraw losing the race to a claim (job.claimed.json) keeps waiting and then fetches the result' {
         $script:withdrawQueue = @(W $false $false $true)
-        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Text = "status=Completed`ndaysReached=1`n" }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1}' }
         $q = @(); 1..12 | ForEach-Object { $q += , (S $true $false $null $false) }
         $q += , (S $false $true (B 1) $false); $q += , (S $false $true (B 2) $true)
         $script:stateQueue = $q
@@ -419,7 +421,7 @@ Describe 'Start-TestRigJob' {
 
     It 'a failed withdraw is retried until a claim shows up, then the run is followed normally' {
         $script:withdrawQueue = @((W $false $true $false), (W $false $false $true))
-        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Text = "status=Completed`ndaysReached=1`n" }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1}' }
         $q = @(); 1..8 | ForEach-Object { $q += , (S $true $false $null $false) }
         $q += , (S $false $true (B 1) $false); $q += , (S $false $true (B 2) $true)
         $script:stateQueue = $q
@@ -472,7 +474,7 @@ Describe 'Start-TestRigJob' {
     }
 
     It 'a transient poll error is retried and the run continues' {
-        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Text = "status=Completed`ndaysReached=1`n" }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1}' }
         $script:stateFailures = 2
         $script:stateQueue = @((S $false $true (B 1) $false), (S $false $true (B 2) $true))
         (Start-Rig @{ Wait = $true; TimeoutMinutes = 1; StaleSeconds = 5 }) | Should Be 0
@@ -492,7 +494,7 @@ Describe 'Start-TestRigJob' {
     }
 
     It 'a transient fetch error is retried (leftover handling lives in Receive-JobResult)' {
-        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Text = "status=Completed`ndaysReached=1`n" }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1}' }
         $script:receiveFailures = 2
         $script:stateQueue = @(S $false $true (B 1) $true)
         (Start-Rig @{ Wait = $true; TimeoutMinutes = 1 }) | Should Be 0
@@ -508,14 +510,14 @@ Describe 'Start-TestRigJob' {
     }
 
     It 'changing beat does not trigger the stale check' {
-        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Text = "status=Completed`ndaysReached=1`n" }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1}' }
         $q = @(); 1..30 | ForEach-Object { $q += , (S $false $true (B $_) $false) }; $q += , (S $false $true (B 31) $true)
         $script:stateQueue = $q
         (Start-Rig @{ Wait = $true; StaleSeconds = 0.5; TimeoutMinutes = 1 }) | Should Be 0
     }
 
     It 'overall deadline: sends abort, waits for done.json, exits 3' {
-        $script:fake = @{ Status = 'aborted'; Runs = @(@{ runId = 'r1'; exitClass = 'Aborted' }); Text = "status=Aborted`ndaysReached=0`n" }
+        $script:fake = @{ Status = 'aborted'; Runs = @(@{ runId = 'r1'; exitClass = 'Aborted' }); Json = '{"status":"Aborted","daysReached":0}' }
         $script:beatCounter = 0
         Mock Get-JobState { $script:beatCounter++; S $false $true (B $script:beatCounter) ($script:abortCalls -gt 0) } -ParameterFilter { $JobId }
         (Start-Rig @{ Wait = $true; TimeoutMinutes = 0.005; StaleSeconds = 60 }) | Should Be 3
@@ -532,7 +534,7 @@ Describe 'Start-TestRigJob' {
     }
 
     It 'done.json: fetches, prints one table line per run and writes job-result.json' {
-        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Text = "status=Completed`ndaysReached=1`nseed=1`n" }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1,"seed":1}' }
         $script:stateQueue = @((S $false $true (B 1) $false), (S $false $true (B 2) $true))
         $script:lines = @()
         Mock Write-Host { $script:lines += "$Object" }
@@ -546,21 +548,28 @@ Describe 'Start-TestRigJob' {
         $jr.runs[0].exitClass | Should Be 'Completed'
         $jr.runs[0].result.status | Should Be 'Completed'
         $jr.runs[0].result.daysReached | Should Be '1'
-        $row = @($script:lines | Where-Object { $_ -match '^r1\s' })
+        $row = @($script:lines | Where-Object { $_ -match '^r1\s' -and $_ -notmatch 'command-log' })   # the ad-hoc CW-2 line also starts with r1
         $row.Count | Should Be 1
         $row[0] | Should Match 'soak'
         $row[0] | Should Match '1/1'
         $row[0] | Should Match '12m30s'
     }
 
+    It 'an ad-hoc run is checked by CW-2 with the run mode and -Days (the job.json mode, not a suite default)' {
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":2}' }
+        $script:stateQueue = @((S $false $true (B 1) $false), (S $false $true (B 2) $true))
+        (Start-Rig @{ Wait = $true; Days = 2; Mode = 'FeatureOff'; TimeoutMinutes = 1; StaleSeconds = 5 }) | Should Be 0
+        Assert-MockCalled Invoke-RigPostRunCheck -Exactly 1 -Scope It -ParameterFilter { $Check.Id -ceq 'coherentwarai.command-log' -and $Mode -ceq 'FeatureOff' -and $Days -eq 2 }
+    }
+
     It 'maps a failing run to its exit code (NotCompleted -> 2)' {
-        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'NotCompleted' }); Text = $null }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'NotCompleted' }); Json = $null }
         $script:stateQueue = @(S $false $true (B 1) $true)
         (Start-Rig @{ Wait = $true; TimeoutMinutes = 1 }) | Should Be 2
     }
 
     It 'maps a blocked job to exit 1' {
-        $script:fake = @{ Status = 'blocked'; Runs = @(); Text = $null }
+        $script:fake = @{ Status = 'blocked'; Runs = @(); Json = $null }
         $script:stateQueue = @(S $false $true (B 1) $true)
         (Start-Rig @{ Wait = $true; TimeoutMinutes = 1 }) | Should Be 1
     }
@@ -671,7 +680,7 @@ Describe 'Publish-RigResult with hostile or broken done.json' {
 
     function Write-Done([string]$Json) { [IO.File]::WriteAllText((Join-Path $script:rd 'done.json'), $Json, (New-Object Text.UTF8Encoding($false))) }
     function Get-JobResult { Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json }
-    function Publish { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 }
+    function Publish { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks }   # ad-hoc CW-2: Invoke-TestRig.CwChecks.Tests.ps1
 
     It 'rejects a runId that escapes the result folder' {
         Write-Done '{"schema":1,"jobId":"20261031-153000-a1b2","status":"completed","runs":[{"runId":"..\\x","exitClass":"Completed"}]}'
@@ -708,7 +717,7 @@ Describe 'Publish-RigResult with hostile or broken done.json' {
     It 'a missing status is exit 1 with a clear message and a job-result.json' {
         Write-Done '{"schema":1,"jobId":"20261031-153000-a1b2","runs":[{"runId":"r1","exitClass":"Completed"}]}'
         New-Item -ItemType Directory -Path (Join-Path $script:rd 'r1') | Out-Null
-        [IO.File]::WriteAllText((Join-Path $script:rd 'r1\result.txt'), "status=Completed`ndaysReached=1`n")
+        [IO.File]::WriteAllText((Join-Path $script:rd 'r1\run-result.json'), '{"schema":1,"status":"Completed","daysReached":1,"scenarios":[]}')
         Publish | Should Be 1
         ($script:lines -join "`n") | Should Match "no 'status'"
         (Get-JobResult).exitCode | Should Be 1
@@ -729,7 +738,7 @@ Describe 'Publish-RigResult with hostile or broken done.json' {
     It 'the happy path still works' {
         Write-Done '{"schema":1,"jobId":"20261031-153000-a1b2","status":"completed","runs":[{"runId":"r1","exitClass":"Completed"}]}'
         New-Item -ItemType Directory -Path (Join-Path $script:rd 'r1') | Out-Null
-        [IO.File]::WriteAllText((Join-Path $script:rd 'r1\result.txt'), "status=Completed`ndaysReached=1`n")
+        [IO.File]::WriteAllText((Join-Path $script:rd 'r1\run-result.json'), '{"schema":1,"status":"Completed","daysReached":1,"scenarios":[]}')
         Publish | Should Be 0
     }
 }
@@ -747,7 +756,7 @@ Describe 'Publish-RigResult with run-result.json' {
     AfterEach { Remove-Item -LiteralPath $script:t -Recurse -Force -ErrorAction SilentlyContinue }
 
     function Write-RunFile([string]$Name, [string]$Text) { [IO.File]::WriteAllText((Join-Path $script:rd "r1\$Name"), $Text) }
-    function Publish { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 }
+    function Publish { Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -SkipChecks }   # ad-hoc CW-2: Invoke-TestRig.CwChecks.Tests.ps1
     function Get-JobResult { Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json }
     function New-RunResultJson([string]$Status, $Days, [string]$Scenarios) {
         '{"schema":1,"status":"' + $Status + '","daysReached":' + $Days + ',"scenarios":[' + $Scenarios + ']}'
@@ -763,17 +772,19 @@ Describe 'Publish-RigResult with run-result.json' {
         $scenarioLines[1] | Should Match 'trade\s+Passed\s+1/1\s+Completed'
         (Get-JobResult).runs[0].result.status | Should Be 'Completed'
     }
-    It 'prefers run-result.json over result.txt' {
+    It 'ignores a result.txt next to run-result.json' {
         Write-RunFile 'run-result.json' (New-RunResultJson 'Completed' 1 $passed)
         Write-RunFile 'result.txt' "status=Aborted`ndaysReached=0`n"
         Publish | Should Be 0
     }
-    It 'falls back to result.txt with the old line (kind soak, result status)' {
+    It 'result.txt alone is no result (like a missing run-result.json): exit 2 for a Completed run, empty result' {
         Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
-        Publish | Should Be 0
-        $l = @($script:lines | Where-Object { $_ -match '^r1 ' })
-        $l.Count | Should Be 1
-        $l[0] | Should Match 'soak\s+Completed\s+1/1\s+Completed'
+        Publish | Should Be 2
+        ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match '\?\s+\?/1'
+        $r = Read-RigRunResult -RunDir (Join-Path $script:rd 'r1')
+        $r.Status | Should Be $null
+        $r.DaysReached | Should Be $null
+        $r.Result.Count | Should Be 0
     }
     It 'a Failed scenario gives exit 2 even when the run completed all days' {
         Write-RunFile 'run-result.json' (New-RunResultJson 'Completed' 1 ($passed + ',{"id":"x","status":"Failed","seconds":1}'))
@@ -793,7 +804,6 @@ Describe 'Publish-RigResult with run-result.json' {
     foreach ($json in @('[{"status":"Completed","daysReached":1}]', '[]', '5', '"Completed"', 'null')) {
         It "treats run-result.json with a non-object top level ($json) like a missing result (no fallback)" {
             Write-RunFile 'run-result.json' $json
-            Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
             Publish | Should Be 2
             ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match '\?\s+\?/1'
         }
@@ -801,7 +811,6 @@ Describe 'Publish-RigResult with run-result.json' {
     foreach ($json in @('{"schema":1,"status":5,"daysReached":1}', '{"schema":1,"status":null,"daysReached":1}', '{"schema":1,"daysReached":1}')) {
         It "treats run-result.json without a status string ($json) as no result (no fallback)" {
             Write-RunFile 'run-result.json' $json
-            Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
             (Read-RigRunResult -RunDir (Join-Path $script:rd 'r1')).Status | Should Be $null
             Publish | Should Be 0
             ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match '\?\s+1/1'
@@ -813,7 +822,6 @@ Describe 'Publish-RigResult with run-result.json' {
     }
     It 'treats invalid JSON like a missing result (no fallback), exit 2 for a Completed run' {
         Write-RunFile 'run-result.json' '{ not json'
-        Write-RunFile 'result.txt' "status=Completed`ndaysReached=1`n"
         Publish | Should Be 2
         ($script:lines | Where-Object { $_ -match '^r1 ' }) | Should Match '\?\s+\?/1'
     }
@@ -852,14 +860,22 @@ Describe 'Invoke-TestRig.ps1 -Harness parameter' {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
     $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Harness' }
 
-    It 'exists with default CoherentWarAI' {
+    It 'exists with default TestRig' {
         $param | Should Not BeNullOrEmpty
-        $param.DefaultValue.Value | Should Be 'CoherentWarAI'
+        $param.DefaultValue.Value | Should Be 'TestRig'
     }
-    It 'has ValidateSet CoherentWarAI, TestRig' {
+    It 'has ValidateSet TestRig only' {
         $vs = @($param.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' })
         $vs.Count | Should Be 1
-        (@($vs[0].PositionalArguments | ForEach-Object { $_.Value }) -join ',') | Should Be 'CoherentWarAI,TestRig'
+        (@($vs[0].PositionalArguments | ForEach-Object { $_.Value }) -join ',') | Should Be 'TestRig'
+    }
+    It 'rejects the retired CoherentWarAI harness as a usage error: exit 1 before the config is read (powershell -File)' {
+        $out = (& powershell -NoProfile -File $scriptPath -PackageFrom C:\nowhere -Harness CoherentWarAI 2>&1 | Out-String)
+        $LASTEXITCODE | Should Be 1
+        $out | Should Match 'ParameterArgumentValidationError'
+        $out | Should Match 'Harness'
+        $out | Should Match 'CoherentWarAI'
+        $out | Should Not Match 'Config not found'
     }
     It 'rejects an unknown value (powershell -File)' {
         $out = (& powershell -NoProfile -File $scriptPath -PackageFrom C:\nowhere -Harness Other 2>&1 | Out-String)

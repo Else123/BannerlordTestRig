@@ -12,7 +12,6 @@
   "heartbeatSeconds": 10,
   "moduleAllowlist": [
     "CoherentWarAI",
-    "CoherentWarAI.TestHarness",
     "AutoTraderSpeed",
     "SmithingSuite",
     "CompanionManagementSuite",

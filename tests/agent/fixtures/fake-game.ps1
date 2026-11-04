@@ -3,8 +3,6 @@
 # (TestRigFakeGame.exe is a renamed copy of powershell.exe, made by the tests.)
 # Inputs (environment, inherited from the test):
 #   FAKEGAME_DOCS      the documentsRoot the agent uses
-#   FAKEGAME_HARNESS   CoherentWarAI (default) | TestRig: Documents subfolder whose harness\ holds run.cfg/harness.log and
-#                      the result (CoherentWarAI: result.txt; TestRig: run-result.json, via .tmp + Move)
 #   FAKEGAME_NOMODLOG  set (any value): do not create the CoherentWarAI mod log folder or file
 #   FAKEGAME_MODLOGS   set (any value): also write the logs of the other mods (Configs\AutoTrader.log,
 #                      SmithingSuite\smithingsuite.log, CompanionManagementSuite\companion-suite.log)
@@ -13,9 +11,9 @@
 #                      modchange (blocking message box 'Mod change detected' with OK, completes after
 #                      it is closed) | modchangeokcancel (same, OK/Cancel) | modchangeyesno (same, Yes/No)
 #                      | otherdialog (OK box titled 'Some other dialog')
-#                      (TestRig, complete: with health=<ids> in run.cfg the result lists the health bracket lines
+#                      (complete: with health=<ids> in run.cfg the result lists the health bracket lines
 #                      <id>@0 ..., soak, <id>@<days> ..., all Passed)
-#                      | txtonly (TestRig only: writes result.txt like the old harness) | badjson (TestRig only: invalid run-result.json)
+#                      | badjson (invalid run-result.json)
 #                      | crash (watchdog log says 'Crash occurred', then hangs like the real crash dialog)
 #                      | crashexit (same log, then exits without a result)
 #                      | crashlate (exits without a result; 'Crash occurred' reaches the log about 1 s later)
@@ -29,9 +27,9 @@
 #                      still writing, then completes)
 #                      | unhandled (appends a harness.log line '<s> UnhandledException (terminating=True): ...', then hangs)
 #                      | unhandledexit (appends the same line, then exits at once without a result)
-#                      | unhandledthenresult (TestRig only: appends the same line, 2 s later the final run-result.json
+#                      | unhandledthenresult (appends the same line, 2 s later the final run-result.json
 #                      (status Aborted, reason unhandled:Campaign), then hangs)
-#                      | completedthenunhandled (TestRig only: final run-result.json (status Completed, unhandled 0), then
+#                      | completedthenunhandled (final run-result.json (status Completed, unhandled 0), then
 #                      the same line, 3.5 s later the result rewritten with unhandled 1 (like the harness after a crash
 #                      during shutdown), then hangs)
 #                      | unhandledlate (appends the same line after 3 s, then hangs)
@@ -48,7 +46,7 @@
 #                      completes after 3 s)
 #                      | partial (appends the UnhandledException line in two pieces 3 s apart, the first without a line
 #                      break, then hangs)
-#                      | runningsleep (TestRig only: one Alive line, run-result.json with status Running, then hangs)
+#                      | runningsleep (one Alive line, run-result.json with status Running, then hangs)
 #                      | resultthenslow (one Alive line, writes the final result, then needs 6 s to exit)
 #   FAKEGAME_ENGINELOGS the engineLogDir the agent uses: if set, watchdog_log_<pid>.txt is written there
 #                      (needed by crash, crashexit, crashlate, relaunch, crashforeign, crashfirst, crashafter and alivecrash)
@@ -59,16 +57,11 @@ param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GameArguments)
 $ErrorActionPreference = 'Stop'
 $docs = Join-Path $env:FAKEGAME_DOCS 'Mount and Blade II Bannerlord'
 $modDir = Join-Path $docs 'CoherentWarAI'
-$harnessName = if ($env:FAKEGAME_HARNESS) { $env:FAKEGAME_HARNESS } else { 'CoherentWarAI' }   # CoherentWarAI | TestRig
-$harnessDir = Join-Path (Join-Path $docs $harnessName) 'harness'
+$harnessDir = Join-Path (Join-Path $docs 'TestRig') 'harness'   # run.cfg, harness.log and run-result.json (via .tmp + Move)
 New-Item -ItemType Directory -Path $harnessDir -Force | Out-Null
 
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_DOCS 'fake-args.txt'), ($GameArguments -join ' '), $utf8)
-# Records whether a run.cfg exists in the other harness folder (the agent must write only to the selected one).
-$otherName = if ($harnessName -eq 'TestRig') { 'CoherentWarAI' } else { 'TestRig' }
-$otherRunCfg = Join-Path (Join-Path (Join-Path $docs $otherName) 'harness') 'run.cfg'
-[System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_DOCS 'fake-other-runcfg.txt'), [string](Test-Path -LiteralPath $otherRunCfg), $utf8)
 [System.IO.File]::WriteAllText((Join-Path $env:FAKEGAME_DOCS 'fake-runcfg.txt'), [System.IO.File]::ReadAllText((Join-Path $harnessDir 'run.cfg')), $utf8)
 # The ownAssemblies line of run.cfg ('' if absent), for the tests.
 $ownLine = @([System.IO.File]::ReadAllLines((Join-Path $harnessDir 'run.cfg')) | Where-Object { $_ -like 'ownAssemblies=*' }) -join ''
@@ -288,31 +281,26 @@ if ($behavior -and $dialogs.ContainsKey($behavior)) {
 if ($behavior -eq 'slow') {
     Start-Sleep -Seconds 6   # then completes normally
 }
-if ($behavior -eq 'badjson' -and $harnessName -eq 'TestRig') {
+if ($behavior -eq 'badjson') {
     [System.IO.File]::WriteAllText((Join-Path $harnessDir 'run-result.json'), '{ "schema": 1, "status": ', $utf8)
 }
 elseif ($behavior -ne 'noresult') {
-    if ($harnessName -eq 'TestRig' -and $behavior -ne 'txtonly') {
-        # With health=<ids> in run.cfg the lines of the health bracket, in the harness order: <id>@0 per id, soak,
-        # <id>@<days> per id (days from run.cfg), all Passed.
-        $cfgLines = @([System.IO.File]::ReadAllLines((Join-Path $harnessDir 'run.cfg')))
-        $healthIds = @($cfgLines | Where-Object { $_ -like 'health=*' } | ForEach-Object { $_.Substring(7).Split(',') })
-        $cfgDays = @($cfgLines | Where-Object { $_ -like 'days=*' } | ForEach-Object { $_.Substring(5) }) -join ''
-        $lineIds = @($healthIds | ForEach-Object { "$_@0" }) + @('soak') + @($healthIds | ForEach-Object { "$_@$cfgDays" })
-        $scenarioLines = @($lineIds | ForEach-Object {
-                $seconds = if ($_ -ceq 'soak') { 25 } else { 1 }
-                '{"id":"' + $_ + '","status":"Passed","seconds":' + $seconds + '}'
-            }) -join ','
-        $json = '{"schema":1,"status":"Completed","reason":"","seed":7,"mode":"WarSails","daysRequested":1,"daysReached":1,"realSeconds":25,"gameDaysPerRealMinute":2.41,"playerMapEvents":0,' +
-            '"modules":[{"id":"Native","version":"v1.4.8"}],"exceptions":{"total":0,"own":0,"unhandled":0,"top":[]},' +
-            '"scenarios":[' + $scenarioLines + '],"checks":[{"name":"daysReached","expected":">= 1","actual":"1","passed":true}]}'
-        $tmp = Join-Path $harnessDir 'run-result.json.tmp'
-        [System.IO.File]::WriteAllText($tmp, $json, $utf8)
-        Move-Item -LiteralPath $tmp -Destination (Join-Path $harnessDir 'run-result.json') -Force
-    }
-    else {
-        [System.IO.File]::WriteAllText((Join-Path $harnessDir 'result.txt'), "status=Completed`r`ndaysReached=1`r`n", $utf8)
-    }
+    # With health=<ids> in run.cfg the lines of the health bracket, in the harness order: <id>@0 per id, soak,
+    # <id>@<days> per id (days from run.cfg), all Passed.
+    $cfgLines = @([System.IO.File]::ReadAllLines((Join-Path $harnessDir 'run.cfg')))
+    $healthIds = @($cfgLines | Where-Object { $_ -like 'health=*' } | ForEach-Object { $_.Substring(7).Split(',') })
+    $cfgDays = @($cfgLines | Where-Object { $_ -like 'days=*' } | ForEach-Object { $_.Substring(5) }) -join ''
+    $lineIds = @($healthIds | ForEach-Object { "$_@0" }) + @('soak') + @($healthIds | ForEach-Object { "$_@$cfgDays" })
+    $scenarioLines = @($lineIds | ForEach-Object {
+            $seconds = if ($_ -ceq 'soak') { 25 } else { 1 }
+            '{"id":"' + $_ + '","status":"Passed","seconds":' + $seconds + '}'
+        }) -join ','
+    $json = '{"schema":1,"status":"Completed","reason":"","seed":7,"mode":"WarSails","daysRequested":1,"daysReached":1,"realSeconds":25,"gameDaysPerRealMinute":2.41,"playerMapEvents":0,' +
+        '"modules":[{"id":"Native","version":"v1.4.8"}],"exceptions":{"total":0,"own":0,"unhandled":0,"top":[]},' +
+        '"scenarios":[' + $scenarioLines + '],"checks":[{"name":"daysReached","expected":">= 1","actual":"1","passed":true}]}'
+    $tmp = Join-Path $harnessDir 'run-result.json.tmp'
+    [System.IO.File]::WriteAllText($tmp, $json, $utf8)
+    Move-Item -LiteralPath $tmp -Destination (Join-Path $harnessDir 'run-result.json') -Force
 }
 if ($behavior -eq 'resultthenslow') { Start-Sleep -Seconds 6 }
 exit 0

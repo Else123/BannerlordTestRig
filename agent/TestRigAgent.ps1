@@ -403,7 +403,7 @@ function Get-AgentConfig {
         workshopRoot        = [string]$raw.workshopRoot
         pollSeconds         = 10
         heartbeatSeconds    = 10
-        moduleAllowlist     = @('CoherentWarAI', 'CoherentWarAI.TestHarness', 'AutoTraderSpeed', 'SmithingSuite',
+        moduleAllowlist     = @('CoherentWarAI', 'AutoTraderSpeed', 'SmithingSuite',
             'CompanionManagementSuite', 'TestRig.Harness', 'TestRig.SelfTest', '*.Scenarios')
     }
     if ([string]::IsNullOrWhiteSpace($cfg.gameExecutable)) {
@@ -516,9 +516,9 @@ function Test-ScenarioIdList {
 }
 
 function Test-RunKindSchema {
-    # kind is 'soak' or 'scenarios'. A scenarios run needs the TestRig harness and a non-empty scenarios array of
-    # unique ids; a soak run has none. A soak run may carry 'health' (the health bracket, F-S6-1): only with the TestRig
-    # harness, a non-empty array of unique ids; a scenarios run never does. Ids: see Test-ScenarioIdList.
+    # kind is 'soak' or 'scenarios'. A scenarios run needs a non-empty scenarios array of unique ids; a soak run has
+    # none. A soak run may carry 'health' (the health bracket, F-S6-1): a non-empty array of unique ids; a scenarios
+    # run never does. Ids: see Test-ScenarioIdList.
     param($Run)
     $errs = @()
     $id = "Run $($Run.runId)"
@@ -526,20 +526,15 @@ function Test-RunKindSchema {
     $hasScenarios = $names -contains 'scenarios'
     $hasHealth = $names -contains 'health'
     if ($Run.kind -isnot [string] -or $Run.kind -eq '') { return $errs }   # reported as required by the caller
-    if ($names -contains 'ownAssemblies') {   # any kind, TestRig only
-        if ($Run.harness -ne 'TestRig') { $errs += "${id}: 'ownAssemblies' needs the TestRig harness." }
+    if ($names -contains 'ownAssemblies') {   # any kind
         $errs += @(Test-ScenarioIdList -RunLabel $id -Field 'ownAssemblies' -Run $Run)
     }
     if ($Run.kind -ceq 'soak') {
         if ($hasScenarios) { $errs += "${id}: 'scenarios' is only allowed for kind 'scenarios'." }
-        if ($hasHealth) {
-            if ($Run.harness -ne 'TestRig') { $errs += "${id}: 'health' needs the TestRig harness." }
-            $errs += @(Test-ScenarioIdList -RunLabel $id -Field 'health' -Run $Run)
-        }
+        if ($hasHealth) { $errs += @(Test-ScenarioIdList -RunLabel $id -Field 'health' -Run $Run) }
         return $errs
     }
     if ($Run.kind -cne 'scenarios') { return @("${id}: unknown kind '$($Run.kind)' (allowed: soak, scenarios).") }
-    if ($Run.harness -ne 'TestRig') { $errs += "${id}: kind 'scenarios' needs the TestRig harness." }
     if ($hasHealth) { $errs += "${id}: 'health' is only allowed for kind 'soak'." }
     return @($errs + @(Test-ScenarioIdList -RunLabel $id -Field 'scenarios' -Run $Run))
 }
@@ -572,6 +567,9 @@ function Test-JobSchema {
         $seen[$run.runId] = $true
         foreach ($f in @('kind', 'harness', 'mode')) {
             if ($run.$f -isnot [string] -or $run.$f -eq '') { $errors += "Run $($run.runId): '$f' is required." }
+        }
+        if ($run.harness -is [string] -and $run.harness -ne '' -and $run.harness -cne 'TestRig') {
+            $errors += "Run $($run.runId): harness '$($run.harness)' is not supported (only 'TestRig')."
         }
         $errors += @(Test-RunKindSchema $run)
         if (-not (Test-IsNumber $run.seed)) { $errors += "Run $($run.runId): 'seed' must be a number." }
@@ -985,10 +983,9 @@ function Restore-TestRigBaseline {
 # ---------------------------------------------------------------------------
 
 # Harness id -> folder below the Bannerlord Documents folder and the module that drives it
-# (the one place this mapping lives).
+# (the one place this mapping lives). TestRig is the only harness a job may name (Test-JobSchema).
 $script:Harnesses = [ordered]@{
-    CoherentWarAI = @{ Folder = 'CoherentWarAI\harness'; Module = 'CoherentWarAI.TestHarness' }
-    TestRig       = @{ Folder = 'TestRig\harness'; Module = 'TestRig.Harness' }
+    TestRig = @{ Folder = 'TestRig\harness'; Module = 'TestRig.Harness' }
 }
 
 function Get-HarnessDir {
@@ -999,16 +996,15 @@ function Get-HarnessDir {
 }
 
 function Test-RunHasOwnAssemblies {
-    # True when the run carries an explicit runs[].ownAssemblies list (TestRig harness only; the job schema guarantees
+    # True when the run carries an explicit runs[].ownAssemblies list (the job schema guarantees
     # a non-empty array of unique ids without ',' or line breaks).
     param($Run)
-    return ($Run.harness -eq 'TestRig' -and $Run.PSObject.Properties.Name -contains 'ownAssemblies' -and @($Run.ownAssemblies).Count -gt 0)
+    return ($Run.PSObject.Properties.Name -contains 'ownAssemblies' -and @($Run.ownAssemblies).Count -gt 0)
 }
 
 function Get-RunCfgText {
-    # ownAssemblies is written only when given: the CoherentWarAI harness rejects unknown keys. The same holds
-    # for scenarios: written only for the TestRig harness with kind 'scenarios', and for health: only for the TestRig
-    # harness with kind 'soak' (the job schema guarantees ids without ',' or line breaks, and never both keys).
+    # ownAssemblies is written only when given. scenarios is written only for kind 'scenarios', and health only for
+    # kind 'soak' (the job schema guarantees ids without ',' or line breaks, and never both keys).
     param($Run, [string[]]$OwnAssemblies = @())
     $lines = @(
         ('seed=' + [System.Convert]::ToString($Run.seed, $script:Invariant)),
@@ -1017,10 +1013,10 @@ function Get-RunCfgText {
         ('stallMinutes=' + [System.Convert]::ToString($Run.stallMinutes, $script:Invariant)),
         ('budgetMinutes=' + [System.Convert]::ToString($Run.budgetMinutes, $script:Invariant))
     )
-    if ($Run.kind -ceq 'scenarios' -and $Run.harness -eq 'TestRig' -and @($Run.scenarios).Count -gt 0) {
+    if ($Run.kind -ceq 'scenarios' -and @($Run.scenarios).Count -gt 0) {
         $lines += ('scenarios=' + (@($Run.scenarios) -join ','))
     }
-    if ($Run.kind -ceq 'soak' -and $Run.harness -eq 'TestRig' -and $Run.PSObject.Properties.Name -contains 'health' -and @($Run.health).Count -gt 0) {
+    if ($Run.kind -ceq 'soak' -and $Run.PSObject.Properties.Name -contains 'health' -and @($Run.health).Count -gt 0) {
         $lines += ('health=' + (@($Run.health) -join ','))
     }
     if (Test-RunHasOwnAssemblies $Run) { $OwnAssemblies = @($Run.ownAssemblies) }   # the job's explicit list wins over the derived one
@@ -1337,30 +1333,19 @@ function Stop-StrayGameProcesses {
 }
 
 function Get-ResultStatus {
-    # status of the harness result in $HarnessDir: run-result.json (TestRig harness) if present,
-    # else result.txt (CoherentWarAI harness). Unreadable or invalid run-result.json = no result
-    # (logged, no fallback). Returns $null if there is no usable status.
+    # status of the harness result in $HarnessDir: run-result.json. Missing, unreadable or invalid run-result.json = no
+    # result (an unreadable or invalid one is logged). Returns $null if there is no usable status.
     param([string]$HarnessDir)
     $jsonPath = Join-Path $HarnessDir 'run-result.json'
-    if (Test-Path -LiteralPath $jsonPath -PathType Leaf) {
-        try {
-            $json = Read-Utf8Text $jsonPath | ConvertFrom-Json
-            if ($null -eq $json -or $json -isnot [System.Management.Automation.PSCustomObject]) { throw 'top level is not a JSON object' }
-            $status = $json.status
-            if ($status -is [string] -and $status -ne '') { return $status }
-            Write-AgentLog 'run-result.json has no status; treating the run as having no result.'
-        }
-        catch { Write-AgentLog "run-result.json is unreadable or invalid; treating the run as having no result: $($_.Exception.Message)" }
-        return $null
-    }
-    $txtPath = Join-Path $HarnessDir 'result.txt'
-    if (-not (Test-Path -LiteralPath $txtPath -PathType Leaf)) { return $null }
+    if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) { return $null }
     try {
-        foreach ($line in (Read-Utf8Text $txtPath) -split "`r?`n") {
-            if ($line -match '^\s*status\s*=\s*(.+?)\s*$') { return $Matches[1] }
-        }
+        $json = Read-Utf8Text $jsonPath | ConvertFrom-Json
+        if ($null -eq $json -or $json -isnot [System.Management.Automation.PSCustomObject]) { throw 'top level is not a JSON object' }
+        $status = $json.status
+        if ($status -is [string] -and $status -ne '') { return $status }
+        Write-AgentLog 'run-result.json has no status; treating the run as having no result.'
     }
-    catch { }
+    catch { Write-AgentLog "run-result.json is unreadable or invalid; treating the run as having no result: $($_.Exception.Message)" }
     return $null
 }
 
@@ -1673,13 +1658,10 @@ function Wait-HarnessFinalResult {
     param($Process, [string]$HarnessDir, [double]$Seconds, [DateTime]$SinceUtc)
     try {
         $jsonPath = Join-Path $HarnessDir 'run-result.json'
-        $txtPath = Join-Path $HarnessDir 'result.txt'
         $until = [DateTime]::UtcNow.AddSeconds($Seconds)
         while ([DateTime]::UtcNow -lt $until) {
             if ($Process.WaitForExit(250)) { return }
-            # The file Get-ResultStatus reads: run-result.json if present, else result.txt (CoherentWarAI harness).
             $result = Get-Item -LiteralPath $jsonPath -ErrorAction SilentlyContinue
-            if ($null -eq $result) { $result = Get-Item -LiteralPath $txtPath -ErrorAction SilentlyContinue }
             if ($null -eq $result -or $result.LastWriteTimeUtc -le $SinceUtc) { continue }
             $status = Get-ResultStatus $HarnessDir
             if ($null -ne $status -and $status -ne 'Running') { return }
@@ -1702,11 +1684,10 @@ function Invoke-Run {
     $configsDir = Join-Path $docs 'Configs'
     $mcmPath = Join-Path $configsDir 'ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json'
     $modLogDir = Join-Path $docs 'CoherentWarAI'
-    $harnessDir = Get-HarnessDir $Config ([string]$Run.harness)   # $null for an unknown harness (rejected below)
-    $runCfgPath = $resultPath = $runResultPath = $harnessLogPath = $null
+    $harnessDir = Get-HarnessDir $Config ([string]$Run.harness)   # $null for an unsupported harness (rejected below)
+    $runCfgPath = $runResultPath = $harnessLogPath = $null
     if ($harnessDir) {
         $runCfgPath = Join-Path $harnessDir 'run.cfg'
-        $resultPath = Join-Path $harnessDir 'result.txt'
         $runResultPath = Join-Path $harnessDir 'run-result.json'
         $harnessLogPath = Join-Path $harnessDir 'harness.log'
     }
@@ -1739,7 +1720,7 @@ function Invoke-Run {
     $gameName = $null
 
     try {
-        if (-not $harnessDir) { throw [System.InvalidOperationException]("Unknown harness '$($Run.harness)'.") }
+        if (-not $harnessDir) { throw [System.InvalidOperationException]("Harness '$($Run.harness)' is not supported (only 'TestRig').") }
         # The harness module must be in this job's package and load order; otherwise the game would
         # start without it, or with a stale copy installed by an earlier job.
         $harnessModule = $script:Harnesses[[string]$Run.harness].Module
@@ -1762,11 +1743,11 @@ function Invoke-Run {
         Set-McmSettingsValues $mcmPath ($Run.mode -ne 'FeatureOff')
 
         New-Item -ItemType Directory -Path $harnessDir -Force | Out-Null
-        foreach ($stale in @($resultPath, $runResultPath, ($runResultPath + '.tmp'), $harnessLogPath)) {
+        foreach ($stale in @($runResultPath, ($runResultPath + '.tmp'), $harnessLogPath)) {
             if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
         }
         $ownAssemblies = @()
-        if ([string]$Run.harness -eq 'TestRig' -and -not (Test-RunHasOwnAssemblies $Run)) {   # an explicit list replaces the derivation
+        if (-not (Test-RunHasOwnAssemblies $Run)) {   # an explicit list replaces the derivation
             # Only package modules that this job loads (job.modules); game and workshop modules are not own code.
             $loadedPackageModules = @($Modules | Where-Object { @($PackageModuleIds) -contains $_ })
             $ownAssemblies = @(Get-OwnAssemblyNames -ModulesDir (Get-ModulesDir $Config) `
@@ -1810,7 +1791,6 @@ function Invoke-Run {
         $lastAliveAt = $null   # the silence watchdog is armed by the first Alive line (main thread), not by any line
         $unreadableStatusPasses = 0   # silence passes in a row that found no readable result
         $resultFinal = $false   # the harness wrote its final result: silence is no longer a hang
-        $watchSilence = ([string]$Run.harness -eq 'TestRig')   # the CoherentWarAI harness writes no beat
         $dialogState = @{ Handled = @{}; Seen = @{}; Open = @(); FailureLogged = $false }
         $lastLogReadUtc = $startedAt   # when harness.log was last read (an UnhandledException line in it: Wait-HarnessFinalResult)
         try {
@@ -1840,7 +1820,7 @@ function Invoke-Run {
                     $crashLine = Find-UnhandledExceptionLine $newLines
                     if ($null -ne $crashLine) { $crashed = $true; break }
                     # Only Alive lines count: lines of background threads (FirstChance) go on while the main thread hangs.
-                    if ($watchSilence -and -not $resultFinal -and $null -ne $lastAliveAt -and ($now - $lastAliveAt).TotalSeconds -gt $script:SilenceSeconds) {
+                    if (-not $resultFinal -and $null -ne $lastAliveAt -and ($now - $lastAliveAt).TotalSeconds -gt $script:SilenceSeconds) {
                         # run-result.json is rewritten after every scenario (status Running); only a final status ends the watch.
                         $resultStatus = Get-ResultStatus $harnessDir
                         if ($null -ne $resultStatus -and $resultStatus -ne 'Running') { $resultFinal = $true }
@@ -1976,7 +1956,6 @@ function Invoke-Run {
     $copies = @()
     if ($harnessDir) {
         $copies += @{ Name = 'run-result.json'; Source = $runResultPath }
-        $copies += @{ Name = 'result.txt'; Source = $resultPath }
         $copies += @{ Name = 'harness.log'; Source = $harnessLogPath }
     }
     $copies += @{ Name = 'CoherentWarAI.log'; Source = (Join-Path $modLogDir 'CoherentWarAI.log') }

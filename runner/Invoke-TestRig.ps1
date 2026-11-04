@@ -38,6 +38,8 @@
     CW-2 (tools\Check-CommandLog.ps1, row <run> <Suite>-coherentwarai.command-log) on every Completed run with that run's
     mode and -MinDays = the days; CW1 also runs CW-1 (tools\Compare-Ac25a.ps1, rows job CW1-coherentwarai.ac25a-*) over the
     job. A FAIL is exit 2, an Inconclusive verdict exit 3, a missing log, script or result exit 1 (same precedence).
+    A run without -Suite (ad hoc; it always loads CoherentWarAI) gets CW-2 the same way (row <run> coherentwarai.command-log),
+    so -Days 10 -Wait is the 10-day WarSails check; fewer days than the check needs only warn.
     -Suite X runs the cross-mod scenario crossmod.trade-with-autoequip in two runs (r1 .done, r2 .cancel; 5 minutes each,
     Completed expected) with AutoTraderSpeed, CompanionManagementSuite, the harness and CrossMod.Scenarios.
     runner\Update-JobResult.ps1 -JobId <jobId> re-judges a fetched job offline (rewrites its job-result.json).
@@ -59,7 +61,7 @@ param(
     [int]$Seed = 1,
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
     [ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode = 'WarSails',
-    [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+    [ValidateSet('TestRig')][string]$Harness = 'TestRig',
     [string]$Suite,   # validated in the script body against $script:RigSuites (the single suite table)
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
     [ValidateRange(1, [int]::MaxValue)][int]$BudgetMinutes = 60,
@@ -77,10 +79,9 @@ param(
 
 # Harness id -> module id of its in-game driver: the single mapping (lookups are case-insensitive).
 $script:RigHarnessModules = [ordered]@{
-    CoherentWarAI = 'CoherentWarAI.TestHarness'
-    TestRig       = 'TestRig.Harness'
+    TestRig = 'TestRig.Harness'
 }
-# Suite id -> fixed settings. Harness is fixed (an explicit conflicting -Harness is a usage error); Mode, Seed
+# Suite id -> fixed settings. Harness is TestRig (the only harness); Mode, Seed
 # and Days are defaults that an explicit parameter overrides. A suite defines its own mod list: base modules,
 # CoherentWarAI (only when WithCoherentWarAI), ExtraModules, the harness module, then TailModules (scenario
 # modules, which reference the harness and so load after it). Kind is the run kind: 'soak' or 'scenarios'
@@ -303,11 +304,10 @@ function New-RigJobId {
     $UtcNow.ToUniversalTime().ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + $Suffix
 }
 
-# Module load order as in Run-SoakTest.ps1 (BannerlordCoherentWarAI).
 function Get-RigModules {
     param(
         [Parameter(Mandatory)][ValidateSet('WarSails', 'NoDlc', 'FeatureOff')][string]$Mode,
-        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+        [ValidateSet('TestRig')][string]$Harness = 'TestRig',
         [ValidateScript({ -not $_ -or $script:RigSuites.ContainsKey($_) })][string]$Suite
     )
     $modules = @('Bannerlord.Harmony', 'Bannerlord.ButterLib', 'Bannerlord.UIExtenderEx', 'Bannerlord.MBOptionScreen', 'Native', 'SandBoxCore', 'Sandbox', 'StoryMode')
@@ -402,7 +402,7 @@ function Get-RigSuiteTimeoutMinutes {
 }
 
 # Applies -Suite to the parameter values. $BoundParameters = names of the parameters given explicitly
-# (keys of $PSBoundParameters). Harness is fixed by the suite: an explicit different one throws. Mode and
+# (keys of $PSBoundParameters). Harness is the suite's (TestRig, the only one). Mode and
 # Seed keep an explicit value; Days defaults to the suite's value only when not given. A suite whose runs fix
 # their hard timeout or seed rejects an explicit -HardTimeoutMinutes or -Seed. Without a suite the
 # values are returned unchanged.
@@ -417,9 +417,6 @@ function Resolve-RigSuiteSettings {
     )
     if ($Suite) {
         $s = $script:RigSuites[$Suite]
-        if ($BoundParameters -contains 'Harness' -and $Harness -ne $s.Harness) {
-            throw "-Suite $Suite fixes -Harness $($s.Harness); -Harness $Harness conflicts with it (omit -Harness)."
-        }
         if ($BoundParameters -contains 'HardTimeoutMinutes' -and @(Get-RigSuiteRuns -Suite $Suite).Count -gt 0) {
             throw "-Suite $Suite fixes the hard timeout of each run; -HardTimeoutMinutes conflicts with it (omit -HardTimeoutMinutes)."
         }
@@ -500,7 +497,7 @@ function New-RigJobManifest {
         [Parameter(Mandatory)][int]$BudgetMinutes,
         [Parameter(Mandatory)][int]$HardTimeoutMinutes,
         [object[]]$Repos = @(),   # build mode: repo states (name, sha, dirty); empty with -PackageFrom
-        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+        [ValidateSet('TestRig')][string]$Harness = 'TestRig',
         [string]$Suite,
         [AllowNull()][AllowEmptyString()][string]$ExpectedGameVersion   # tower game version; $null/empty = not checked
     )
@@ -559,26 +556,14 @@ function Write-RigJsonFile {
     [IO.File]::WriteAllText($Path, (ConvertTo-RigJson $InputObject), (New-Object Text.UTF8Encoding($false)))
 }
 
-# result.txt is "key=value" per line; anything else is ignored.
-function ConvertFrom-RigResultText {
-    param([string]$Text)
-    $h = [ordered]@{}
-    foreach ($line in ($Text -split "`r?`n")) {
-        if ($line -match '^\s*([A-Za-z0-9_.-]+)=(.*)$') { $h[$Matches[1]] = $Matches[2].Trim() }
-    }
-    $h
-}
-
-# Reads the harness result of one run folder: run-result.json (TestRig harness) if present, else
-# result.txt (CoherentWarAI harness). Invalid or unreadable run-result.json = no result (no fallback),
-# so a half-written file is never mixed with an older result.txt.
-# Returns Status, DaysReached, Scenarios (@{ Id; Status } per scenario, JSON only), FailedChecks (@{ Name; Expected;
-# Actual; Scenario } per check with passed=false, JSON only) and Result (for job-result.json).
+# Reads the harness result of one run folder from run-result.json. A missing, invalid or unreadable run-result.json
+# = no result (the empty info below).
+# Returns Status, DaysReached, Scenarios (@{ Id; Status } per scenario), FailedChecks (@{ Name; Expected;
+# Actual; Scenario } per check with passed=false) and Result (for job-result.json).
 function Read-RigRunResult {
     param([Parameter(Mandatory)][string]$RunDir)
     $info = [ordered]@{ Status = $null; DaysReached = $null; Scenarios = @(); FailedChecks = @(); Result = [ordered]@{} }
     $jsonFile = Join-Path $RunDir 'run-result.json'
-    $txtFile = Join-Path $RunDir 'result.txt'
     if (Test-Path -LiteralPath $jsonFile) {
         try {
             $json = [IO.File]::ReadAllText($jsonFile, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
@@ -598,13 +583,6 @@ function Read-RigRunResult {
                 [pscustomobject]@{ Name = [string]$_.name; Expected = [string]$_.expected; Actual = [string]$_.actual; Scenario = [string]$_.scenario }
             })
         return $info
-    }
-    if (Test-Path -LiteralPath $txtFile) {
-        $result = ConvertFrom-RigResultText ([IO.File]::ReadAllText($txtFile))
-        $info.Result = $result
-        if ($result.Contains('status')) { $info.Status = $result['status'] }
-        $parsed = 0
-        if ($result.Contains('daysReached') -and [int]::TryParse($result['daysReached'], [ref]$parsed)) { $info.DaysReached = $parsed }
     }
     $info
 }
@@ -830,7 +808,7 @@ function Get-RigExpectationOutcome {
 }
 
 # The value at a dotted property path (e.g. 'exceptions.classification.walks') of a parsed run-result.json; $null when a
-# step is missing or not a JSON object (a result.txt map or no result has none).
+# step is missing or not a JSON object (no result has none).
 function Get-RigResultValue {
     param($Result, [Parameter(Mandatory)][string]$Path)
     $value = $Result
@@ -1518,9 +1496,10 @@ function Invoke-RigJobCheck {
 # ('job' instead of a run id for a JobCheck), then one indented row per FAIL / warning row or violation. 'Error' is shown
 # for 'RigError'.
 function Format-RigCheckLines {
-    param([Parameter(Mandatory)][string]$Where, [Parameter(Mandatory)][string]$Suite, [Parameter(Mandatory)]$Result)
+    param([Parameter(Mandatory)][string]$Where, [AllowNull()][AllowEmptyString()][string]$Suite, [Parameter(Mandatory)]$Result)
     $shown = if ($Result.Outcome -ceq 'RigError') { 'Error' } else { $Result.Outcome }
-    '{0,-6} {1,-6} {2,-12} {3}  {4}' -f $Where, "$Suite-$($Result.Id)", $shown, $Result.Detail, $Result.ResultPath
+    $name = if ($Suite) { "$Suite-$($Result.Id)" } else { $Result.Id }   # an ad-hoc run has no suite prefix
+    '{0,-6} {1,-6} {2,-12} {3}  {4}' -f $Where, $name, $shown, $Result.Detail, $Result.ResultPath
     if ($Result.PSObject.Properties.Name -contains 'Rows') {
         foreach ($row in @($Result.Rows)) {
             '    {0}: expected PASS, actual {1} ({2}) - {3}' -f (Format-RigCheckField $row.Ac 20), (Format-RigCheckField $row.Verdict 40), $row.Shown, (Format-RigCheckField $row.Evidence 300)
@@ -1637,7 +1616,10 @@ function Publish-RigResult {
     )
     if (-not $WorkspaceRoot) { $WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
     $suiteDef = if ($Suite) { $script:RigSuites[$Suite] } else { $null }
-    $postRunChecks = @(if (-not $SkipChecks -and $null -ne $suiteDef -and $suiteDef.ContainsKey('PostRunChecks')) { $suiteDef.PostRunChecks })
+    # An ad-hoc run (no suite) always loads CoherentWarAI (Get-RigModules): CW-2 as in the suites that load it (S12 #70).
+    $postRunChecks = @(if ($SkipChecks) { }
+        elseif ($null -eq $suiteDef) { $script:RigCommandLogCheck }
+        elseif ($suiteDef.ContainsKey('PostRunChecks')) { $suiteDef.PostRunChecks })
     $jobChecks = @(if (-not $SkipChecks -and $null -ne $suiteDef -and $suiteDef.ContainsKey('JobChecks')) { $suiteDef.JobChecks })
     $doneFile = Join-Path $ResultDir 'done.json'
     if (-not (Test-Path -LiteralPath $doneFile)) { throw "done.json missing in fetched result: $ResultDir" }
@@ -1709,8 +1691,7 @@ function Publish-RigResult {
             gameVersion = $gameVersion; moduleVersions = $moduleVersions; message = $runMessage; l1Verdict = $l1Verdict
             mode = $runMode; checks = $checkResults
         }
-        # result.txt: one line per run (kind 'soak'); run-result.json: one line per scenario, each followed by
-        # one indented line per failed check of that scenario
+        # One line per scenario, each followed by one indented line per failed check of that scenario
         # (with expectations, a scenario run without scenario results, e.g. a crashed one, gets only its expectation row;
         # a soak run keeps its line: its days reached are part of the verdict)
         $lineSources = if ($rr.Scenarios.Count -gt 0) { $rr.Scenarios } elseif ($expectations.Count -eq 0 -or $runKind -ne 'scenarios') { @([pscustomobject]@{ Id = 'soak'; Status = $rr.Status }) } else { @() }
@@ -1892,6 +1873,14 @@ function Update-RigJobResult {
         if (-not (Test-Path -LiteralPath $jobFile -PathType Leaf)) { throw "job.json not found: $jobFile" }
         $job = Get-Content -LiteralPath $jobFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $jobRuns = @($job.runs | Where-Object { $null -ne $_ })
+        # Jobs of the retired CoherentWarAI harness (result.txt, no run-result.json) cannot be judged any more; a run without
+        # a 'harness' field predates the field, when CoherentWarAI was the only harness.
+        foreach ($jobRun in $jobRuns) {
+            $runHarness = if ($jobRun.PSObject.Properties.Name -contains 'harness') { [string]$jobRun.harness } else { 'CoherentWarAI' }
+            if ($runHarness -cne 'TestRig') {
+                throw "job $JobId ran with the retired harness '$runHarness' (result.txt); it cannot be re-judged."
+            }
+        }
         $days = 0
         if ($jobRuns.Count -eq 0 -or -not [int]::TryParse([string]$jobRuns[0].days, [ref]$days) -or $days -lt 1) {
             throw "$jobFile has no run with a valid 'days'."
@@ -1938,7 +1927,7 @@ function Start-TestRigJob {
         [string]$PackageFrom,
         [int]$Seed, [int]$Days, [string]$Mode,
         [int]$StallMinutes, [int]$BudgetMinutes, [int]$HardTimeoutMinutes,
-        [ValidateSet('CoherentWarAI', 'TestRig')][string]$Harness = 'CoherentWarAI',
+        [ValidateSet('TestRig')][string]$Harness = 'TestRig',
         [string]$Suite,
         [double]$ClaimTimeoutSeconds, [double]$TimeoutMinutes,
         [string]$ConfigPath,

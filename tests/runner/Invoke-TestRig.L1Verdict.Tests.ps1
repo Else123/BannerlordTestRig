@@ -274,7 +274,7 @@ Describe 'Get-RigL1Verdict' {
             @($v.Warnings | Where-Object { $_ -match '^WARN L1 r1 ownExact not judged: ' }).Count | Should Be 1
         }
     }
-    It 'a result without any field (result.txt run): rig error' {
+    It 'a result without any field (no run-result.json): rig error' {
         $v = Get-RigL1Verdict -RunId r1 -Result ([ordered]@{}) -ExpectedModules $script:verdictModules -GameVersion 'v1.4.8' -Baseline $script:ok
         $v.Outcome | Should Be 'RigError'
     }
@@ -408,7 +408,7 @@ Describe 'Publish-RigResult -Suite L1 verdict' {
     }
     It 'other suites get no l1 field and no verdict rows' {
         Write-Job Completed (New-L1ResultJson -Own '5' -ScenariosJson '[{"id":"soak","status":"Passed","seconds":1}]')
-        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -BaselinePath $script:baseFile) | Should Be 0
+        (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 3 -BaselinePath $script:baseFile -SkipChecks) | Should Be 0
         ((Get-JobResult).runs[0].PSObject.Properties.Name -contains 'l1') | Should Be $false
         @($script:lines | Where-Object { $_ -match 'L1-own' }).Count | Should Be 0
     }
