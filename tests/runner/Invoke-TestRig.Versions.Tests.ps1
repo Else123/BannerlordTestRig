@@ -372,6 +372,9 @@ Describe 'expectedGameVersion in job.json' {
             $script:published = @{ JobId = $JobId; Dir = $JobDirectory; Job = (Get-Content -LiteralPath (Join-Path $JobDirectory 'job.json') -Raw | ConvertFrom-Json) }
         }
         Mock Write-Host { $script:lines += "$Object" }
+        # Tower guard (runs because towerGamePath is configured): keep it independent of this machine's Documents and processes.
+        Mock Get-RigTowerDocumentsPath { Join-Path $script:t 'docs' }
+        Mock Get-RigTowerGameProcessId { @() }
         Mock Invoke-RigBuildPackage {
             $m = Join-Path $StageDir 'Modules\CoherentWarAI\bin\Win64_Shipping_Client'
             New-Item -ItemType Directory -Path $m -Force | Out-Null

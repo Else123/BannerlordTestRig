@@ -307,6 +307,12 @@ Describe 'Start-TestRigJob' {
             Join-Path $DestinationRoot $JobId
         }
         Mock Write-Host { }
+        # Tower guard (only runs with towerGamePath, see the -Wait tests below): private Documents folder, no game process.
+        $script:gameProcesses = @()
+        $script:docs = Join-Path $script:t 'docs'
+        New-Item -ItemType Directory -Path $script:docs | Out-Null
+        Mock Get-RigTowerDocumentsPath { $script:docs }
+        Mock Get-RigTowerGameProcessId { $script:gameProcesses }
         # Ad-hoc runs get CW-2 (Check-CommandLog.ps1); these tests are about the transport, not about that check.
         Mock Invoke-RigPostRunCheck { [pscustomobject]@{ Id = $Check.Id; Outcome = 'Passed'; Detail = ''; Rows = @(); ResultPath = '' } }
     }
@@ -390,6 +396,60 @@ Describe 'Start-TestRigJob' {
     It 'returns 1 when the config is missing' {
         Mock Write-Error { }
         (Start-Rig @{ ConfigPath = (Join-Path $script:t 'nope.json') }) | Should Be 1
+    }
+
+    function New-GuardedConfig {
+        $game = Join-Path $script:t 'game'
+        New-Item -ItemType Directory -Path (Join-Path $game 'bin\Win64_Shipping_Client') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $game 'Modules') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $game 'bin\Win64_Shipping_Client\Version.xml'), '<Version><Singleplayer Value="v1.4.8"/></Version>')
+        $c = @{ host = 'testpc'; user = 'rig'; keyPath = 'C:\keys\k'; remoteQueueRoot = 'C:\TestRig\queue'; towerGamePath = $game }
+        [IO.File]::WriteAllText($script:cfg, ($c | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        $game
+    }
+
+    It 'tower guard with -Wait: a game process appearing at the 2nd poll gives exit 3 and towerGuard.gameStartedDuringJob in job-result.json' {
+        $null = New-GuardedConfig
+        $script:msgs = @()
+        Mock Write-Host { $script:msgs += "$Object" }
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1}' }
+        Mock Get-JobState {
+            $script:calls.State++
+            if ($script:calls.State -ge 2) { $script:gameProcesses = @(77) }
+            S $false $true (B $script:calls.State) ($script:calls.State -ge 3)
+        } -ParameterFilter { $JobId }
+        (Start-Rig @{ Wait = $true; ClaimTimeoutSeconds = 5; StaleSeconds = 5; TimeoutMinutes = 1 }) | Should Be 3
+        $script:calls.Receive | Should Be 1
+        $jr = Get-Content -LiteralPath (Join-Path $script:out "results\$($script:published.JobId)\job-result.json") -Raw | ConvertFrom-Json
+        $jr.exitCode | Should Be 3
+        $jr.towerGuard.outcome | Should Be 'Inconclusive'
+        $jr.towerGuard.gameStartedDuringJob | Should Be $true
+        $jr.towerGuard.gameRunningAtStart | Should Be $false
+        ($script:msgs -join "`n") | Should Match 'WARN tower guard: a game or launcher process started on the tower during the job'
+    }
+
+    It 'tower guard with -Wait: nothing happened = Passed in job-result.json, exit 0' {
+        $null = New-GuardedConfig
+        $script:fake = @{ Status = 'completed'; Runs = @(@{ runId = 'r1'; exitClass = 'Completed' }); Json = '{"status":"Completed","daysReached":1}' }
+        $script:stateQueue = @(S $false $true (B 1) $true)
+        (Start-Rig @{ Wait = $true; ClaimTimeoutSeconds = 5; StaleSeconds = 5; TimeoutMinutes = 1 }) | Should Be 0
+        $jr = Get-Content -LiteralPath (Join-Path $script:out "results\$($script:published.JobId)\job-result.json") -Raw | ConvertFrom-Json
+        $jr.towerGuard.outcome | Should Be 'Passed'
+    }
+
+    It 'tower guard with -Wait: claim timeout plus a Modules change on the tower gives exit 1 (not 3) and names the window' {
+        $game = New-GuardedConfig
+        $script:msgs = @()
+        Mock Write-Host { $script:msgs += "$Object" }
+        Mock Publish-Job {
+            $script:calls.Publish++
+            $script:published = @{ JobId = $JobId; Dir = $JobDirectory }
+            Set-Content -LiteralPath (Join-Path $game 'Modules\stray.dll') -Value 'x'
+        }
+        $script:stateQueue = @(S $true $false $null $false)
+        (Start-Rig @{ Wait = $true }) | Should Be 1
+        $script:calls.Receive | Should Be 0
+        ($script:msgs -join "`n") | Should Match 'ERROR tower guard \(until the runner stopped waiting, no result fetched\): tower Modules changed: stray\.dll'
     }
 
     It 'claim timeout: withdraws and exits 3, nothing fetched' {
@@ -901,6 +961,13 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
         $script:published = $null
         $script:calls = @{ Publish = 0 }
         $script:lines = @()
+        # Tower guard: a private Documents folder and no Bannerlord.exe, so the tests do not depend on the machine they run on.
+        $script:docs = Join-Path $script:t 'docs'
+        New-Item -ItemType Directory -Path $script:docs | Out-Null
+        $script:gameProcesses = @()
+        $script:buildHook = $null
+        Mock Get-RigTowerDocumentsPath { $script:docs }
+        Mock Get-RigTowerGameProcessId { $script:gameProcesses }
         $script:fakeRepos = @(
             [pscustomobject]@{ name = 'RepoOne'; sha = ('a' * 40); dirty = $false },
             [pscustomobject]@{ name = 'RepoTwo'; sha = ('b' * 40); dirty = $true })
@@ -913,6 +980,7 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
         Mock Invoke-RigBuildPackage {
             $script:buildCalls += , @{ WorkspaceRoot = $WorkspaceRoot; StageDir = $StageDir; TowerGamePath = $TowerGamePath; MsBuildPath = $MsBuildPath }
             if ($script:buildFailure) { throw $script:buildFailure }
+            if ($script:buildHook) { & $script:buildHook }
             $m = Join-Path $StageDir 'Modules\CoherentWarAI\bin\Win64_Shipping_Client'
             New-Item -ItemType Directory -Path $m -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $m 'CoherentWarAI.dll') -Value 'dll'
@@ -991,6 +1059,51 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
         ($script:lines -join "`n") | Should Match 'tower Modules unchanged'
     }
 
+    It 'tower guard: prints the Passed line and keeps exit 0 when the tower stayed untouched' {
+        Write-BuildConfig @{ towerGamePath = $script:game }
+        (Start-BuildRig @{}) | Should Be 0
+        ($script:lines | Where-Object { $_ -like 'tower guard (until publish only, job not waited for): no game or launcher process*unchanged' }).Count | Should Be 1
+    }
+
+    It 'tower guard: a game or launcher process on the tower gives WARN and exit 3 (job still published)' {
+        Write-BuildConfig @{ towerGamePath = $script:game }
+        $script:gameProcesses = @(4711)
+        (Start-BuildRig @{}) | Should Be 3
+        $script:calls.Publish | Should Be 1
+        ($script:lines -join "`n") | Should Match 'WARN tower guard \(until publish only, job not waited for\): .*running at job start'
+    }
+
+    It 'tower guard: a Documents change during the job (no process seen) is unattributed: WARN and exit 3' {
+        Write-BuildConfig @{ towerGamePath = $script:game }
+        $script:buildHook = { Set-Content -LiteralPath (Join-Path $script:docs 'stray.txt') -Value 'x' }
+        (Start-BuildRig @{}) | Should Be 3
+        ($script:lines -join "`n") | Should Match 'WARN tower guard \(.*\): unattributed Documents change: stray\.txt'
+    }
+
+    It 'tower guard: a Modules change during the job gives ERROR and exit 1' {
+        Write-BuildConfig @{ towerGamePath = $script:game }
+        $script:buildHook = {
+            New-Item -ItemType Directory -Path (Join-Path $script:game 'Modules') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $script:game 'Modules\stray.dll') -Value 'x'
+        }
+        (Start-BuildRig @{}) | Should Be 1
+        ($script:lines -join "`n") | Should Match 'ERROR tower guard \(.*\): tower Modules changed: .*stray\.dll'
+    }
+
+    It 'tower guard: towerDocumentsPath from the config reaches Get-RigTowerDocumentsPath' {
+        Write-BuildConfig @{ towerGamePath = $script:game; towerDocumentsPath = 'D:\Docs\BL' }
+        Start-BuildRig @{} | Out-Null
+        Assert-MockCalled Get-RigTowerDocumentsPath -ParameterFilter { $ConfiguredPath -eq 'D:\Docs\BL' } -Scope It
+    }
+
+    It 'tower guard: with -PackageFrom and no towerGamePath no guard runs (no line, exit 0)' {
+        Write-BuildConfig @{}
+        $pkg = Join-Path $script:t 'pkg2'; New-PackageFixture $pkg
+        $script:gameProcesses = @(4711)
+        (Start-BuildRig @{ PackageFrom = $pkg }) | Should Be 0
+        ($script:lines -join "`n") | Should Not Match 'tower guard'
+    }
+
     It 'missing towerGamePath: exit 1, message names the key, no build, nothing published' {
         Write-BuildConfig @{}
         (Start-BuildRig @{}) | Should Be 1
@@ -1021,6 +1134,7 @@ Describe 'Start-TestRigJob build mode (no -PackageFrom)' {
         Mock Get-JobState { @('20261031-120000-dead') } -ParameterFilter { $OpenJobs }
         (Start-BuildRig @{}) | Should Be 1
         Assert-MockCalled Invoke-RigBuildPackage -Exactly 0 -Scope It
+        Assert-MockCalled Get-RigTowerGameProcessId -Exactly 0 -Scope It   # the tower guard starts only after the open-job check
         $script:calls.Publish | Should Be 0
     }
 

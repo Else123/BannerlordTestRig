@@ -9,6 +9,10 @@
     writes manifest.json (SHA-256 per file, git SHA and dirty flag per repo) next to package.zip and
     puts the repo states into job.json. Config: towerGamePath (required), msbuildPath (optional,
     default VS 2026 Build Tools). A build failure or a changed tower Modules folder exits with 1.
+    With towerGamePath the whole job (also -PackageFrom) is guarded: no game or launcher process may run
+    on the tower and the tower's Modules and Documents folders (towerDocumentsPath, optional) must stay
+    unchanged; see "Tower guard" in docs/JOB-PROTOCOL.md (Modules changed: 1; Documents changed or a
+    process seen: 3).
     -PackageFrom (diagnosis) skips the build: it is a folder that contains Modules\<ModuleId>\...
     Without -Wait the job is published, the jobId is printed and the script exits 0.
     With -Wait it polls until done.json exists and fetches the result to out\results\<jobId>\.
@@ -149,7 +153,7 @@ $script:RigSuites = @{
         Seed              = 1
         Days              = 1
         Kind              = 'scenarios'
-        Scenarios         = @('smithing.smelt-then-refine')
+        Scenarios         = @('smithing.smelt-then-refine', 'smithing.nothing-to-do', 'smithing.travel-stamina')
         WithCoherentWarAI = $false
         ExtraModules      = @('SmithingSuite')
         TailModules       = @('SmithingSuite.Scenarios')
@@ -1545,7 +1549,8 @@ function Wait-RigJob {
         [Parameter(Mandatory)][double]$PollSeconds,
         [Parameter(Mandatory)][double]$AbortWaitSeconds,
         [double]$RetryDelaySeconds = 2,
-        [int]$MaxWithdrawAttempts = 5
+        [int]$MaxWithdrawAttempts = 5,
+        [AllowNull()]$TowerGuard   # sampled for game and launcher processes on every poll (also while the abort is awaited)
     )
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $claimSeen = $false
@@ -1555,6 +1560,7 @@ function Wait-RigJob {
     $pollMs = [int][math]::Max(1, $PollSeconds * 1000)
     while ($true) {
         $st = Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action { Get-JobState -Target $Target -JobId $JobId }
+        if ($null -ne $TowerGuard) { Update-RigTowerGuard -Guard $TowerGuard }
         if ($st.done) { return 'Done' }
 
         if ($sw.Elapsed.TotalSeconds -ge $OverallSeconds) {
@@ -1562,6 +1568,7 @@ function Wait-RigJob {
             $abortSw = [Diagnostics.Stopwatch]::StartNew()
             while ($abortSw.Elapsed.TotalSeconds -lt $AbortWaitSeconds) {
                 Start-Sleep -Milliseconds $pollMs
+                if ($null -ne $TowerGuard) { Update-RigTowerGuard -Guard $TowerGuard }
                 if ((Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action { Get-JobState -Target $Target -JobId $JobId }).done) { return 'DeadlineDone' }
             }
             return 'Deadline'
@@ -1595,6 +1602,40 @@ function Wait-RigJob {
     }
 }
 
+# The console line of a tower guard record (Complete-RigTowerGuard; also one read back from job-result.json).
+function Format-RigTowerGuardLine {
+    param([Parameter(Mandatory)]$Guard)
+    $prefix = switch -CaseSensitive ([string]$Guard.outcome) { 'Passed' { '' } 'Inconclusive' { 'WARN ' } default { 'ERROR ' } }
+    $window = if ($Guard.window -is [string] -and $Guard.window) { " ($($Guard.window))" } else { '' }
+    "${prefix}tower guard${window}: $($Guard.detail)"
+}
+
+# Exit code share of a tower guard record: Passed 0, Inconclusive 3, RigError and anything else 1; no guard 0.
+function Get-RigTowerGuardExitCode {
+    param([AllowNull()]$Guard)
+    if ($null -eq $Guard) { return 0 }
+    switch -CaseSensitive ([string]$Guard.outcome) { 'Passed' { 0 } 'Inconclusive' { 3 } default { 1 } }
+}
+
+# The worse of two runner exit codes by the precedence 1 > 3 > 2 > 0.
+function Join-RigExitCode {
+    param([int]$First, [int]$Second)
+    foreach ($code in 1, 3, 2) {
+        if ($First -eq $code -or $Second -eq $code) { return $code }
+    }
+    [math]::Max($First, $Second)
+}
+
+# Ends the tower guard at an exit that does not reach Publish-RigResult (job not waited for, claim timeout, stale heartbeat,
+# deadline): prints its line (naming the shorter $Window it covered) and joins its code with $Code. Without a guard it returns $Code.
+function Close-RigTowerGuard {
+    param([AllowNull()]$Guard, [Parameter(Mandatory)][int]$Code, [Parameter(Mandatory)][string]$Window)
+    if ($null -eq $Guard) { return $Code }
+    $record = Complete-RigTowerGuard -Guard $Guard -Window $Window
+    Write-RigMessage (Format-RigTowerGuardLine -Guard $record)
+    Join-RigExitCode $Code (Get-RigTowerGuardExitCode -Guard $record)
+}
+
 # Reads the fetched result folder (data only), prints one line per run, writes job-result.json.
 # Returns the exit code.
 function Publish-RigResult {
@@ -1611,7 +1652,8 @@ function Publish-RigResult {
         [string]$JobManifestPath,   # <OutRoot>\jobs\<id>\job.json: the job plan, passed to the JobChecks that use it (-JobManifestPath)
         [AllowNull()][string[]]$CarriedVersionWarnings,   # offline re-judgement: the version warnings of the earlier job-result.json (no tower to compare with)
         [AllowNull()]$RejudgedFrom,   # offline re-judgement: { exitCode; at } written as 'rejudgedFrom' to job-result.json
-        [switch]$SkipChecks,        # do not run the suite's PostRunChecks/JobChecks (tests of the other verdict parts)
+        [AllowNull()]$TowerGuard,     # the tower guard record of the job (Complete-RigTowerGuard; offline: the earlier job-result.json's); $null = none
+        [switch]$SkipChecks,       # do not run the suite's PostRunChecks/JobChecks (tests of the other verdict parts)
         [switch]$ForceTimeout
     )
     if (-not $WorkspaceRoot) { $WorkspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
@@ -1779,9 +1821,11 @@ function Publish-RigResult {
         }
     }
     $versionWarnings | ForEach-Object { Write-RigMessage $_ }
+    if ($null -ne $TowerGuard) { Write-RigMessage (Format-RigTowerGuardLine -Guard $TowerGuard) }
 
     $checkOutcomes = @(@($runs | ForEach-Object { $_.checks }) + $jobCheckResults | Where-Object { $null -ne $_ } | ForEach-Object { $_.Outcome })
     $code = Resolve-RigExitCode -DoneStatus $doneStatus -Runs $runs -Days $Days -Expectations $expectations -CheckOutcomes $checkOutcomes -ForceTimeout:$ForceTimeout
+    $code = Join-RigExitCode $code (Get-RigTowerGuardExitCode -Guard $TowerGuard)   # the tower guard: Passed 0, Inconclusive 3, anything else 1
     $checkJson = {
         param($Result)
         $o = [ordered]@{ id = $Result.Id; outcome = $Result.Outcome; detail = $Result.Detail; resultPath = $Result.ResultPath }
@@ -1844,6 +1888,7 @@ function Publish-RigResult {
             # suites with JobChecks: one entry per check (empty for a job that is not completed); else null
             jobChecks = if ($jobChecks.Count -gt 0) { , @($jobCheckResults | ForEach-Object { & $checkJson $_ }) } else { $null }
             versionWarnings = $versionWarnings
+            towerGuard = $TowerGuard   # null without towerGamePath (and for a job judged before the guard existed)
         }
     if ($null -ne $RejudgedFrom) { $jobResult.rejudgedFrom = $RejudgedFrom }
     Write-RigJsonFile -Path (Join-Path $ResultDir 'job-result.json') -InputObject $jobResult
@@ -1903,8 +1948,10 @@ function Update-RigJobResult {
         Write-RigMessage "re-judging job $JobId offline (suite: $(if ($Suite) { $Suite } else { 'none' }), $days days)"
         # Keep the evidence of the earlier judgement (original exit code, timeout, version warnings) before it is overwritten.
         $carriedWarnings = @()
+        $carriedTowerGuard = $null   # the guard watched the live job: re-judging runs no job, so the earlier record stays as it was
         $rejudgedFrom = $null
         if ($null -ne $previous) {
+            if ($previous.PSObject.Properties.Name -contains 'towerGuard') { $carriedTowerGuard = $previous.towerGuard }
             $copy = Join-Path $resultDir 'job-result.previous.json'
             if (-not (Test-Path -LiteralPath $copy)) { Copy-Item -LiteralPath $previousFile -Destination $copy }   # the first judgement stays
             if ($previous.PSObject.Properties.Name -contains 'versionWarnings') { $carriedWarnings = @($previous.versionWarnings | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) }
@@ -1915,7 +1962,7 @@ function Update-RigJobResult {
         }
         Publish-RigResult -ResultDir $resultDir -JobId $JobId -Days $days -Suite $Suite -ExpectedModules @($job.modules | Where-Object { $null -ne $_ }) `
             -JobRuns $jobRuns -WorkspaceRoot $WorkspaceRoot -BaselinePath $BaselinePath -JobManifestPath $jobFile `
-            -CarriedVersionWarnings $carriedWarnings -RejudgedFrom $rejudgedFrom
+            -CarriedVersionWarnings $carriedWarnings -RejudgedFrom $rejudgedFrom -TowerGuard $carriedTowerGuard
     } catch {
         Write-RigMessage "ERROR: $($_.Exception.Message)"
         1
@@ -1981,6 +2028,12 @@ function Start-TestRigJob {
             Write-RigMessage "ERROR: job '$($open -join ', ')' is still open on the test PC. Refusing to publish (clean up manually if it is stuck)."
             return 1
         }
+        # Tower guard (AC2): from here (before the build) to the result fetch the tower must stay untouched and free of game
+        # and launcher processes. Needs towerGamePath.
+        $guard = $null
+        if (-not [string]::IsNullOrWhiteSpace($towerGamePath)) {
+            $guard = Start-RigTowerGuard -TowerGamePath $towerGamePath -DocumentsPath ([string]$target.towerDocumentsPath)
+        }
 
         $jobId = New-RigJobId
         $jobDir = Join-Path (Join-Path $OutRoot 'jobs') $jobId
@@ -1992,6 +2045,7 @@ function Start-TestRigJob {
                 -TowerGamePath ([string]$target.towerGamePath) -MsBuildPath $msbuildPath -Suite $Suite `
                 -SuiteDefinition $(if ($Suite) { $script:RigSuites[$Suite] } else { $null })
             Write-RigMessage "build: staged in $stageDir; tower Modules unchanged"
+            if ($null -ne $guard) { Update-RigTowerGuard -Guard $guard }
             Copy-Item -LiteralPath $build.ManifestPath -Destination (Join-Path $jobDir 'manifest.json') -ErrorAction Stop
             $repos = @($build.Repos)
             $PackageFrom = $stageDir
@@ -2004,23 +2058,23 @@ function Start-TestRigJob {
 
         Publish-Job -Target $target -JobId $jobId -JobDirectory $jobDir
         Write-RigMessage "jobId: $jobId"
-        if (-not $Wait) { return 0 }
+        if (-not $Wait) { return (Close-RigTowerGuard -Guard $guard -Code 0 -Window 'until publish only, job not waited for') }
 
         $outcome = Wait-RigJob -Target $target -JobId $jobId -ClaimTimeoutSeconds $ClaimTimeoutSeconds -StaleSeconds $StaleSeconds `
             -OverallSeconds ($TimeoutMinutes * 60) -PollSeconds $PollSeconds -AbortWaitSeconds $AbortWaitSeconds `
-            -RetryDelaySeconds $RetryDelaySeconds -MaxWithdrawAttempts $MaxWithdrawAttempts
+            -RetryDelaySeconds $RetryDelaySeconds -MaxWithdrawAttempts $MaxWithdrawAttempts -TowerGuard $guard
         switch ($outcome) {
-            'ClaimTimeout' { Write-RigMessage "ERROR: agent offline - job $jobId was not claimed within $ClaimTimeoutSeconds s and has been withdrawn."; return 3 }
+            'ClaimTimeout' { Write-RigMessage "ERROR: agent offline - job $jobId was not claimed within $ClaimTimeoutSeconds s and has been withdrawn."; return (Close-RigTowerGuard -Guard $guard -Code 3 -Window 'until the runner stopped waiting, no result fetched') }
             'WithdrawPending' {
                 Write-RigMessage "ERROR: job $jobId was not claimed within $ClaimTimeoutSeconds s, but job.json could not be withdrawn after $MaxWithdrawAttempts attempts: job.json may still be pending on the test PC and the agent could still run it. Check $($target.remoteQueueRoot)\jobs\$jobId."
-                return 3
+                return (Close-RigTowerGuard -Guard $guard -Code 3 -Window 'until the runner stopped waiting, no result fetched')
             }
             'StaleHeartbeat' {
                 try { Send-JobAbort -Target $target -JobId $jobId } catch { Write-RigMessage "WARNING: could not send abort for job ${jobId}: $($_.Exception.Message)" }
                 Write-RigMessage "ERROR: agent not responding - heartbeat of job $jobId did not change for $StaleSeconds s."
-                return 3
+                return (Close-RigTowerGuard -Guard $guard -Code 3 -Window 'until the runner stopped waiting, no result fetched')
             }
-            'Deadline' { Write-RigMessage "ERROR: overall timeout; abort sent for job $jobId but no done.json appeared within $AbortWaitSeconds s."; return 3 }
+            'Deadline' { Write-RigMessage "ERROR: overall timeout; abort sent for job $jobId but no done.json appeared within $AbortWaitSeconds s."; return (Close-RigTowerGuard -Guard $guard -Code 3 -Window 'until the runner stopped waiting, no result fetched') }
         }
         $forceTimeout = ($outcome -eq 'DeadlineDone')
         if ($forceTimeout) { Write-RigMessage "WARNING: overall timeout; job $jobId was aborted." }
@@ -2028,9 +2082,10 @@ function Start-TestRigJob {
         $localDir = Invoke-RigWithRetry -DelaySeconds $RetryDelaySeconds -Action {
             Receive-JobResult -Target $target -JobId $jobId -DestinationRoot (Join-Path $OutRoot 'results')
         }
+        $towerGuard = if ($null -ne $guard) { Complete-RigTowerGuard -Guard $guard }   # after the fetch: the whole job is covered
         return (Publish-RigResult -ResultDir $localDir -JobId $jobId -Days $Days -Suite $Suite -TowerGamePath $towerGamePath `
                 -ExpectedModules @($manifest.modules) -JobRuns @($manifest.runs) -WorkspaceRoot $WorkspaceRoot `
-                -JobManifestPath (Join-Path $jobDir 'job.json') -ForceTimeout:$forceTimeout)
+                -JobManifestPath (Join-Path $jobDir 'job.json') -TowerGuard $towerGuard -ForceTimeout:$forceTimeout)
     } catch {
         Write-RigMessage "ERROR: $($_.Exception.Message)"
         return 1

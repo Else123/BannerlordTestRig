@@ -52,7 +52,8 @@ vanilla and tempo are not judged and a WARN line says so. Fill or refresh it fro
 `runner\Update-L1Baseline.ps1 -BaseJobIds <L1-BASE jobId> -L1JobIds <L1 jobId>, <L1 jobId>, <L1 jobId>` (details:
 "L1 verdict" in `docs/JOB-PROTOCOL.md`).
 
-`-Suite SM` runs the SmithingSuite scenario `smithing.smelt-then-refine` (`kind` `scenarios`): harness `TestRig`,
+`-Suite SM` runs the SmithingSuite scenarios `smithing.smelt-then-refine`, `smithing.nothing-to-do` and
+`smithing.travel-stamina`, in this order (`kind` `scenarios`): harness `TestRig`,
 mode `WarSails`, seed 1, 1 day, and only the base modules, SmithingSuite, TestRig.Harness and SmithingSuite.Scenarios
 (no CoherentWarAI). With `-PackageFrom` the package must contain those three modules. Failed checks are printed below
 the scenario row; the exit code is 0 (the scenario Passed), 2 (Failed) or 1 (rig error: the scenario is missing from the
@@ -133,6 +134,16 @@ The build (default mode) compiles the seven projects (eight with `-Suite RIG`, `
 (not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
 repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder
 (`towerGamePath`) changed during the build. `msbuildPath` is optional (default: VS 2026 Build Tools).
+
+Tower guard: with `towerGamePath` configured, the runner watches the whole job (just before the build until the result is
+fetched, also with `-PackageFrom`) for the rig's isolation promise: no game or launcher process (any executable below
+`<towerGamePath>in`) runs on the tower, and neither `<towerGamePath>\Modules` nor the game's Documents folder (default
+`<your Documents>\Mount and Blade II Bannerlord`, or `towerDocumentsPath` in the config; empty = default, a configured path
+must exist) changes. It prints one `tower guard: ...` line and writes `towerGuard` to `job-result.json`. A changed Modules
+folder is exit 1. A changed Documents folder or a game or launcher process seen on the tower (e.g. you play in parallel; the
+launcher and Steam cloud also write to Documents) is `WARN` and exit 3 (inconclusive: repeat the job with the game and launcher
+closed). Without `-Wait` the guard covers only the time until the job is published, and says so. Details:
+`docs/JOB-PROTOCOL.md`, "Tower guard".
 
 Tests (Pester 3.4, Windows PowerShell 5.1): `Invoke-Pester tests\runner` and
 `Invoke-Pester tests\agent`.

@@ -4,5 +4,6 @@
   "keyPath": "C:\\Users\\you\\.ssh\\testrig_ed25519",
   "remoteQueueRoot": "C:\\TestRig\\queue",
   "towerGamePath": "C:\\Games\\Mount & Blade II Bannerlord",
+  "towerDocumentsPath": "",
   "msbuildPath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe"
 }

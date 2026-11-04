@@ -181,6 +181,152 @@ function Compare-RigModulesSnapshot {
     $changed.ToArray()
 }
 
+# Tower guard (AC2 of TESTRIG-SPEC): over a whole job no game or launcher process runs on the tower and neither
+# <game>\Modules nor the Documents folder of the game changes. Outcome: RigError (1) = Modules changed; Inconclusive (3) =
+# Documents changed, or a game or launcher process was seen (at the job start or later): the launcher and Steam cloud write
+# to Documents too (measured: Configs\LauncherData.xml, Configs\NewsFeedConfig.xml, Game Saves\steam_autocloud.vdf), so such
+# a change cannot be attributed to the rig and AC2 is neither met nor refuted; Passed (0) otherwise.
+
+# Ids of the processes on this machine (the tower) whose executable lies below $GameBinPath (<game>\bin: Bannerlord.exe,
+# Bannerlord.Native.exe, the launcher, wrappers such as BLSE). A process whose path cannot be read (protected or gone) is
+# skipped. A function of its own so tests can stand in for it.
+function Get-RigTowerGameProcessId {
+    param([Parameter(Mandatory)][string]$GameBinPath)
+    $prefix = $GameBinPath.TrimEnd('\', '/') + '\'
+    [int[]]@(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+            $path = $null
+            try { $path = $_.Path } catch { }
+            if ($path -and $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $_.Id }
+        })
+}
+
+# The tower's Documents folder of the game: the configured path, else <user's Documents>\Mount and Blade II Bannerlord.
+function Get-RigTowerDocumentsPath {
+    param([string]$ConfiguredPath)
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPath)) { return $ConfiguredPath }
+    Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mount and Blade II Bannerlord'
+}
+
+# Like Get-RigModulesSnapshot, but a folder that does not exist is an empty tree (the game never wrote its Documents
+# folder yet; its later creation is then a change).
+function Get-RigGuardSnapshot {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return (New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal))
+    }
+    Get-RigModulesSnapshot -Path $Path
+}
+
+# Takes the "before" state: both snapshots and the running game processes. Throws (fail closed) when a tree cannot be
+# snapshotted or a configured $DocumentsPath does not exist (only the default Documents folder may be absent: the game
+# never ran for this user yet; it is then an empty tree).
+function Start-RigTowerGuard {
+    param(
+        [Parameter(Mandatory)][string]$TowerGamePath,
+        [string]$DocumentsPath
+    )
+    $towerGame = $TowerGamePath.TrimEnd('\', '/')
+    $modulesPath = Join-Path $towerGame 'Modules'
+    $watchedDocuments = Get-RigTowerDocumentsPath -ConfiguredPath $DocumentsPath
+    $documentsExist = Test-Path -LiteralPath $watchedDocuments -PathType Container
+    if (-not $documentsExist -and -not [string]::IsNullOrWhiteSpace($DocumentsPath)) {
+        throw "tower guard: towerDocumentsPath not found: $watchedDocuments"
+    }
+    $snapshot = {
+        param([string]$Path)
+        try { Get-RigGuardSnapshot -Path $Path } catch { throw "tower guard: cannot watch ${Path}: $($_.Exception.Message)" }
+    }
+    $binPath = Join-Path $towerGame 'bin'
+    [pscustomobject]@{
+        ModulesPath           = $modulesPath
+        DocumentsPath         = $watchedDocuments
+        GameBinPath           = $binPath
+        DocumentsAbsentAtStart = (-not $documentsExist)
+        ModulesBefore         = & $snapshot $modulesPath
+        DocumentsBefore       = & $snapshot $watchedDocuments
+        StartProcessIds       = [int[]]@(Get-RigTowerGameProcessId -GameBinPath $binPath)
+        StartedDuringJob      = $false
+    }
+}
+
+# Samples the game and launcher processes (cheap; called while the job is waited for): one that was not there at the start sets StartedDuringJob.
+function Update-RigTowerGuard {
+    param([Parameter(Mandatory)]$Guard)
+    foreach ($id in @(Get-RigTowerGameProcessId -GameBinPath $Guard.GameBinPath)) {
+        if ($Guard.StartProcessIds -notcontains $id) { $Guard.StartedDuringJob = $true }
+    }
+}
+
+# Joins a list of changed paths for a message: the first 20, then "(and N more)".
+function Format-RigGuardPaths {
+    param([string[]]$Paths)
+    $shown = (@($Paths) | Select-Object -First 20) -join ', '
+    $more = if (@($Paths).Count -gt 20) { " (and $(@($Paths).Count - 20) more)" } else { '' }
+    "$shown$more"
+}
+
+# Takes the "after" state and judges. Returns the record written to job-result.json as 'towerGuard':
+# outcome, detail (the console text), window (what the guard covered when that is less than the whole job, else $null),
+# gameRunningAtStart, gameStartedDuringJob, modulesChanged[], documentsChanged[].
+# $Window names that shorter window (e.g. "until publish only, job not waited for"). A snapshot that cannot be taken
+# gives a RigError record instead of throwing, so the job result is still written.
+function Complete-RigTowerGuard {
+    param([Parameter(Mandatory)]$Guard, [string]$Window)
+    $atStart = ($Guard.StartProcessIds.Count -gt 0)
+    $windowValue = if ([string]::IsNullOrWhiteSpace($Window)) { $null } else { $Window }
+    $path = $Guard.ModulesPath
+    try {
+        Update-RigTowerGuard -Guard $Guard
+        $modulesChanged = [string[]]@(Compare-RigModulesSnapshot -Before $Guard.ModulesBefore -After (Get-RigGuardSnapshot -Path $path))
+        $path = $Guard.DocumentsPath
+        $documentsChanged = [string[]]@(Compare-RigModulesSnapshot -Before $Guard.DocumentsBefore -After (Get-RigGuardSnapshot -Path $path))
+    } catch {
+        return [ordered]@{
+            outcome              = 'RigError'
+            detail               = "tower guard could not snapshot ${path}: $($_.Exception.Message)"
+            window               = $windowValue
+            gameRunningAtStart   = $atStart
+            gameStartedDuringJob = [bool]$Guard.StartedDuringJob
+            modulesChanged       = [string[]]@()
+            documentsChanged     = [string[]]@()
+        }
+    }
+    $during = [bool]$Guard.StartedDuringJob
+    $gameSeen = $atStart -or $during
+
+    $outcome = if ($modulesChanged.Count -gt 0) { 'RigError' }
+    elseif ($documentsChanged.Count -gt 0 -or $gameSeen) { 'Inconclusive' }
+    else { 'Passed' }
+
+    $parts = @()
+    if ($modulesChanged.Count -gt 0) { $parts += "tower Modules changed: $(Format-RigGuardPaths $modulesChanged)" }
+    if ($documentsChanged.Count -gt 0) {
+        $parts += $(if ($gameSeen) { "tower Documents changed: $(Format-RigGuardPaths $documentsChanged)" } else { "unattributed Documents change: $(Format-RigGuardPaths $documentsChanged)" })
+    }
+    if ($atStart) { $parts += 'a game or launcher process was running at job start' }
+    if ($during) { $parts += 'a game or launcher process started on the tower during the job' }
+    if ($outcome -ceq 'Passed') {
+        $parts = @('no game or launcher process seen on the tower; tower Modules and Documents unchanged')
+    } elseif ($outcome -ceq 'Inconclusive') {
+        if ($documentsChanged.Count -gt 0) {
+            $parts += $(if ($gameSeen) { 'Documents changes cannot be attributed to the rig' } else { 'no process seen, so the launcher or Steam cloud may have written there (not attributable to the rig)' })
+        } else {
+            $parts += 'tower Modules and Documents unchanged'
+        }
+        $parts += 'AC2 not demonstrable; repeat the job with the game and launcher closed on the tower'
+    }
+    if ($Guard.DocumentsAbsentAtStart) { $parts += '(Documents folder absent at start)' }
+    [ordered]@{
+        outcome              = $outcome
+        detail               = $parts -join '; '
+        window               = $windowValue
+        gameRunningAtStart   = $atStart
+        gameStartedDuringJob = $during
+        modulesChanged       = $modulesChanged
+        documentsChanged     = $documentsChanged
+    }
+}
+
 # Writes <StageDir>\manifest.json (UTF-8 without BOM): repo states plus, per Modules\<id> folder,
 # the SubModule.xml version and every file with its SHA-256. Returns the manifest path.
 function New-RigBuildManifest {
@@ -267,9 +413,7 @@ function Invoke-RigBuildPackage {
 
     $changes = @(Compare-RigModulesSnapshot -Before $towerBefore -After (Get-RigModulesSnapshot -Path $towerModules))
     if ($changes.Count -gt 0) {
-        $shown = ($changes | Select-Object -First 20) -join ', '
-        $more = if ($changes.Count -gt 20) { " (and $($changes.Count - 20) more)" } else { '' }
-        throw "tower Modules changed during the build: $shown$more"
+        throw "tower Modules changed during the build: $(Format-RigGuardPaths $changes)"
     }
 
     # An MSBuild exit code of 0 does not prove the module was staged (e.g. a project that ignores the output path).

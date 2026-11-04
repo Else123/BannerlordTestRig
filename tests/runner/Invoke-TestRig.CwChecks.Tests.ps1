@@ -498,6 +498,25 @@ Describe 'Update-RigJobResult (offline re-judgement)' {
         (Get-CwJobResult).rejudgedFrom.exitCode | Should Be 3
         (@((Get-CwJobResult).versionWarnings) -join '|') | Should BeExactly 'WARN game version differs|WARN module X differs'
     }
+    It 'carries the tower guard record of the live job over (offline there is no tower to watch): same outcome, exit code and line' {
+        $original = '{"jobId":"x","suite":"L1","exitCode":3,"runs":[],"towerGuard":{"outcome":"Inconclusive","detail":"Bannerlord.exe was running at job start","gameRunningAtStart":true,"gameStartedDuringJob":false,"modulesChanged":[],"documentsChanged":[]}}'
+        [IO.File]::WriteAllText((Join-Path $script:f.ResultDir 'job-result.json'), $original)
+        (Rejudge) | Should Be 3
+        $r = Get-CwJobResult
+        $r.towerGuard.outcome | Should BeExactly 'Inconclusive'
+        $r.towerGuard.gameRunningAtStart | Should Be $true
+        @($r.towerGuard.modulesChanged).Count | Should Be 0
+        (Get-CwLines '^WARN tower guard: Bannerlord\.exe was running at job start$').Count | Should Be 1
+        # a second re-judgement carries it again
+        (Rejudge) | Should Be 3
+        (Get-CwJobResult).towerGuard.outcome | Should BeExactly 'Inconclusive'
+    }
+    It 'an earlier job-result.json without towerGuard (older job): towerGuard null, no guard line, exit unchanged' {
+        [IO.File]::WriteAllText((Join-Path $script:f.ResultDir 'job-result.json'), '{"jobId":"x","suite":"L1","exitCode":0,"runs":[]}')
+        (Rejudge) | Should Be 0
+        (Get-CwJobResult).towerGuard | Should Be $null
+        (Get-CwLines 'tower guard').Count | Should Be 0
+    }
     It 'without an earlier job-result.json there is nothing to keep: no previous file, no rejudgedFrom, no version warnings' {
         (Rejudge 'L1') | Should Be 0
         Test-Path -LiteralPath (Join-Path $script:f.ResultDir 'job-result.previous.json') | Should Be $false

@@ -271,7 +271,7 @@ Describe 'Invoke-TestRig.ps1 -Suite (powershell -File)' {
             $j.runs[0].seed | Should Be 1
             $j.runs[0].days | Should Be 1
             $j.runs[0].kind | Should Be 'scenarios'
-            @($j.runs[0].scenarios)[0] | Should Be 'smithing.smelt-then-refine'
+            (@($j.runs[0].scenarios) -join ',') | Should Be 'smithing.smelt-then-refine,smithing.nothing-to-do,smithing.travel-stamina'
             ($j.modules[-3..-1] -join ',') | Should Be 'SmithingSuite,TestRig.Harness,SmithingSuite.Scenarios'
             ($j.modules -contains 'CoherentWarAI') | Should Be $false
         }
@@ -360,12 +360,12 @@ Describe 'New-RigJobManifest scenarios' {
         if ($Suite) { $p.Suite = $Suite }
         New-RigJobManifest @p
     }
-    It '-Suite SM: kind scenarios, scenarios = the one scenario id (a JSON array), SM module list' {
+    It '-Suite SM: kind scenarios, scenarios = the three SM ids in order (a JSON array), SM module list' {
         $json = ConvertTo-RigJson (New-Manifest 'SM')
         $o = $json | ConvertFrom-Json
         $o.runs[0].kind | Should Be 'scenarios'
-        $json | Should Match '"scenarios":\s*\[\s*"smithing\.smelt-then-refine"\s*\]'
-        @($o.runs[0].scenarios).Count | Should Be 1
+        $json | Should Match '"scenarios":\s*\[\s*"smithing\.smelt-then-refine",\s*"smithing\.nothing-to-do",\s*"smithing\.travel-stamina"\s*\]'
+        @($o.runs[0].scenarios).Count | Should Be 3
         @($o.runs[0].scenarios)[0] | Should Be $script:smId
         ($o.modules -join ',') | Should Be ($script:smModules -join ',')
     }
@@ -394,7 +394,7 @@ Describe 'Publish-RigResult: failed checks of a scenario run' {
     AfterEach { Remove-Item -LiteralPath $script:t -Recurse -Force -ErrorAction SilentlyContinue }
     function Write-RunResult([string]$Json) { [IO.File]::WriteAllText((Join-Path $script:rd 'r1\run-result.json'), $Json) }
     function Get-JobResult { Get-Content -LiteralPath (Join-Path $script:rd 'job-result.json') -Raw | ConvertFrom-Json }
-    $failed = '{"schema":1,"status":"Completed","scenarios":[{"id":"smithing.smelt-then-refine","status":"Failed","seconds":12},{"id":"other.one","status":"Passed","seconds":3}],' +
+    $failed = '{"schema":1,"status":"Completed","scenarios":[{"id":"smithing.smelt-then-refine","status":"Failed","seconds":12},{"id":"other.one","status":"Passed","seconds":3},{"id":"smithing.nothing-to-do","status":"Passed","seconds":2},{"id":"smithing.travel-stamina","status":"Passed","seconds":4}],' +
         '"checks":[{"name":"smelted > 0","expected":">0","actual":"0","passed":false,"scenario":"smithing.smelt-then-refine"},' +
         '{"name":"setup ok","expected":"true","actual":"true","passed":true,"scenario":"smithing.smelt-then-refine"},' +
         '{"name":"other check","expected":"7","actual":"9","passed":false,"scenario":"other.one"}]}'
@@ -440,7 +440,7 @@ Describe 'Publish-RigResult: failed checks of a scenario run' {
         $c[0].passed | Should Be $false
     }
     It 'a Passed scenario run prints one row and no check lines, exit 0' {
-        Write-RunResult '{"schema":1,"status":"Completed","scenarios":[{"id":"smithing.smelt-then-refine","status":"Passed","seconds":5}],"checks":[{"name":"smelted > 0","expected":">0","actual":"4","passed":true,"scenario":"smithing.smelt-then-refine"}]}'
+        Write-RunResult '{"schema":1,"status":"Completed","scenarios":[{"id":"smithing.smelt-then-refine","status":"Passed","seconds":5},{"id":"smithing.nothing-to-do","status":"Passed","seconds":2},{"id":"smithing.travel-stamina","status":"Passed","seconds":4}],"checks":[{"name":"smelted > 0","expected":">0","actual":"4","passed":true,"scenario":"smithing.smelt-then-refine"}]}'
         (Publish-RigResult -ResultDir $script:rd -JobId $script:id -Days 1 -Suite SM) | Should Be 0
         @($script:lines | Where-Object { $_ -match 'SM-smithing\.smelt-then-refine\s+Passed' }).Count | Should Be 1
         @($script:lines | Where-Object { $_ -match 'smelted > 0' }).Count | Should Be 0

@@ -489,7 +489,7 @@ written (exit `1`). Several base jobs are pooled. It prints the derived values a
 base-run tempo spread (max - min) / median exceeds 10 % or the slowest L1 run is below 0.8 x the base median.
 
 `-Suite SM` (SmithingSuite scenarios) sets harness `TestRig`, mode `WarSails`, seed 1, `days` 1, `kind` `scenarios`,
-`scenarios` `["smithing.smelt-then-refine"]` and the `modules` load order `Bannerlord.Harmony, Bannerlord.ButterLib,
+`scenarios` `["smithing.smelt-then-refine", "smithing.nothing-to-do", "smithing.travel-stamina"]` and the `modules` load order `Bannerlord.Harmony, Bannerlord.ButterLib,
 Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore, Sandbox, StoryMode, NavalDLC, SmithingSuite,
 TestRig.Harness, SmithingSuite.Scenarios` (no CoherentWarAI; the scenario module loads after the harness it references).
 With `-PackageFrom` the package must contain `SmithingSuite`, `TestRig.Harness` and `SmithingSuite.Scenarios`. The
@@ -623,6 +623,47 @@ measured` when a value is missing). Above the R2 start values [A] (walk mean > 1
 the package must contain `TestRig.Harness` and `TestRig.SelfTest`. Overall deadline (formula as for `-Suite L1-BASE`):
 42 minutes with the defaults.
 
+### Tower guard (runner)
+
+The rig builds on the tower but never runs the game there (the game runs on the test PC). The runner checks this over the
+whole job, from just before the build until the result is fetched (also with `-PackageFrom`), when `towerGamePath` is
+configured:
+
+- the tower's `<towerGamePath>\Modules` and its Documents folder `Mount and Blade II Bannerlord` (config `towerDocumentsPath`;
+  absent or empty: `<current user's Documents>\Mount and Blade II Bannerlord`) are snapshotted at the start (path, length,
+  `LastWriteTimeUtc`) and compared again after the fetch; the build additionally keeps its own Modules check. A junction or
+  unreadable subtree fails the job with exit 1 before anything is built (`tower guard: cannot watch <path>: ...`); so does a
+  configured `towerDocumentsPath` that does not exist (`towerDocumentsPath not found: ...`). Only the default Documents folder
+  may be absent (then an empty tree; its detail ends with `(Documents folder absent at start)`). A snapshot that fails at the
+  end gives outcome `RigError` (`tower guard could not snapshot <path>: <message>`) and `job-result.json` is still written;
+- game and launcher processes on the tower are sampled at the start, after the build, on every poll while waiting (also while
+  the abort is awaited) and after the fetch. A process counts when its executable lies below `<towerGamePath>\bin\`
+  (`Bannerlord.exe`, `Bannerlord.Native.exe`, `TaleWorlds.MountAndBlade.Launcher.exe`, BLSE wrappers, ...); a process whose
+  path cannot be read is skipped. A process that starts and ends between two samples is not seen.
+
+Outcome and exit code (joined with the job's own code by the precedence 1 > 3 > 2 > 0):
+
+| Outcome | When | Exit |
+|---------|------|------|
+| `Passed` | no game or launcher process seen, Modules and Documents unchanged | 0 |
+| `Inconclusive` | Documents changed, or a game or launcher process was seen (running at the job start, or started during the job), Modules unchanged. The launcher and Steam cloud write to Documents too (measured: `Configs\LauncherData.xml`, `Configs\NewsFeedConfig.xml`, `Game Saves\steam_autocloud.vdf`), so a Documents change is never attributed to the rig; without a seen process the detail says `unattributed Documents change` | 3 |
+| `RigError` | tower `Modules` changed, or the guard could not snapshot a tree at the end | 1 |
+
+Console line (after the version warnings): `tower guard: no game or launcher process seen on the tower; tower Modules and
+Documents unchanged`, or `WARN tower guard: <reasons>; AC2 not demonstrable; repeat the job with the game and launcher closed
+on the tower`, or `ERROR tower guard: tower Modules changed: <paths> ...` (at most 20 paths, then `(and N more)`). The job is
+published and run in every case; only the verdict changes. If the runner leaves before the fetch, the guard line is printed
+there, names the shorter window (`tower guard (until publish only, job not waited for): ...` without `-Wait`;
+`tower guard (until the runner stopped waiting, no result fetched): ...` for claim timeout, withdraw pending, stale heartbeat
+and deadline) and its code is joined with that exit code; no `job-result.json` exists then.
+
+`job-result.json` field `towerGuard` (`null` without `towerGamePath`, and for a job judged before the guard existed):
+`{ "outcome": "Passed"|"Inconclusive"|"RigError", "detail": "<the console text>", "window": null, "gameRunningAtStart": bool,
+"gameStartedDuringJob": bool, "modulesChanged": [ "<path relative to Modules, '/' separated>" ], "documentsChanged": [ ... ] }`
+(the lists are complete, empty when unchanged; `window` is `null` for a guard that covered the whole job, as always in
+`job-result.json` written after a fetch). Offline re-judgement (`Update-JobResult.ps1`) runs no job and has no tower to
+watch: it carries the earlier `towerGuard` over unchanged into the new file (also into the exit code and the console line).
+
 ### Version warnings (runner)
 
 After fetching, the runner compares the game version and the versions of modules with source `game` or `workshop`
@@ -716,7 +757,7 @@ a scenario with status `Failed`, a `Failed` row of the L1 verdict, see "L1 verdi
 `3` time limit, hang or agent not responding (`HardTimeout`, `Hung`, `Aborted`, done status `aborted`, claim
 timeout, stale heartbeat, overall deadline; the runner aborts at its deadline and, best effort,
 on a stale heartbeat). The suite checks add their own codes (`Failed` 2, `Inconclusive` 3, `RigError` 1, see "Suite
-checks"). Precedence:
+checks"); so does the tower guard (`Inconclusive` 3, `RigError` 1, see "Tower guard"). Precedence:
 1 > 3 > 2 > 0. An unknown `exitClass` or `status` maps to `1`. Scenario statuses (case-insensitive): `Passed`,
 `Timeout` and `Skipped` do not change the code by themselves (except the requested-scenario rule above), `Failed` gives `2`, `Error` and any other value (unknown
 string, empty, `null`, non-string) give `1`.
