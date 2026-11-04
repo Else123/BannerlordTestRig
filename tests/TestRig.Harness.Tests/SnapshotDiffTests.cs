@@ -76,5 +76,114 @@ namespace TestRig.Harness.Tests
             Assert.Throws<ArgumentNullException>(() => SnapshotDiff.ValueChanges(null, empty));
             Assert.Throws<ArgumentNullException>(() => SnapshotDiff.ValueChanges(empty, null));
         }
+
+        private static IReadOnlyDictionary<string, int> Counts(params object[] keyValues)
+        {
+            var map = new Dictionary<string, int>();
+            for (int i = 0; i < keyValues.Length; i += 2)
+            {
+                map[(string)keyValues[i]] = (int)keyValues[i + 1];
+            }
+
+            return map;
+        }
+
+        [Fact]
+        public void EquipmentCounts_CountsDuplicatesAndSkipsEmptyValues()
+        {
+            var equipment = new Dictionary<string, string>
+            {
+                ["Head"] = "helm",
+                ["Body"] = "mail",
+                ["Ring1"] = "ring",
+                ["Ring2"] = "ring",
+                ["Cape"] = "",
+                ["Gloves"] = null,
+            };
+
+            IReadOnlyDictionary<string, int> counts = SnapshotDiff.EquipmentCounts(equipment);
+
+            Assert.Equal(3, counts.Count);
+            Assert.Equal(1, counts["helm"]);
+            Assert.Equal(1, counts["mail"]);
+            Assert.Equal(2, counts["ring"]);
+        }
+
+        [Fact]
+        public void EquipmentCounts_EmptyMap_IsEmpty()
+        {
+            Assert.Empty(SnapshotDiff.EquipmentCounts(new Dictionary<string, string>()));
+        }
+
+        [Fact]
+        public void EquipmentCounts_NullArgument_Throws()
+        {
+            Assert.Throws<ArgumentNullException>(() => SnapshotDiff.EquipmentCounts(null));
+        }
+
+        [Fact]
+        public void ConservationDelta_ArmorMovedFromRosterToSlot_BalancesToEmpty()
+        {
+            var before = new[] { Counts("mail", 1), Counts() };
+            var after = new[] { Counts(), Counts("mail", 1) };
+
+            Assert.Empty(SnapshotDiff.ConservationDelta(before, after));
+        }
+
+        [Fact]
+        public void ConservationDelta_Duplication_GivesPlusOne()
+        {
+            var before = new[] { Counts("mail", 1), Counts() };
+            var after = new[] { Counts("mail", 1), Counts("mail", 1) };
+
+            IReadOnlyDictionary<string, int> delta = SnapshotDiff.ConservationDelta(before, after);
+
+            Assert.Single(delta);
+            Assert.Equal(1, delta["mail"]);
+        }
+
+        [Fact]
+        public void ConservationDelta_Loss_GivesMinusOne()
+        {
+            var before = new[] { Counts("mail", 1), Counts("helm", 1) };
+            var after = new[] { Counts(), Counts("helm", 1) };
+
+            IReadOnlyDictionary<string, int> delta = SnapshotDiff.ConservationDelta(before, after);
+
+            Assert.Single(delta);
+            Assert.Equal(-1, delta["mail"]);
+        }
+
+        [Fact]
+        public void ConservationDelta_SwapWithModifierKeys_ReportsBothKeys()
+        {
+            var before = new[] { Counts("mail#fine", 1), Counts("mail", 1) };
+            var after = new[] { Counts("mail", 2), Counts() };
+
+            IReadOnlyDictionary<string, int> delta = SnapshotDiff.ConservationDelta(before, after);
+
+            Assert.Equal(2, delta.Count);
+            Assert.Equal(-1, delta["mail#fine"]);
+            Assert.Equal(1, delta["mail"]);
+        }
+
+        [Fact]
+        public void ConservationDelta_EmptyMapsAndSequences_AreEmpty()
+        {
+            Assert.Empty(SnapshotDiff.ConservationDelta(new IReadOnlyDictionary<string, int>[0], new IReadOnlyDictionary<string, int>[0]));
+            Assert.Empty(SnapshotDiff.ConservationDelta(new[] { Counts() }, new[] { Counts(), Counts() }));
+        }
+
+        [Fact]
+        public void ConservationDelta_NullArgumentOrElement_Throws()
+        {
+            var ok = new[] { Counts("a", 1) };
+            var withNull = new IReadOnlyDictionary<string, int>[] { Counts("a", 1), null };
+
+            Assert.Throws<ArgumentNullException>(() => SnapshotDiff.ConservationDelta(null, ok));
+            Assert.Throws<ArgumentNullException>(() => SnapshotDiff.ConservationDelta(ok, null));
+            Assert.Throws<ArgumentNullException>(() => SnapshotDiff.ConservationDelta(withNull, ok));
+            Assert.Throws<ArgumentNullException>(() => SnapshotDiff.ConservationDelta(ok, withNull));
+        }
     }
 }

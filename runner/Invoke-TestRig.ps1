@@ -38,12 +38,14 @@
     CW-2 (tools\Check-CommandLog.ps1, row <run> <Suite>-coherentwarai.command-log) on every Completed run with that run's
     mode and -MinDays = the days; CW1 also runs CW-1 (tools\Compare-Ac25a.ps1, rows job CW1-coherentwarai.ac25a-*) over the
     job. A FAIL is exit 2, an Inconclusive verdict exit 3, a missing log, script or result exit 1 (same precedence).
+    -Suite X runs the cross-mod scenario crossmod.trade-with-autoequip in two runs (r1 .done, r2 .cancel; 5 minutes each,
+    Completed expected) with AutoTraderSpeed, CompanionManagementSuite, the harness and CrossMod.Scenarios.
     runner\Update-JobResult.ps1 -JobId <jobId> re-judges a fetched job offline (rewrites its job-result.json).
 
 .PARAMETER Suite
     A fixed test setup from the suite table (case-insensitive; '' or omitted = no suite): L1 (soak, all four mods, health
     bracket, L1 verdict, CW-2), L1-BASE (vanilla baseline for L1), SM (SmithingSuite scenarios), CS (CompanionManagementSuite
-    scenarios), AT (AutoTraderSpeed scenarios), CW1 (AC25a comparison of CoherentWarAI, CW-2 and CW-1), RIG (rig self-test).
+    scenarios), AT (AutoTraderSpeed scenarios), CW1 (AC25a comparison of CoherentWarAI, CW-2 and CW-1), RIG (rig self-test), X (cross-mod AutoTraderSpeed + CompanionManagementSuite, two runs).
 
 .EXAMPLE
     .\runner\Invoke-TestRig.ps1 -Days 3 -Wait
@@ -175,6 +177,22 @@ $script:RigSuites = @{
         WithCoherentWarAI = $false
         ExtraModules      = @('AutoTraderSpeed')
         TailModules       = @('AutoTraderSpeed.Scenarios')
+    }
+    # Cross-mod suite (S9, X-1): AutoTraderSpeed with CompanionManagementSuite, one scenario id per run (F-S9-1): the
+    # trade with auto-equip confirmed (done) and cancelled (cancel).
+    X = @{
+        Harness           = 'TestRig'
+        Mode              = 'WarSails'
+        Seed              = 1
+        Days              = 1
+        Kind              = 'scenarios'
+        WithCoherentWarAI = $false
+        ExtraModules      = @('AutoTraderSpeed', 'CompanionManagementSuite')
+        TailModules       = @('CrossMod.Scenarios')
+        Runs              = @(
+            @{ RunId = 'r1'; Seed = 1; Scenarios = @('crossmod.trade-with-autoequip.done'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r2'; Seed = 1; Scenarios = @('crossmod.trade-with-autoequip.cancel'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' }
+        )
     }
     # AC25a comparison (S10, F-S10-4/7): only CoherentWarAI, 30 days. Seeds 1-3, per seed WarSails, FeatureOff, FeatureOff,
     # WarSails (the order evens out drift); every run records the army digest (coherentwarai.ac25a-digest).

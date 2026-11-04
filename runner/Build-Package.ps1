@@ -12,6 +12,7 @@ $script:RigTailModuleProjects = @{
     'AutoTraderSpeed.Scenarios'        = @('BannerlordAutoTrader', 'tests\InGame\AutoTraderSpeed.Scenarios\AutoTraderSpeed.Scenarios.csproj')
     'CompanionManagementSuite.Scenarios' = @('CompanionManagementSuite', 'tests\InGame\CompanionManagementSuite.Scenarios\CompanionManagementSuite.Scenarios.csproj')
     'TestRig.SelfTest'                 = @('BannerlordTestRig', 'src\TestRig.SelfTest\TestRig.SelfTest.csproj')
+    'CrossMod.Scenarios'               = @('BannerlordTestRig', 'scenarios\CrossMod\CrossMod.Scenarios\CrossMod.Scenarios.csproj')
 }
 
 # The seven base projects plus one per TailModules entry not already in the base set (a suite's scenario modules), relative

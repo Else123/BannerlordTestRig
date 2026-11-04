@@ -20,7 +20,7 @@ not implemented yet; the layout below is the plan.
 
 ```powershell
 copy runner\runner.config.example.json runner\runner.config.json   # then edit host, user, key, towerGamePath
-runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects (eight with -Suite RIG/CS/AT/CW1, ten with -Suite L1), packs them, publishes the job
+runner\Invoke-TestRig.ps1 -Days 1 -Wait          # builds the seven projects (eight with -Suite RIG/CS/AT/CW1/X, ten with -Suite L1), packs them, publishes the job
 runner\Invoke-TestRig.ps1 -PackageFrom <folder with Modules\CoherentWarAI\...> -Days 1 -Wait   # diagnosis: skip the build
 ```
 
@@ -61,6 +61,15 @@ AutoTraderSpeed, TestRig.Harness and AutoTraderSpeed.Scenarios. With `-PackageFr
 modules. Exit code of both (as for `-Suite SM`): 0 if every scenario Passed, 2 if one Failed, 1 for a rig error (a
 scenario missing from the result, Skipped or in error, or the job not completed), 3 if the agent aborted the job or the
 runner deadline hit; a failed check is printed below its scenario row.
+
+`-Suite X` is the cross-mod scenario X-1 (AutoTraderSpeed with CompanionManagementSuite): harness `TestRig`, seed 1, one job
+with two runs (`r1` scenario `crossmod.trade-with-autoequip.done`, `r2` `crossmod.trade-with-autoequip.cancel`; hard timeout
+5 minutes each, `Completed` expected; each run is a fresh campaign with its own seed 1). Modules: the base modules,
+AutoTraderSpeed, CompanionManagementSuite, TestRig.Harness and CrossMod.Scenarios (no CoherentWarAI). The seed and hard
+timeout are fixed per run, so an explicit `-Seed` or `-HardTimeoutMinutes` is a usage error (exit 1). Every run must end
+`Completed` with its scenario Passed. Exit code (as for `-Suite RIG`): 0 if every run meets its expectation, 2 if one does
+not (a Failed scenario, or a scenario missing from a completed run), 1 if the job is not completed or a run is missing, 3 if
+the agent aborted the job or the runner deadline hit.
 
 `-Suite CW1` is the AC25a comparison of CoherentWarAI: harness `TestRig`, only the base modules, CoherentWarAI,
 TestRig.Harness and CoherentWarAI.Scenarios (no other mod), 30 days. One job with twelve runs r1-r12 (`kind` `scenarios`,
@@ -113,7 +122,7 @@ every run must end `Completed` with all days reached (exit codes as for `-Suite 
 fixed per run, so `-Seed` and `-HardTimeoutMinutes` are usage errors. Overall deadline (same formula as RIG): 67 minutes
 with the defaults. The build compiles only TestRig.Harness; with `-PackageFrom` the package must contain it.
 
-The build (default mode) compiles the seven projects (eight with `-Suite RIG`, `CS`, `AT` or `CW1`, ten with `-Suite L1`, only the harness with `-Suite L1-BASE`) with MSBuild into `out\stage\<jobId>\Modules`
+The build (default mode) compiles the seven projects (eight with `-Suite RIG`, `CS`, `AT`, `CW1` or `X`, ten with `-Suite L1`, only the harness with `-Suite L1-BASE`) with MSBuild into `out\stage\<jobId>\Modules`
 (not into the game folder), writes `manifest.json` (SHA-256 per file, git SHA and dirty flag per
 repo) next to `package.zip` and fails with exit code 1 if the game's `Modules` folder
 (`towerGamePath`) changed during the build. `msbuildPath` is optional (default: VS 2026 Build Tools).

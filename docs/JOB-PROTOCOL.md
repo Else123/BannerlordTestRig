@@ -491,7 +491,7 @@ base-run tempo spread (max - min) / median exceeds 10 % or the slowest L1 run is
 Bannerlord.UIExtenderEx, Bannerlord.MBOptionScreen, Native, SandBoxCore, Sandbox, StoryMode, NavalDLC, SmithingSuite,
 TestRig.Harness, SmithingSuite.Scenarios` (no CoherentWarAI; the scenario module loads after the harness it references).
 With `-PackageFrom` the package must contain `SmithingSuite`, `TestRig.Harness` and `SmithingSuite.Scenarios`. The
-default build mode builds seven projects for every job (eight with `-Suite RIG`, `CS`, `AT` or `CW1`, ten with
+default build mode builds seven projects for every job (eight with `-Suite RIG`, `CS`, `AT`, `CW1` or `X`, ten with
 `-Suite L1`, one with `-Suite L1-BASE`), including `BannerlordSmithingSuite\tests\InGame\SmithingSuite.Scenarios`.
 
 `-Suite CS` (CompanionManagementSuite) and `-Suite AT` (AutoTraderSpeed) are scenario suites like SM: harness `TestRig`,
@@ -501,6 +501,14 @@ mode `WarSails`, seed 1, `days` 1, `kind` `scenarios`, one run `r1`. CS: `scenar
 `modules` = base modules, `AutoTraderSpeed`, `TestRig.Harness`, `AutoTraderSpeed.Scenarios`. No CoherentWarAI. Exit codes
 as for SM (no per-run expectations): 0 all scenarios Passed, 2 one Failed, 1 rig error (missing, Skipped, Error), 3
 abort or runner deadline. The scenario row prefix is the suite (`CS-companion.equip-now`).
+
+`-Suite X` (cross-mod scenario X-1) has per-run expectations: harness `TestRig`, mode `WarSails`, seed 1, `days` 1, `kind`
+`scenarios`, two runs `r1` (`["crossmod.trade-with-autoequip.done"]`) and `r2` (`["crossmod.trade-with-autoequip.cancel"]`),
+hard timeout 5 minutes, expected exit class `Completed`; each run carries its own `seed` 1, so an explicit `-Seed` or
+`-HardTimeoutMinutes` is a usage error. `modules` = base modules, `AutoTraderSpeed`, `CompanionManagementSuite`,
+`TestRig.Harness`, `CrossMod.Scenarios`. No CoherentWarAI. Exit codes as for RIG and CW1: 0 every run meets its expectation,
+2 one does not (a Failed scenario or a scenario missing from a completed run), 1 job not completed or run missing, 3 abort
+or runner deadline.
 
 `-Suite CW1` (AC25a comparison) has per-run expectations and per-run modes. `modules` = base modules, `CoherentWarAI`,
 `TestRig.Harness`, `CoherentWarAI.Scenarios` (no other mod); `days` 30 (an explicit `-Days` applies to all runs). Twelve

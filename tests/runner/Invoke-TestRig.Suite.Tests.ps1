@@ -212,7 +212,7 @@ Describe 'Invoke-TestRig.ps1 -Suite (powershell -File)' {
         $out = (& powershell -NoProfile -File $script:suiteScript -PackageFrom C:\nowhere -Suite L2 2>&1 | Out-String)
         $LASTEXITCODE | Should Be 1
         $out | Should Match "unknown -Suite 'L2'"
-        $out | Should Match 'Valid suites: AT, CS, CW1, L1, L1-BASE, RIG, SM\.'
+        $out | Should Match 'Valid suites: AT, CS, CW1, L1, L1-BASE, RIG, SM, X\.'
         $out | Should Not Match 'Config not found'
     }
     It 'a conflicting -Harness is a usage error, exit 1 before the config is read' {
@@ -1611,6 +1611,46 @@ Describe 'Suite CS and AT' {
             @($j.runs)[0].runId | Should Be 'r1'
             (@($j.runs)[0].scenarios -join ',') | Should Be ($script:RigSuites[$s].Scenarios -join ',')
         }
+    }
+}
+
+Describe 'Suite X' {
+    BeforeEach {
+        $script:x = New-RigJobManifest -JobId '20261103-100000-a1b2' -CreatedUtc ([datetime]'2026-11-03T10:00:00Z').ToUniversalTime() `
+            -PackageSha256 'ABC' -Seed 1 -Days 1 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite X
+    }
+    It 'loads the base, AutoTraderSpeed, CompanionManagementSuite, the harness, then CrossMod.Scenarios (no CoherentWarAI)' {
+        ($script:x.modules -join ',') | Should Be (($script:baseModules + @('AutoTraderSpeed', 'CompanionManagementSuite', 'TestRig.Harness', 'CrossMod.Scenarios')) -join ',')
+        ($script:x.modules -contains 'CoherentWarAI') | Should Be $false
+        Get-RigSuiteKind -Suite X | Should Be 'scenarios'
+    }
+    It 'job.json has two runs: r1 done and r2 cancel, seed 1, 5 minutes, kind scenarios' {
+        (@($script:x.runs | ForEach-Object { $_.runId }) -join ',') | Should Be 'r1,r2'
+        (@($script:x.runs | ForEach-Object { @($_.scenarios) -join '+' }) -join ',') |
+            Should Be 'crossmod.trade-with-autoequip.done,crossmod.trade-with-autoequip.cancel'
+        foreach ($run in @($script:x.runs)) {
+            $run.kind | Should Be 'scenarios'
+            $run.harness | Should Be 'TestRig'
+            $run.seed | Should Be 1
+            $run.hardTimeoutMinutes | Should Be 5
+        }
+    }
+    It 'every run expects Completed' {
+        $runs = @(Get-RigSuiteRuns -Suite X)
+        $runs.Count | Should Be 2
+        foreach ($r in $runs) { $r.ExpectedExitClass | Should Be 'Completed' }
+    }
+    It 'each run fixes seed 1 (fresh campaign per variant): -Seed is a usage error' {
+        foreach ($r in @(Get-RigSuiteRuns -Suite X)) { $r.Seed | Should Be 1 }
+        { Resolve-RigSuiteSettings -Suite X -BoundParameters @('Suite', 'Seed') -Harness TestRig -Mode WarSails -Seed 2 -Days 1 } | Should Throw 'fixes the seed'
+        { Resolve-RigSuiteSettings -Suite X -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 1 } | Should Not Throw
+    }
+    It 'builds the seven plus CrossMod.Scenarios from repo BannerlordTestRig' {
+        $r = @(Get-RigSuiteBuildProjects -WorkspaceRoot 'C:\ws' -Suite 'X')
+        $r.Count | Should Be 8
+        $r[7].ModuleId | Should Be 'CrossMod.Scenarios'
+        $r[7].Repo | Should Be 'BannerlordTestRig'
+        $r[7].ProjectPath | Should Be 'C:\ws\BannerlordTestRig\scenarios\CrossMod\CrossMod.Scenarios\CrossMod.Scenarios.csproj'
     }
 }
 
