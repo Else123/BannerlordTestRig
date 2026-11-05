@@ -577,11 +577,30 @@ Describe 'Config patching' {
         $path = Join-Path $rig.Docs 'mcm.json'
         Set-McmSettingsValues $path $false
         $o = Read-Utf8Text $path | ConvertFrom-Json
-        $o.EnableChainOfCommand | Should Be $false
-        $o.EnableNavalOrders | Should Be $false
+        # FeatureOff switches only the marshal doctrine off; chain of command and naval orders stay on
+        $o.EnableMarshalDoctrine | Should Be $false
+        $o.EnableChainOfCommand | Should Be $true
+        $o.EnableNavalOrders | Should Be $true
         $o.EnableLogging | Should Be $true
         Set-McmSettingsValues $path $true
-        (Read-Utf8Text $path | ConvertFrom-Json).EnableChainOfCommand | Should Be $true
+        $o = Read-Utf8Text $path | ConvertFrom-Json
+        $o.EnableMarshalDoctrine | Should Be $true
+        $o.EnableChainOfCommand | Should Be $true
+        $o.EnableNavalOrders | Should Be $true
+    }
+}
+
+Describe 'Config patching: existing MCM file' {
+    It 'FeatureOff pulls an existing EnableChainOfCommand=false and EnableNavalOrders=false to true and only the doctrine goes off' {
+        $rig = New-Rig
+        $path = Join-Path $rig.Docs 'mcm-existing.json'
+        [System.IO.File]::WriteAllText($path, '{ "EnableChainOfCommand": false, "EnableNavalOrders": false, "EnableMarshalDoctrine": true, "Other": 3 }', (New-Object System.Text.UTF8Encoding($false)))
+        Set-McmSettingsValues $path $false
+        $o = Read-Utf8Text $path | ConvertFrom-Json
+        $o.EnableMarshalDoctrine | Should Be $false
+        $o.EnableChainOfCommand | Should Be $true
+        $o.EnableNavalOrders | Should Be $true
+        $o.Other | Should Be 3
     }
 }
 

@@ -316,6 +316,34 @@ Describe 'Publish-RigResult JobChecks (CW-1 per job) and exit precedence' {
         (Get-CwLines '^    FAIL  r1 day 4 Lucon \(Defense only\)$').Count | Should Be 1
         @((Get-CwJobResult).jobChecks[0].violations)[0] | Should BeExactly 'r1 day 4 Lucon (Defense only)'
     }
+    It 'document-level warnings are shown once below the first check row and written to job-result.json, without changing the exit code' {
+        Set-CompareSpec @('Passed', 'Passed')
+        $spec = Join-Path $script:f.ResultDir 'compare-spec.json'
+        $json = [IO.File]::ReadAllText($spec)
+        [IO.File]::WriteAllText($spec, ($json.TrimEnd().TrimEnd('}') + ',"warnings":["r1: unreadable calendar x","armydays: MDE is large"]}'))
+        (Publish) | Should Be 0
+        (Get-CwLines '^    WARN  r1: unreadable calendar x$').Count | Should Be 1
+        (Get-CwLines '^    WARN  armydays: MDE is large$').Count | Should Be 1
+        $checks = @((Get-CwJobResult).jobChecks)
+        @($checks[0].warnings).Count | Should Be 2
+        @($checks[0].warnings)[0] | Should BeExactly 'r1: unreadable calendar x'
+        @($checks[1].warnings).Count | Should Be 0
+    }
+    It 'a bare-string warnings value is one warning; null, an empty list and blank texts give no WARN row and an empty warnings array' {
+        $spec = Join-Path $script:f.ResultDir 'compare-spec.json'
+        foreach ($case in @(@{ Json = '"only one"'; Rows = 1; Count = 1 }, @{ Json = 'null'; Rows = 0; Count = 0 },
+                @{ Json = '[]'; Rows = 0; Count = 0 }, @{ Json = '[""]'; Rows = 0; Count = 0 }, @{ Json = '["", "  ", "kept"]'; Rows = 1; Count = 1 })) {
+            Set-CompareSpec @('Passed', 'Passed')
+            $json = [IO.File]::ReadAllText($spec)
+            [IO.File]::WriteAllText($spec, ($json.TrimEnd().TrimEnd('}') + ',"warnings":' + $case.Json + '}'))
+            $script:lines = @()
+            (Publish) | Should Be 0
+            (Get-CwLines '^    WARN  ').Count | Should Be $case.Rows
+            $checks = @((Get-CwJobResult).jobChecks)
+            @($checks[0].warnings).Count | Should Be $case.Count
+            @($checks[1].warnings).Count | Should Be 0
+        }
+    }
     It 'Inconclusive beats Failed: exit 3' {
         Set-CompareSpec @('Failed', 'Inconclusive')
         (Publish) | Should Be 3

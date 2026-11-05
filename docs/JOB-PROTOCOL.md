@@ -520,7 +520,9 @@ runs `r1`-`r12`, `kind` `scenarios`, `scenarios` `["coherentwarai.ac25a-digest"]
 `Mode`, which the runner writes to that run's `runs[].mode` instead of the `-Mode` value. Rules: an explicit `-Mode` is a
 usage error when the runs fix their modes (as `-Seed`); every run mode must load the same module list as the job's mode
 (`WarSails` and `FeatureOff` do, `NoDlc` drops NavalDLC), else usage error (runner exit 1 before anything is built).
-`FeatureOff` itself is applied by the agent (it writes the MCM settings of the run after the baseline restore). Exit codes
+`FeatureOff` itself is applied by the agent (it writes the MCM settings of the run after the baseline restore): it sets only
+`EnableMarshalDoctrine=false` (the army lock of the marshal doctrine); `EnableChainOfCommand` and `EnableNavalOrders` stay
+`true` in every mode, so naval orders bind lords the same way in both arms. Exit codes
 as for `-Suite RIG`. Overall deadline: 12 x (10 + 2) + claim wait + 5 = 151 minutes with the defaults. The harness limit
 of 300 s per scenario holds for 30 days with a factor of about 3; with far more days (about 80 and up) the digest
 scenario can run into it. CW1 also runs CW-2 per run and CW-1 per job (see "Suite checks").
@@ -541,7 +543,9 @@ process; the runner reads only the JSON it writes (a stale file is deleted first
   `<Script> -JobPath <job result folder> -ResultPath <job result folder>\<ResultFile>`, plus
   `-JobManifestPath <OutRoot>\jobs\<jobId>\job.json` for a check with `UsesJobManifest` (CW-1) when that file exists: the
   job plan is not part of the results folder (also passed by the offline re-judgement). The result is
-  `{ "checks": [ { "check", "verdict", "detail", "violations"? } ] }`. Verdicts `Passed`, `Failed`, `Inconclusive`; any
+  `{ "checks": [ { "check", "verdict", "detail", "violations"? } ], "warnings"? }`; the optional top-level `warnings` (list of
+  strings) belongs to the document and is reported once, with the first check (console `    WARN  <text>` rows, `warnings`
+  in `job-result.json`); it never changes a verdict or the exit code. Verdicts `Passed`, `Failed`, `Inconclusive`; any
   other (including `RigError`, which the script reports for missing or broken artifacts), no check or no result (e.g. the
   script exits 1: job folder unusable) = `RigError` under the JobCheck's `Id`; an entry without a `check` name takes the
   JobCheck's `Id`. A script that runs longer than 10 minutes is killed and counts as no result (`RigError`). If any run
@@ -574,7 +578,7 @@ job    CW1-coherentwarai.ac25a-invariant Failed       <detail>  <job>\ac25a-comp
 other rules, with the precedence 1 > 3 > 2 > 0. `job-result.json`: each run of such a suite holds `checks` (one
 `{ "id", "outcome", "detail", "resultPath", "rows": [ { "ac", "expected": "PASS", "actual", "evidence" } ] }` per
 PostRunCheck; an empty array for a run that is not `Completed`); on job level `jobChecks` holds one
-`{ "id", "outcome", "detail", "resultPath", "violations": [...] }` per check (an empty array for a job that is not
+`{ "id", "outcome", "detail", "resultPath", "violations": [...], "warnings": [...] }` per check (an empty array for a job that is not
 completed, `null` for a suite without JobChecks).
 
 Offline re-judgement: `runner\Update-JobResult.ps1 -JobId <jobId> [-Suite <suite>]` judges `out\results\<jobId>` again as

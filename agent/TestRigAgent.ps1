@@ -219,12 +219,15 @@ function Set-BannerlordConfigValues {
 }
 
 function Set-McmSettingsValues {
-    # Creates the file with only the three keys if it does not exist.
+    # Creates the file with only the four keys if it does not exist.
+    # FeatureOff switches only the marshal doctrine (army lock) off: chain of command and naval orders stay on,
+    # so naval orders bind lords the same way in both arms of a comparison.
     param([string]$Path, [bool]$FeatureOn)
     $expected = @{
-        EnableChainOfCommand = $FeatureOn
-        EnableNavalOrders    = $FeatureOn
-        EnableLogging        = $true
+        EnableMarshalDoctrine = $FeatureOn
+        EnableChainOfCommand  = $true
+        EnableNavalOrders     = $true
+        EnableLogging         = $true
     }
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $bom = Test-Utf8Bom $Path
@@ -234,7 +237,7 @@ function Set-McmSettingsValues {
         $bom = $false
         $text = "{`r`n}`r`n"
     }
-    foreach ($name in @('EnableChainOfCommand', 'EnableNavalOrders', 'EnableLogging')) {
+    foreach ($name in @('EnableMarshalDoctrine', 'EnableChainOfCommand', 'EnableNavalOrders', 'EnableLogging')) {
         $text = Set-JsonBoolProperty $text $name $expected[$name]
     }
     Assert-JsonBools $text $expected   # never write invalid JSON: MCM would overwrite the file with defaults

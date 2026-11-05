@@ -1482,11 +1482,18 @@ function Invoke-RigJobCheck {
     $entries = @(if ($null -eq $r.Problem) { $r.Document.checks | Where-Object { $null -ne $_ } })
     if ($null -ne $r.Problem -or $entries.Count -eq 0) {
         $problem = if ($null -ne $r.Problem) { $r.Problem } else { "no checks in $resultPath" }
-        return [pscustomobject]@{ Id = $Check.Id; Outcome = 'RigError'; Detail = $problem; Violations = @(); ResultPath = $resultPath }
+        return [pscustomobject]@{ Id = $Check.Id; Outcome = 'RigError'; Detail = $problem; Violations = @(); Warnings = @(); ResultPath = $resultPath }
     }
+    # The result document may carry a top-level 'warnings' list (Compare-Ac25a.ps1). It belongs to the document, not to one
+    # check, so it is reported once, with the first entry.
+    $docWarnings = @(if ($r.Document.PSObject.Properties.Name -contains 'warnings') { @($r.Document.warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ }) })
+    $first = $true
     foreach ($e in $entries) {
         $verdict = [string]$e.verdict
+        $entryWarnings = @(if ($first) { $docWarnings })
+        $first = $false
         [pscustomobject]@{
+            Warnings = $entryWarnings
             Id = Format-RigCheckField $(if ([string]::IsNullOrWhiteSpace([string]$e.check)) { $Check.Id } else { [string]$e.check }) 80
             Outcome = if ($verdict -cin 'Passed', 'Failed', 'Inconclusive') { $verdict } else { 'RigError' }
             Detail = Format-RigCheckField ([string]$e.detail) 400
@@ -1511,6 +1518,9 @@ function Format-RigCheckLines {
     }
     if ($Result.PSObject.Properties.Name -contains 'Violations') {
         foreach ($v in @($Result.Violations)) { '    FAIL  {0}' -f (Format-RigCheckField $v 300) }
+    }
+    if ($Result.PSObject.Properties.Name -contains 'Warnings') {
+        foreach ($w in @($Result.Warnings)) { '    WARN  {0}' -f (Format-RigCheckField $w 300) }
     }
 }
 
@@ -1833,6 +1843,7 @@ function Publish-RigResult {
             $o.rows = @($Result.Rows | ForEach-Object { [ordered]@{ ac = $_.Ac; expected = 'PASS'; actual = $_.Verdict; evidence = $_.Evidence } })
         }
         if ($Result.PSObject.Properties.Name -contains 'Violations') { $o.violations = @($Result.Violations) }
+        if ($Result.PSObject.Properties.Name -contains 'Warnings') { $o.warnings = @($Result.Warnings) }
         $o
     }
     $jobResult = [ordered]@{
