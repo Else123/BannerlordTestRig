@@ -104,11 +104,22 @@ namespace TestRig.Harness.Tests
 
         [Theory]
         [InlineData("FeatureOff", HarnessMode.FeatureOff)]
+        [InlineData("AllOff", HarnessMode.AllOff)]
+        [InlineData("alloff", HarnessMode.AllOff)]
         [InlineData("nodlc", HarnessMode.NoDlc)]
         [InlineData("WARSAILS", HarnessMode.WarSails)]
         public void Parse_ModeIsCaseInsensitive(string value, HarnessMode expected)
         {
             Assert.Equal(expected, ValidConfig("seed=1\ndays=1\nmode=" + value).Mode);
+        }
+
+        [Fact]
+        public void Parse_UnknownMode_ErrorListsEveryMode()
+        {
+            RunConfigResult result = RunConfig.Parse("seed=1\ndays=1\nmode=Bogus");
+
+            Assert.Equal(RunConfigStatus.Invalid, result.Status);
+            Assert.Equal("invalid value for 'mode' (expected WarSails, NoDlc, FeatureOff or AllOff): Bogus", result.Error);
         }
 
         [Fact]

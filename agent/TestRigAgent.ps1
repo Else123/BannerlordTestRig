@@ -44,7 +44,7 @@ $script:ConfigMutexName = 'Global\BannerlordTestRigConfig'
 # <workRoot>\<this>: written before a job first changes the game configuration, deleted only after a successful restore
 # of the baseline. While it exists Save-TestRigBaseline.ps1 refuses (the documents may still hold the run patch).
 $script:RestorePendingFile = 'restore-pending'
-$script:ValidModes = @('WarSails', 'NoDlc', 'FeatureOff')
+$script:ValidModes = @('WarSails', 'NoDlc', 'FeatureOff', 'AllOff')
 $script:LaunchFailedSeconds = 30
 $script:AbortCheckSeconds = 3
 $script:DialogCheckSeconds = 1
@@ -219,14 +219,18 @@ function Set-BannerlordConfigValues {
 }
 
 function Set-McmSettingsValues {
-    # Creates the file with only the four keys if it does not exist.
-    # FeatureOff switches only the marshal doctrine (army lock) off: chain of command and naval orders stay on,
-    # so naval orders bind lords the same way in both arms of a comparison.
-    param([string]$Path, [bool]$FeatureOn)
+    # Creates the file with only the four keys if it does not exist. $Mode is the run's job.json mode:
+    # WarSails and NoDlc: every feature on.
+    # FeatureOff: only the marshal doctrine (army lock) off; chain of command and naval orders stay on,
+    #   so naval orders bind lords the same way in both arms of a comparison.
+    # AllOff: doctrine, chain of command and naval orders off (vanilla-like baseline).
+    # Logging stays on in every mode (the command log is read by the suite checks).
+    param([string]$Path, [ValidateSet('WarSails', 'NoDlc', 'FeatureOff', 'AllOff')][string]$Mode)
+    $allOff = $Mode -eq 'AllOff'
     $expected = @{
-        EnableMarshalDoctrine = $FeatureOn
-        EnableChainOfCommand  = $true
-        EnableNavalOrders     = $true
+        EnableMarshalDoctrine = -not ($allOff -or $Mode -eq 'FeatureOff')
+        EnableChainOfCommand  = -not $allOff
+        EnableNavalOrders     = -not $allOff
         EnableLogging         = $true
     }
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
@@ -1743,7 +1747,7 @@ function Invoke-Run {
         New-Item -ItemType Directory -Path $configsDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Split-Path $mcmPath) -Force | Out-Null
         Set-BannerlordConfigValues (Join-Path $configsDir 'BannerlordConfig.txt')
-        Set-McmSettingsValues $mcmPath ($Run.mode -ne 'FeatureOff')
+        Set-McmSettingsValues $mcmPath $Run.mode
 
         New-Item -ItemType Directory -Path $harnessDir -Force | Out-Null
         foreach ($stale in @($runResultPath, ($runResultPath + '.tmp'), $harnessLogPath)) {

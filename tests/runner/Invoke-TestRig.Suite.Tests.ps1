@@ -1655,11 +1655,11 @@ Describe 'Suite CW1' {
         ($script:cw.modules -join ',') | Should Be (($script:baseModules + @('CoherentWarAI', 'TestRig.Harness', 'CoherentWarAI.Scenarios')) -join ',')
         foreach ($mod in 'AutoTraderSpeed', 'SmithingSuite', 'CompanionManagementSuite') { ($script:cw.modules -contains $mod) | Should Be $false }
     }
-    It 'job.json has the 12 runs r1-r12: seeds 1-3, per seed WarSails, FeatureOff, FeatureOff, WarSails, 30 days, 10 minutes' {
-        (@($script:cw.runs | ForEach-Object { $_.runId }) -join ',') | Should Be 'r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12'
-        (@($script:cw.runs | ForEach-Object { $_.seed }) -join ',') | Should Be '1,1,1,1,2,2,2,2,3,3,3,3'
+    It 'job.json has the 18 runs r1-r18: seeds 1-3, per seed WarSails, FeatureOff, AllOff, AllOff, FeatureOff, WarSails, 30 days, 10 minutes' {
+        (@($script:cw.runs | ForEach-Object { $_.runId }) -join ',') | Should Be ((1..18 | ForEach-Object { "r$_" }) -join ',')
+        (@($script:cw.runs | ForEach-Object { $_.seed }) -join ',') | Should Be '1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,3,3'
         (@($script:cw.runs | ForEach-Object { $_.mode }) -join ',') |
-            Should Be 'WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails'
+            Should Be (@('WarSails', 'FeatureOff', 'AllOff', 'AllOff', 'FeatureOff', 'WarSails') * 3 -join ',')
         foreach ($run in @($script:cw.runs)) {
             $run.kind | Should Be 'scenarios'
             $run.harness | Should Be 'TestRig'
@@ -1673,13 +1673,13 @@ Describe 'Suite CW1' {
             -Seed 1 -Days 1 -Mode NoDlc -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite RIG
         foreach ($run in @($j.runs)) { $run.mode | Should Be 'NoDlc' }
     }
-    It 'every run expects Completed; the deadline is 12 x (10 + 2) + claim wait + 5' {
+    It 'every run expects Completed; the deadline is 18 x (10 + 2) + claim wait + 5' {
         foreach ($x in @(Get-RigSuiteRuns -Suite CW1)) { $x.ExpectedExitClass | Should Be 'Completed' }
-        Get-RigSuiteTimeoutMinutes -Suite CW1 | Should Be 151
+        Get-RigSuiteTimeoutMinutes -Suite CW1 | Should Be 223
     }
     It 'Get-RigSuiteRuns carries the run mode, $null for runs without one' {
         (@(Get-RigSuiteRuns -Suite CW1 | ForEach-Object { $_.Mode }) -join ',') |
-            Should Be 'WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails,WarSails,FeatureOff,FeatureOff,WarSails'
+            Should Be (@('WarSails', 'FeatureOff', 'AllOff', 'AllOff', 'FeatureOff', 'WarSails') * 3 -join ',')
         foreach ($x in @(Get-RigSuiteRuns -Suite RIG)) { $x.Mode | Should Be $null }
     }
     It 'an explicit -Mode is a usage error (the runs fix their modes); an explicit -Seed too' {
@@ -1688,10 +1688,10 @@ Describe 'Suite CW1' {
         { Resolve-RigSuiteSettings -Suite CW1 -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 30 } | Should Not Throw
         (Resolve-RigSuiteSettings -Suite CW1 -BoundParameters @('Suite') -Harness TestRig -Mode NoDlc -Seed 9 -Days 5).Days | Should Be 30
     }
-    It 'a -Days shorter than 30 keeps the 12 runs and their modes (smoke)' {
+    It 'a -Days shorter than 30 keeps the 18 runs and their modes (smoke)' {
         $j = New-RigJobManifest -JobId '20261103-100000-a1b2' -CreatedUtc ([datetime]'2026-11-03T10:00:00Z').ToUniversalTime() -PackageSha256 'ABC' `
             -Seed 1 -Days 3 -Mode WarSails -StallMinutes 5 -BudgetMinutes 60 -HardTimeoutMinutes 20 -Harness TestRig -Suite CW1
-        @($j.runs).Count | Should Be 12
+        @($j.runs).Count | Should Be 18
         foreach ($run in @($j.runs)) { $run.days | Should Be 3 }
     }
     It 'a run mode with another module list than the job (NoDlc) is a usage error' {
@@ -1701,7 +1701,8 @@ Describe 'Suite CW1' {
                 @{ RunId = 'r2'; Mode = 'NoDlc'; Scenarios = @('x.y'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' }) }
         try {
             { Resolve-RigSuiteSettings -Suite MIXED -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 1 } | Should Throw 'NoDlc'
-            $script:RigSuites['MIXED'].Runs = @(@{ RunId = 'r1'; Mode = 'FeatureOff'; Scenarios = @('x.y'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' })
+            $script:RigSuites['MIXED'].Runs = @(@{ RunId = 'r1'; Mode = 'FeatureOff'; Scenarios = @('x.y'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' },
+                @{ RunId = 'r2'; Mode = 'AllOff'; Scenarios = @('x.y'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' })
             { Resolve-RigSuiteSettings -Suite MIXED -BoundParameters @('Suite') -Harness TestRig -Mode WarSails -Seed 1 -Days 1 } | Should Not Throw
         } finally { $script:RigSuites.Remove('MIXED') }
     }

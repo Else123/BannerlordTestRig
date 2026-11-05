@@ -108,7 +108,14 @@ restart (see "Agent restart"); any other stuck open job is cleaned up manually.
 
   History: the harness `CoherentWarAI` (module `CoherentWarAI.TestHarness`, folder `CoherentWarAI\harness`) was retired
   on 2026-11-04 (last state: commit `8f1bd1f` in BannerlordCoherentWarAI).
-- `mode`: `WarSails` | `NoDlc` | `FeatureOff`.
+- `mode`: `WarSails` | `NoDlc` | `FeatureOff` | `AllOff`. All but `NoDlc` load NavalDLC. The agent writes the CoherentWarAI
+  MCM settings of the run (`Configs\ModSettings\Global\CoherentWarAI\CoherentWarAI_v1.json`, after the baseline restore) per mode:
+
+  | `mode` | `EnableMarshalDoctrine` | `EnableChainOfCommand` | `EnableNavalOrders` | `EnableLogging` |
+  |--------|-------------------------|------------------------|---------------------|-----------------|
+  | `WarSails`, `NoDlc` | `true` | `true` | `true` | `true` |
+  | `FeatureOff` | `false` | `true` | `true` | `true` |
+  | `AllOff` | `false` | `false` | `false` | `true` |
 - Unknown `schema` or a missing required field -> job finishes with `done.json` status `rejected`.
 
 ## `package.zip`
@@ -513,18 +520,19 @@ hard timeout 5 minutes, expected exit class `Completed`; each run carries its ow
 or runner deadline.
 
 `-Suite CW1` (AC25a comparison) has per-run expectations and per-run modes. `modules` = base modules, `CoherentWarAI`,
-`TestRig.Harness`, `CoherentWarAI.Scenarios` (no other mod); `days` 30 (an explicit `-Days` applies to all runs). Twelve
-runs `r1`-`r12`, `kind` `scenarios`, `scenarios` `["coherentwarai.ac25a-digest"]`, `hardTimeoutMinutes` 10, each expected
-`Completed` with its scenario Passed, with `runs[].seed` 1, 2, 3 (four runs each) and `runs[].mode` per seed `WarSails`,
-`FeatureOff`, `FeatureOff`, `WarSails`. `mode` is already a per-run field of `job.json`; a suite run definition may set
+`TestRig.Harness`, `CoherentWarAI.Scenarios` (no other mod); `days` 30 (an explicit `-Days` applies to all runs). Eighteen
+runs `r1`-`r18`, `kind` `scenarios`, `scenarios` `["coherentwarai.ac25a-digest"]`, `hardTimeoutMinutes` 10, each expected
+`Completed` with its scenario Passed, with `runs[].seed` 1, 2, 3 (six runs each) and `runs[].mode` per seed `WarSails`,
+`FeatureOff`, `AllOff`, `AllOff`, `FeatureOff`, `WarSails` (the mirrored order evens out drift; `AllOff` is the
+vanilla-like reference level). `mode` is already a per-run field of `job.json`; a suite run definition may set
 `Mode`, which the runner writes to that run's `runs[].mode` instead of the `-Mode` value. Rules: an explicit `-Mode` is a
 usage error when the runs fix their modes (as `-Seed`); every run mode must load the same module list as the job's mode
-(`WarSails` and `FeatureOff` do, `NoDlc` drops NavalDLC), else usage error (runner exit 1 before anything is built).
-`FeatureOff` itself is applied by the agent (it writes the MCM settings of the run after the baseline restore): it sets only
-`EnableMarshalDoctrine=false` (the army lock of the marshal doctrine); `EnableChainOfCommand` and `EnableNavalOrders` stay
-`true` in every mode, so naval orders bind lords the same way in both arms. Exit codes
-as for `-Suite RIG`. Overall deadline: 12 x (10 + 2) + claim wait + 5 = 151 minutes with the defaults. The harness limit
-of 300 s per scenario holds for 30 days with a factor of about 3; with far more days (about 80 and up) the digest
+(`WarSails`, `FeatureOff` and `AllOff` do, `NoDlc` drops NavalDLC), else usage error (runner exit 1 before anything is
+built). The modes are applied by the agent (it writes the MCM settings of the run after the baseline restore, see `mode`
+above): `FeatureOff` sets only `EnableMarshalDoctrine=false` (the army lock of the marshal doctrine) and keeps
+`EnableChainOfCommand` and `EnableNavalOrders` `true`, so naval orders bind lords the same way as in `WarSails`; `AllOff`
+switches all three off. Exit codes as for `-Suite RIG`. Overall deadline: 18 x (10 + 2) + claim wait + 5 = 223 minutes
+with the defaults. The harness limit of 300 s per scenario holds for 30 days with a factor of about 3; with far more days (about 80 and up) the digest
 scenario can run into it. CW1 also runs CW-2 per run and CW-1 per job (see "Suite checks").
 
 ### Suite checks (runner, after the fetch)

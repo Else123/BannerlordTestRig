@@ -5,7 +5,7 @@ using System.Globalization;
 namespace TestRig.Harness.Logic
 {
     /// <summary>Which game configuration a harness run exercises.</summary>
-    public enum HarnessMode { WarSails, NoDlc, FeatureOff }
+    public enum HarnessMode { WarSails, NoDlc, FeatureOff, AllOff }
 
     /// <summary>Outcome class of parsing the run config file.</summary>
     public enum RunConfigStatus { Inert, Valid, Invalid }
@@ -327,7 +327,7 @@ namespace TestRig.Harness.Logic
                 }
             }
 
-            return "invalid value for 'mode' (expected WarSails, NoDlc or FeatureOff): " + value;
+            return "invalid value for 'mode' (expected WarSails, NoDlc, FeatureOff or AllOff): " + value;
         }
 
         // .NET number parsing tolerates trailing NUL characters; a config value must not.

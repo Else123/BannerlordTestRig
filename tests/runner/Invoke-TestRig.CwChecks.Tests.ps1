@@ -259,7 +259,7 @@ Describe 'Publish-RigResult PostRunChecks for an ad-hoc run (no -Suite): CW-2 as
         (Get-CwLines '^r1\s+coherentwarai\.command-log Error\s+log missing: .*CoherentWarAI\.log').Count | Should Be 1
         Test-Path -LiteralPath (Join-Path $script:f.ResultDir 'r1\coherentwarai.command-log.json.args') | Should Be $false
     }
-    foreach ($mode in 'NoDlc', 'FeatureOff') {
+    foreach ($mode in 'NoDlc', 'FeatureOff', 'AllOff') {
         It "the job.json mode of the run is passed on ($mode)" {
             Write-CwDone completed @('r1'); Write-CwRun r1 $script:passRows
             (Publish -Mode $mode) | Should Be 0

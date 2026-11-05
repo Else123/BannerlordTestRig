@@ -572,21 +572,40 @@ Describe 'Config patching' {
         $text | Should Match 'EnableTutorialHints=False'
         Test-Utf8Bom $path | Should Be $true
     }
-    It 'writes the MCM json per feature flag' {
+    # Doctrine, chain of command, naval orders, logging per mode; FeatureOff switches only the marshal doctrine off,
+    # AllOff (vanilla-like baseline) all three features, logging stays on in every mode.
+    $mcmCases = @(
+        @{ Mode = 'WarSails'; Doctrine = $true; Chain = $true; Naval = $true },
+        @{ Mode = 'NoDlc'; Doctrine = $true; Chain = $true; Naval = $true },
+        @{ Mode = 'FeatureOff'; Doctrine = $false; Chain = $true; Naval = $true },
+        @{ Mode = 'AllOff'; Doctrine = $false; Chain = $false; Naval = $false })
+    foreach ($case in $mcmCases) {
+        It "writes the MCM json for mode $($case.Mode)" {
+            $rig = New-Rig
+            $path = Join-Path $rig.Docs 'mcm.json'
+            Set-McmSettingsValues $path $case.Mode
+            $o = Read-Utf8Text $path | ConvertFrom-Json
+            $o.EnableMarshalDoctrine | Should Be $case.Doctrine
+            $o.EnableChainOfCommand | Should Be $case.Chain
+            $o.EnableNavalOrders | Should Be $case.Naval
+            $o.EnableLogging | Should Be $true
+        }
+    }
+    It 'switching modes on the same file flips the values both ways' {
         $rig = New-Rig
         $path = Join-Path $rig.Docs 'mcm.json'
-        Set-McmSettingsValues $path $false
-        $o = Read-Utf8Text $path | ConvertFrom-Json
-        # FeatureOff switches only the marshal doctrine off; chain of command and naval orders stay on
-        $o.EnableMarshalDoctrine | Should Be $false
-        $o.EnableChainOfCommand | Should Be $true
-        $o.EnableNavalOrders | Should Be $true
-        $o.EnableLogging | Should Be $true
-        Set-McmSettingsValues $path $true
+        Set-McmSettingsValues $path 'AllOff'
+        Set-McmSettingsValues $path 'WarSails'
         $o = Read-Utf8Text $path | ConvertFrom-Json
         $o.EnableMarshalDoctrine | Should Be $true
         $o.EnableChainOfCommand | Should Be $true
         $o.EnableNavalOrders | Should Be $true
+        Set-McmSettingsValues $path 'AllOff'
+        $o = Read-Utf8Text $path | ConvertFrom-Json
+        $o.EnableMarshalDoctrine | Should Be $false
+        $o.EnableChainOfCommand | Should Be $false
+        $o.EnableNavalOrders | Should Be $false
+        $o.EnableLogging | Should Be $true
     }
 }
 
@@ -595,11 +614,23 @@ Describe 'Config patching: existing MCM file' {
         $rig = New-Rig
         $path = Join-Path $rig.Docs 'mcm-existing.json'
         [System.IO.File]::WriteAllText($path, '{ "EnableChainOfCommand": false, "EnableNavalOrders": false, "EnableMarshalDoctrine": true, "Other": 3 }', (New-Object System.Text.UTF8Encoding($false)))
-        Set-McmSettingsValues $path $false
+        Set-McmSettingsValues $path 'FeatureOff'
         $o = Read-Utf8Text $path | ConvertFrom-Json
         $o.EnableMarshalDoctrine | Should Be $false
         $o.EnableChainOfCommand | Should Be $true
         $o.EnableNavalOrders | Should Be $true
+        $o.Other | Should Be 3
+    }
+    It 'AllOff turns an existing all-true file off and keeps other keys' {
+        $rig = New-Rig
+        $path = Join-Path $rig.Docs 'mcm-existing.json'
+        [System.IO.File]::WriteAllText($path, '{ "EnableChainOfCommand": true, "EnableNavalOrders": true, "EnableMarshalDoctrine": true, "EnableLogging": false, "Other": 3 }', (New-Object System.Text.UTF8Encoding($false)))
+        Set-McmSettingsValues $path 'AllOff'
+        $o = Read-Utf8Text $path | ConvertFrom-Json
+        $o.EnableMarshalDoctrine | Should Be $false
+        $o.EnableChainOfCommand | Should Be $false
+        $o.EnableNavalOrders | Should Be $false
+        $o.EnableLogging | Should Be $true
         $o.Other | Should Be 3
     }
 }
@@ -745,6 +776,37 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
         $doneItem.LastWriteTimeUtc -ge (Get-Item (Join-Path $jobDir 'state.json')).LastWriteTimeUtc | Should Be $true
         @(Get-ChildItem $rig.Queue -Recurse -Filter '*.tmp').Count | Should Be 0
         Test-Path (Join-Path $jobDir 'job.claimed.json') | Should Be $true
+    }
+
+    # The run's job.json mode reaches the MCM file the game sees (Invoke-Run -> Set-McmSettingsValues).
+    $runModeCases = @(
+        @{ Mode = 'AllOff'; Doctrine = $false; Chain = $false; Naval = $false },
+        @{ Mode = 'FeatureOff'; Doctrine = $false; Chain = $true; Naval = $true })
+    foreach ($case in $runModeCases) {
+        It "completes a $($case.Mode) run and the game sees that mode's MCM values" {
+            $rig = New-Rig
+            $env:FAKEGAME_DOCS = $rig.Docs
+            $mode = $case.Mode   # GetNewClosure sees only this scope's own variables
+            $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['mode'] = $mode }.GetNewClosure()
+            (Invoke-AgentCycle -Config (Get-ConfigFor $rig)) | Should Be $true
+            (Read-Done $rig).runs[0].exitClass | Should Be 'Completed'
+            $seenMcm = Read-Utf8Text (Join-Path $rig.Docs 'fake-mcm.json') | ConvertFrom-Json
+            $seenMcm.EnableMarshalDoctrine | Should Be $case.Doctrine
+            $seenMcm.EnableChainOfCommand | Should Be $case.Chain
+            $seenMcm.EnableNavalOrders | Should Be $case.Naval
+            $seenMcm.EnableLogging | Should Be $true
+            $seenMcm.Other | Should Be 3
+        }
+    }
+    It 'classifies a run with an unknown mode as SetupError without launching' {
+        $rig = New-Rig
+        $env:FAKEGAME_DOCS = $rig.Docs
+        $null = New-TestJob $rig -Mutate { param($j) $j['runs'][0]['mode'] = 'Bogus' }
+        $null = Invoke-AgentCycle -Config (Get-ConfigFor $rig)
+        (Read-Done $rig).runs[0].exitClass | Should Be 'SetupError'
+        $run = Get-Content -Raw (Join-Path $rig.Queue 'results\20261031-120000-aaaa\r1\agent-run.json') | ConvertFrom-Json
+        $run.message | Should Match "Unknown mode 'Bogus'"
+        Test-Path (Join-Path $rig.Docs 'fake-args.txt') | Should Be $false
     }
 
     It 'turns the stale run-result.json into NotCompleted when the game writes none' {
