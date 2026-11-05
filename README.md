@@ -80,8 +80,9 @@ the agent aborted the job or the runner deadline hit.
 `-Suite CW1` is the AC25a comparison of CoherentWarAI: harness `TestRig`, only the base modules, CoherentWarAI,
 TestRig.Harness and CoherentWarAI.Scenarios (no other mod), 30 days. One job with eighteen runs r1-r18 (`kind` `scenarios`,
 scenario `coherentwarai.ac25a-digest`, hard timeout 10 minutes each): seeds 1, 2, 3, and per seed the modes `WarSails`,
-`FeatureOff`, `AllOff`, `AllOff`, `FeatureOff`, `WarSails` (this order evens out drift). `FeatureOff` switches only the
-marshal doctrine off, `AllOff` every CoherentWarAI feature (the vanilla-like reference level). The mode is fixed per run, so an explicit `-Mode`,
+`FeatureOff`, `ChainOff`, `ChainOff`, `FeatureOff`, `WarSails` (this order evens out drift). `FeatureOff` switches only the
+marshal doctrine off, `ChainOff` chain of command and naval orders (the pre-chain-of-command baseline of AC25a, doctrine only). The mode is
+fixed per run, so an explicit `-Mode`,
 `-Seed` or `-HardTimeoutMinutes` is a usage error (exit 1); `-Days` is allowed (e.g. `-Days 3` as a smoke test). Every
 run must end `Completed` with its scenario Passed. Exit code (as for `-Suite RIG`): 0 if every run meets its expectation,
 2 if one does not, 1 if the job is not completed or a run is missing, 3 if the agent aborted the job or the runner deadline

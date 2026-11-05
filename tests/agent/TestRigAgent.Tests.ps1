@@ -573,12 +573,13 @@ Describe 'Config patching' {
         Test-Utf8Bom $path | Should Be $true
     }
     # Doctrine, chain of command, naval orders, logging per mode; FeatureOff switches only the marshal doctrine off,
-    # AllOff (vanilla-like baseline) all three features, logging stays on in every mode.
+    # ChainOff (pre-chain-of-command baseline of AC25a, doctrine only) chain of command and naval orders; logging stays
+    # on in every mode.
     $mcmCases = @(
         @{ Mode = 'WarSails'; Doctrine = $true; Chain = $true; Naval = $true },
         @{ Mode = 'NoDlc'; Doctrine = $true; Chain = $true; Naval = $true },
         @{ Mode = 'FeatureOff'; Doctrine = $false; Chain = $true; Naval = $true },
-        @{ Mode = 'AllOff'; Doctrine = $false; Chain = $false; Naval = $false })
+        @{ Mode = 'ChainOff'; Doctrine = $true; Chain = $false; Naval = $false })
     foreach ($case in $mcmCases) {
         It "writes the MCM json for mode $($case.Mode)" {
             $rig = New-Rig
@@ -594,15 +595,15 @@ Describe 'Config patching' {
     It 'switching modes on the same file flips the values both ways' {
         $rig = New-Rig
         $path = Join-Path $rig.Docs 'mcm.json'
-        Set-McmSettingsValues $path 'AllOff'
-        Set-McmSettingsValues $path 'WarSails'
-        $o = Read-Utf8Text $path | ConvertFrom-Json
-        $o.EnableMarshalDoctrine | Should Be $true
-        $o.EnableChainOfCommand | Should Be $true
-        $o.EnableNavalOrders | Should Be $true
-        Set-McmSettingsValues $path 'AllOff'
+        Set-McmSettingsValues $path 'ChainOff'
+        Set-McmSettingsValues $path 'FeatureOff'
         $o = Read-Utf8Text $path | ConvertFrom-Json
         $o.EnableMarshalDoctrine | Should Be $false
+        $o.EnableChainOfCommand | Should Be $true
+        $o.EnableNavalOrders | Should Be $true
+        Set-McmSettingsValues $path 'ChainOff'
+        $o = Read-Utf8Text $path | ConvertFrom-Json
+        $o.EnableMarshalDoctrine | Should Be $true
         $o.EnableChainOfCommand | Should Be $false
         $o.EnableNavalOrders | Should Be $false
         $o.EnableLogging | Should Be $true
@@ -621,13 +622,13 @@ Describe 'Config patching: existing MCM file' {
         $o.EnableNavalOrders | Should Be $true
         $o.Other | Should Be 3
     }
-    It 'AllOff turns an existing all-true file off and keeps other keys' {
+    It 'ChainOff turns chain of command and naval orders off, the doctrine on, and keeps other keys' {
         $rig = New-Rig
         $path = Join-Path $rig.Docs 'mcm-existing.json'
-        [System.IO.File]::WriteAllText($path, '{ "EnableChainOfCommand": true, "EnableNavalOrders": true, "EnableMarshalDoctrine": true, "EnableLogging": false, "Other": 3 }', (New-Object System.Text.UTF8Encoding($false)))
-        Set-McmSettingsValues $path 'AllOff'
+        [System.IO.File]::WriteAllText($path, '{ "EnableChainOfCommand": true, "EnableNavalOrders": true, "EnableMarshalDoctrine": false, "EnableLogging": false, "Other": 3 }', (New-Object System.Text.UTF8Encoding($false)))
+        Set-McmSettingsValues $path 'ChainOff'
         $o = Read-Utf8Text $path | ConvertFrom-Json
-        $o.EnableMarshalDoctrine | Should Be $false
+        $o.EnableMarshalDoctrine | Should Be $true
         $o.EnableChainOfCommand | Should Be $false
         $o.EnableNavalOrders | Should Be $false
         $o.EnableLogging | Should Be $true
@@ -780,7 +781,7 @@ Describe 'Invoke-Job: end-to-end with a fake game' {
 
     # The run's job.json mode reaches the MCM file the game sees (Invoke-Run -> Set-McmSettingsValues).
     $runModeCases = @(
-        @{ Mode = 'AllOff'; Doctrine = $false; Chain = $false; Naval = $false },
+        @{ Mode = 'ChainOff'; Doctrine = $true; Chain = $false; Naval = $false },
         @{ Mode = 'FeatureOff'; Doctrine = $false; Chain = $true; Naval = $true })
     foreach ($case in $runModeCases) {
         It "completes a $($case.Mode) run and the game sees that mode's MCM values" {

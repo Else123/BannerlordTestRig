@@ -72,8 +72,8 @@ Describe 'Get-RigModules' {
     It 'FeatureOff includes NavalDLC' {
         (Get-RigModules -Mode FeatureOff) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
     }
-    It 'AllOff includes NavalDLC' {
-        (Get-RigModules -Mode AllOff) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
+    It 'ChainOff includes NavalDLC' {
+        (Get-RigModules -Mode ChainOff) -join ',' | Should Be (($base + 'NavalDLC' + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
     }
     It 'NoDlc omits NavalDLC' {
         (Get-RigModules -Mode NoDlc) -join ',' | Should Be (($base + 'CoherentWarAI' + 'TestRig.Harness') -join ',')
@@ -923,10 +923,10 @@ Describe 'Invoke-TestRig.ps1 -Mode parameter' {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
     $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Mode' }
 
-    It 'has ValidateSet WarSails, NoDlc, FeatureOff, AllOff' {
+    It 'has ValidateSet WarSails, NoDlc, FeatureOff, ChainOff' {
         $vs = @($param.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' })
         $vs.Count | Should Be 1
-        (@($vs[0].PositionalArguments | ForEach-Object { $_.Value }) -join ',') | Should Be 'WarSails,NoDlc,FeatureOff,AllOff'
+        (@($vs[0].PositionalArguments | ForEach-Object { $_.Value }) -join ',') | Should Be 'WarSails,NoDlc,FeatureOff,ChainOff'
     }
 }
 

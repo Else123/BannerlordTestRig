@@ -37,7 +37,7 @@
     -Suite SM, CS and AT run the scenarios of one mod (SmithingSuite, CompanionManagementSuite, AutoTraderSpeed) with only
     that mod and its scenario module: exit 0 if every scenario Passed, 2 if one Failed, 1 for a rig error.
     -Suite CW1 is the AC25a comparison of CoherentWarAI (only that mod): eighteen 30-day runs, seeds 1-3, per seed
-    WarSails, FeatureOff, AllOff, AllOff, FeatureOff, WarSails, each recording the army digest; judged per run like
+    WarSails, FeatureOff, ChainOff, ChainOff, FeatureOff, WarSails, each recording the army digest; judged per run like
     -Suite RIG (Completed expected).
     Suite checks (after the fetch, on this PC; scripts of the CoherentWarAI repo next to this repo): -Suite L1 and CW1 run
     CW-2 (tools\Check-CommandLog.ps1, row <run> <Suite>-coherentwarai.command-log) on every Completed run with that run's
@@ -65,7 +65,7 @@ param(
     [string]$PackageFrom,
     [int]$Seed = 1,
     [ValidateRange(1, [int]::MaxValue)][int]$Days = 1,
-    [ValidateSet('WarSails', 'NoDlc', 'FeatureOff', 'AllOff')][string]$Mode = 'WarSails',
+    [ValidateSet('WarSails', 'NoDlc', 'FeatureOff', 'ChainOff')][string]$Mode = 'WarSails',
     [ValidateSet('TestRig')][string]$Harness = 'TestRig',
     [string]$Suite,   # validated in the script body against $script:RigSuites (the single suite table)
     [ValidateRange(1, [int]::MaxValue)][int]$StallMinutes = 5,
@@ -95,7 +95,7 @@ $script:RigHarnessModules = [ordered]@{
 # optionally ExpectedMessagePattern: a case-sensitive regex the run's agent message (agent-run.json) must match,
 # Seed: the run's own seed (job.json runs[].seed) instead of the suite's; then an explicit -Seed is a usage error,
 # Mode: the run's own mode (job.json runs[].mode) instead of the suite's; then an explicit -Mode is a usage error, and
-# every run's mode must load the same module list as the job's (WarSails, FeatureOff and AllOff do, NoDlc does not: a usage error),
+# every run's mode must load the same module list as the job's (WarSails, FeatureOff and ChainOff do, NoDlc does not: a usage error),
 # OwnAssemblies: the DLL names written to job.json runs[].ownAssemblies (the agent passes exactly them to run.cfg),
 # ExpectedValues: @{ Path; Value } per value the run's run-result.json must hold when it is Completed (Path = dotted
 # property path, Value = a number or a boolean; see Get-RigExpectedValueChecks), and ClassificationTiming = $true: print
@@ -200,9 +200,10 @@ $script:RigSuites = @{
             @{ RunId = 'r2'; Seed = 1; Scenarios = @('crossmod.trade-with-autoequip.cancel'); HardTimeoutMinutes = 5; ExpectedExitClass = 'Completed' }
         )
     }
-    # AC25a comparison (S10, F-S10-4/7): only CoherentWarAI, 30 days. Seeds 1-3, per seed WarSails, FeatureOff, AllOff,
-    # AllOff, FeatureOff, WarSails (the mirrored order evens out drift); every run records the army digest
-    # (coherentwarai.ac25a-digest). AllOff (every feature off) is the vanilla-like reference level of the comparison.
+    # AC25a comparison (S10, F-S10-4/7): only CoherentWarAI, 30 days. Seeds 1-3, per seed WarSails, FeatureOff, ChainOff,
+    # ChainOff, FeatureOff, WarSails (the mirrored order evens out drift); every run records the army digest
+    # (coherentwarai.ac25a-digest). ChainOff (chain of command and naval orders off, the
+    # doctrine on) is the pre-chain-of-command baseline of AC25a (doctrine only).
     CW1 = @{
         Harness           = 'TestRig'
         Mode              = 'WarSails'
@@ -218,20 +219,20 @@ $script:RigSuites = @{
         Runs              = @(
             @{ RunId = 'r1'; Seed = 1; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r2'; Seed = 1; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
-            @{ RunId = 'r3'; Seed = 1; Mode = 'AllOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
-            @{ RunId = 'r4'; Seed = 1; Mode = 'AllOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r3'; Seed = 1; Mode = 'ChainOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r4'; Seed = 1; Mode = 'ChainOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r5'; Seed = 1; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r6'; Seed = 1; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r7'; Seed = 2; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r8'; Seed = 2; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
-            @{ RunId = 'r9'; Seed = 2; Mode = 'AllOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
-            @{ RunId = 'r10'; Seed = 2; Mode = 'AllOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r9'; Seed = 2; Mode = 'ChainOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r10'; Seed = 2; Mode = 'ChainOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r11'; Seed = 2; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r12'; Seed = 2; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r13'; Seed = 3; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r14'; Seed = 3; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
-            @{ RunId = 'r15'; Seed = 3; Mode = 'AllOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
-            @{ RunId = 'r16'; Seed = 3; Mode = 'AllOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r15'; Seed = 3; Mode = 'ChainOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
+            @{ RunId = 'r16'; Seed = 3; Mode = 'ChainOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r17'; Seed = 3; Mode = 'FeatureOff'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' },
             @{ RunId = 'r18'; Seed = 3; Mode = 'WarSails'; Scenarios = @('coherentwarai.ac25a-digest'); HardTimeoutMinutes = 10; ExpectedExitClass = 'Completed' }
         )
@@ -318,7 +319,7 @@ function New-RigJobId {
 
 function Get-RigModules {
     param(
-        [Parameter(Mandatory)][ValidateSet('WarSails', 'NoDlc', 'FeatureOff', 'AllOff')][string]$Mode,
+        [Parameter(Mandatory)][ValidateSet('WarSails', 'NoDlc', 'FeatureOff', 'ChainOff')][string]$Mode,
         [ValidateSet('TestRig')][string]$Harness = 'TestRig',
         [ValidateScript({ -not $_ -or $script:RigSuites.ContainsKey($_) })][string]$Suite
     )
