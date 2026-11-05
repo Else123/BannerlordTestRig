@@ -171,6 +171,8 @@ game's `Modules` folder; to build elsewhere, override `/p:BannerlordModulesPath=
 & "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe" src\TestRig.Harness\TestRig.Harness.csproj /p:Configuration=Debug /p:Platform=x64 /p:BannerlordModulesPath=<folder>\Modules
 ```
 
+When armed it also skips the TaleWorlds startup logo video (sets the private `Module._splashScreenPlayed` via reflection; logs `Startup logo skipped`, or a warning line if the field is gone after a game update).
+
 The harness writes `Alive: phase=<phase>` to `harness.log` every 10 s of real time from the main thread
 (the first one comes about 10 s after the first harness line, from the game tick). The agent measures silence on
 `Alive:` lines only, armed by the first one, so a silent log means a blocked or dead game.

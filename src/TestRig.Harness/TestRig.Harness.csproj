@@ -87,6 +87,7 @@
     <Compile Include="Logic\ExceptionStats.cs" />
     <Compile Include="Logic\IoRetry.cs" />
     <Compile Include="Logic\OwnClassificationCache.cs" />
+    <Compile Include="Logic\PrivateField.cs" />
     <Compile Include="Logic\RunResult.cs" />
     <Compile Include="Logic\RunResultWriter.cs" />
     <Compile Include="Logic\Scenario.cs" />

@@ -131,6 +131,35 @@ namespace TestRig.Harness
             }
         }
 
+        // Test runs skip the TaleWorlds logo video: Module.SetInitialModuleScreenAsRootScreen plays it
+        // unless the private Module._splashScreenPlayed is already true (verified in v1.4.8), and it
+        // calls this hook on every submodule right before. Inert without run.cfg like the rest.
+        protected override void OnBeforeInitialModuleScreenSetAsRoot()
+        {
+            base.OnBeforeInitialModuleScreenSetAsRoot();
+
+            try
+            {
+                if (_config == null)
+                {
+                    return;
+                }
+
+                if (PrivateField.TrySetBool(TaleWorlds.MountAndBlade.Module.CurrentModule, "_splashScreenPlayed", true))
+                {
+                    Log("Startup logo skipped");
+                }
+                else
+                {
+                    Log("Warning: startup logo not skipped (Module._splashScreenPlayed missing or not a bool)");
+                }
+            }
+            catch (Exception e)
+            {
+                LogError("OnBeforeInitialModuleScreenSetAsRoot", e);
+            }
+        }
+
         public override void OnInitialState()
         {
             base.OnInitialState();
